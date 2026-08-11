@@ -7,6 +7,17 @@ import { describe, expect, it } from "vitest";
 import { prepareReviewContext, ReviewPreparationError } from "../../src/reviews/packet-builder.js";
 
 describe("deterministic review packet builder", () => {
+  it("fails closed when durable provenance archiving is explicitly disabled", async () => {
+    await expect(prepareReviewContext({
+      repositoryRoot: ".",
+      baseRef: "HEAD",
+      output: { archive: false }
+    })).rejects.toMatchObject({
+      name: "ReviewPreparationError",
+      code: "archive_required"
+    });
+  });
+
   it("captures provenance, changed source, instructions, validation, partitions, and hashes", async () => {
     const repo = await fixtureRepository();
     await writeFile(join(repo, "AGENTS.md"), "# Repository rules\n");

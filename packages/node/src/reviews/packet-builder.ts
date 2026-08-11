@@ -54,6 +54,12 @@ type GitResult = { stdout: string; stderr: string; code: number };
 type Section = { title: string; body: string; files: string[] };
 
 export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Date()): Promise<PreparedReviewContext> {
+  if (args.output?.archive === false) {
+    throw new ReviewPreparationError(
+      "A Pro review requires a durable provenance archive; output.archive cannot be false.",
+      "archive_required"
+    );
+  }
   const repositoryRoot = await resolveRepositoryRoot(args.repositoryRoot);
   const baseRef = requireNonEmpty(args.baseRef, "baseRef");
   const headRef = requireNonEmpty(args.headRef ?? "HEAD", "headRef");

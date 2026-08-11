@@ -67,7 +67,7 @@ export type ReviewWorkflowPort = {
   submit(text: string, previousTurnCount: number | undefined): Promise<CommandResult<SubmitData>>;
   waitMetadata(afterAssistantTurnCount: number, timeoutMs: number, stableMs: number, pollMs: number): Promise<CommandResult<WaitData>>;
   readFullMarkdown(): Promise<CommandResult<ReadLatestData>>;
-  downloadFile(destDir: string, filename: string, assistantIndex: number): Promise<CommandResult<DownloadedFile>>;
+  downloadFile(destDir: string, filename: string, assistantIndex: number, occurrenceIndex: number): Promise<CommandResult<DownloadedFile>>;
   downloadImage(destDir: string, index: number, turnId?: string): Promise<CommandResult<DownloadedFile>>;
 };
 
@@ -264,8 +264,8 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
             let metadata: { kind?: string; sourceLabel?: string; sourceReference?: string };
             if (item.kind === "file") {
               desiredName = sanitizeArtifactFilename(item.filename, "generated-file");
-              downloaded = await port.downloadFile(staging, item.filename, item.assistantIndex);
-              metadata = { kind: "file", sourceLabel: item.filename, sourceReference: `assistant:${item.assistantIndex}` };
+              downloaded = await port.downloadFile(staging, item.filename, item.assistantIndex, item.occurrenceIndex);
+              metadata = { kind: "file", sourceLabel: item.filename, sourceReference: `assistant:${item.assistantIndex}:occurrence:${item.occurrenceIndex}` };
             } else {
               desiredName = `generated-image-${String(item.artifact.index + 1).padStart(3, "0")}.png`;
               downloaded = await port.downloadImage(staging, item.artifact.index, item.artifact.turnId);
@@ -454,9 +454,10 @@ export function defaultReviewWorkflowPort(env: RuntimeEnv): ReviewWorkflowPort {
       responseContent: "metadata"
     }),
     readFullMarkdown: () => readLatest(env, { role: "assistant", format: "markdown" }),
-    downloadFile: (destDir, filename, assistantIndex) => downloadLatestFile(env, {
+    downloadFile: (destDir, filename, assistantIndex, occurrenceIndex) => downloadLatestFile(env, {
       destDir,
       filenamePattern: `^${escapeRegExp(filename)}$`,
+      occurrenceIndex,
       from: { assistantIndex }
     }),
     downloadImage: (destDir, index, turnId) => downloadLatestArtifact(env, {
