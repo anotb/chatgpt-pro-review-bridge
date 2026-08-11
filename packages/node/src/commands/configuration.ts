@@ -13,10 +13,14 @@ import type {
   ConfigurationInspectionData,
   ConfigurationOption,
   ConfigurationSelection,
+  ConfigurationSnapshotData,
   InspectConfigurationArgs,
   LocatorLike,
   PageLike,
   RuntimeEnv,
+  RestoreConfigurationArgs,
+  RestoreConfigurationData,
+  SnapshotConfigurationArgs,
   SurfaceSelectorProfile
 } from "../types.js";
 import { contextFromPage } from "./context.js";
@@ -272,6 +276,104 @@ export async function applyConfiguration(
     }), warnings);
   } catch (error) {
     return resultError(error instanceof Error ? error : new Error(String(error)), await contextFromPage(page));
+  }
+}
+
+export async function snapshotConfiguration(
+  env: RuntimeEnv,
+  args: SnapshotConfigurationArgs = {}
+): Promise<CommandResult<ConfigurationSnapshotData>> {
+  const inspected = await inspectConfiguration(env, {
+    ...args,
+    includeOptions: false
+  });
+  if (!inspected.ok || inspected.data === undefined) {
+    return forwardFailure(inspected);
+  }
+  const inspection = inspected.data;
+  const selection = configurationSelectionFromInspection(inspection);
+  if (inspection.experience === "unknown" || !inspection.verified || selectionEntries(selection).length === 0) {
+    return {
+      ok: false,
+      status: "blocked",
+      warnings: inspected.warnings,
+      blocker: {
+        kind: "selector_drift",
+        code: "configuration_snapshot_unverified",
+        fieldPath: "configuration",
+        message: "The visible ChatGPT configuration could not be represented as a restorable snapshot.",
+        candidates: Object.entries(inspection.active).map(([axis, label]) => ({ label: `${axis}: ${label}` })),
+        resumable: false
+      },
+      context: inspected.context
+    };
+  }
+
+  return resultOk({
+    capturedAt: inspected.context.timestamp,
+    experience: inspection.experience,
+    selectorProfile: inspection.selectorProfile,
+    selection,
+    inspection
+  }, inspected.context, inspected.warnings);
+}
+
+export async function restoreConfiguration(
+  env: RuntimeEnv,
+  args: RestoreConfigurationArgs
+): Promise<CommandResult<RestoreConfigurationData>> {
+  const boot = await ensurePage(env);
+  if (!boot.ok) {
+    return boot as CommandResult<RestoreConfigurationData>;
+  }
+  const page = env.page!;
+  const base: RestoreConfigurationData = {
+    snapshot: args.snapshot,
+    restored: false
+  };
+
+  try {
+    const applied = await applyConfiguration(env, {
+      experience: args.snapshot.experience,
+      desired: args.snapshot.selection,
+      strict: args.strict ?? true,
+      ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs })
+    });
+    if (!applied.ok || applied.data === undefined) {
+      return configurationRestoreFailure(
+        page,
+        base,
+        applied,
+        "configuration_restore_apply_failed",
+        `The previous visible ChatGPT configuration could not be reapplied: ${applied.blocker?.message ?? applied.error?.message ?? applied.status}.`
+      );
+    }
+
+    const data: RestoreConfigurationData = {
+      ...base,
+      applied: applied.data,
+      after: applied.data.after,
+      restored: applied.data.verified
+        && configurationMatchesSelection(applied.data.after, args.snapshot.selection)
+    };
+    if (!data.restored) {
+      return configurationRestoreFailure(
+        page,
+        data,
+        applied,
+        "configuration_restore_postcondition_unverified",
+        "The prior visible ChatGPT configuration was selected, but the restored state could not be strictly verified."
+      );
+    }
+    return resultOk(data, applied.context, applied.warnings);
+  } catch (error) {
+    return configurationRestoreFailure(
+      page,
+      base,
+      undefined,
+      "configuration_restore_error",
+      error instanceof Error ? error.message : String(error)
+    );
   }
 }
 
@@ -832,6 +934,19 @@ export function configurationMatchesSelection(
   });
 }
 
+export function configurationSelectionFromInspection(
+  inspection: ConfigurationInspectionData
+): ConfigurationSelection {
+  const selection: ConfigurationSelection = {};
+  for (const axis of CONFIGURATION_AXIS_ORDER) {
+    const value = inspection.active[axis];
+    if (value !== undefined && value.trim().length > 0) {
+      selection[axis] = value.trim();
+    }
+  }
+  return selection;
+}
+
 function activeConfigurationValue(
   inspection: ConfigurationInspectionData,
   axis: ConfigurationAxis
@@ -1009,6 +1124,37 @@ async function configurationFailure(
     context: await contextFromPage(page, {
       experience: before.experience,
       selectorProfile: before.selectorProfile
+    })
+  };
+}
+
+async function configurationRestoreFailure(
+  page: PageLike,
+  data: RestoreConfigurationData,
+  source: CommandResult<unknown> | undefined,
+  code: string,
+  message: string
+): Promise<CommandResult<RestoreConfigurationData>> {
+  const after = data.after ?? data.applied?.after;
+  const candidates = after === undefined
+    ? source?.blocker?.candidates
+    : Object.entries(after.active).map(([axis, label]) => ({ label: `${axis}: ${label}` }));
+  return {
+    ok: false,
+    status: "blocked",
+    data,
+    warnings: source?.warnings ?? [],
+    blocker: {
+      kind: "configuration_restore_failed",
+      code,
+      fieldPath: "snapshot.selection",
+      message,
+      ...(candidates === undefined ? {} : { candidates }),
+      resumable: false
+    },
+    context: await contextFromPage(page, after === undefined ? {} : {
+      experience: after.experience,
+      selectorProfile: after.selectorProfile
     })
   };
 }

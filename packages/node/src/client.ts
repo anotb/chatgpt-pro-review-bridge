@@ -10,6 +10,7 @@ import type {
   CommandResult,
   ConfigurationInspectionData,
   ConfigurationSelection,
+  ConfigurationSnapshotData,
   CopyResponseArgs,
   DetectExperienceArgs,
   DetectExperienceData,
@@ -20,6 +21,9 @@ import type {
   GetModeArgs,
   GetModeData,
   InspectConfigurationArgs,
+  RestoreConfigurationArgs,
+  RestoreConfigurationData,
+  SnapshotConfigurationArgs,
   ListArtifactsArgs,
   MessageStatusArgs,
   NewThreadArgs,
@@ -57,7 +61,12 @@ import { addProjectSources, buildProjectSourceAddPlan, listProjectSources } from
 import { doctor, type DoctorArgs, type DoctorReport } from "./commands/doctor.js";
 import { askMessage, composeMessage, messageStatus, readLatest, submitMessage, waitAndRead, waitForMessage } from "./commands/messages.js";
 import { getMode, selectTool, setMode } from "./commands/modes.js";
-import { applyConfiguration, inspectConfiguration } from "./commands/configuration.js";
+import {
+  applyConfiguration,
+  inspectConfiguration,
+  restoreConfiguration,
+  snapshotConfiguration
+} from "./commands/configuration.js";
 import { detectExperience, openExperience } from "./commands/experience.js";
 import { createRunReport, type RunReportData, type RunReportOptions } from "./commands/reports.js";
 import { copyResponse } from "./commands/response-actions.js";
@@ -220,6 +229,8 @@ export type ChatGPTClient = {
   configuration: {
     inspect(args?: InspectConfigurationArgs): Promise<CommandResult<ConfigurationInspectionData>>;
     apply(args: ApplyConfigurationArgs): Promise<CommandResult<ApplyConfigurationData>>;
+    snapshot(args?: SnapshotConfigurationArgs): Promise<CommandResult<ConfigurationSnapshotData>>;
+    restore(args: RestoreConfigurationArgs): Promise<CommandResult<RestoreConfigurationData>>;
   };
   work: {
     start(args: StartWorkArgs): Promise<CommandResult<StartWorkData>>;
@@ -321,7 +332,9 @@ export function createChatGPT(options: ChatGPTClientOptions = {}): ChatGPTClient
     },
     configuration: {
       inspect: args => inspectConfiguration(env, args),
-      apply: args => applyConfiguration(env, args)
+      apply: args => applyConfiguration(env, args),
+      snapshot: args => snapshotConfiguration(env, args),
+      restore: args => restoreConfiguration(env, args)
     },
     work: {
       start: args => startWork(env, args),

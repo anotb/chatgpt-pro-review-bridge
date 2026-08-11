@@ -6,6 +6,8 @@ import {
   configurationMatchesSelection,
   configurationInspectionFromSurface,
   inspectConfiguration,
+  restoreConfiguration,
+  snapshotConfiguration,
   type ConfigurationPanelSnapshot
 } from "../../src/commands/configuration.js";
 import {
@@ -347,6 +349,64 @@ describe("sanitized Chat and Work surface profiles", () => {
       "effort",
       "speed"
     ]);
+  });
+
+  it("snapshots, mutates, and restores every visible Work configuration axis", async () => {
+    const page = configurableWorkPage();
+    const snapshot = await snapshotConfiguration({ page }, {
+      experience: "work",
+      timeoutMs: 100
+    });
+
+    expect(snapshot.ok).toBe(true);
+    expect(snapshot.data?.selection).toEqual({
+      model: "GPT-5.6 Sol",
+      effort: "Light",
+      speed: "Standard"
+    });
+
+    const mutated = await applyConfiguration({ page }, {
+      experience: "work",
+      desired: { model: "GPT-5.6 Terra", effort: "High", speed: "Fast" },
+      timeoutMs: 100
+    });
+    expect(mutated.ok).toBe(true);
+
+    const restored = await restoreConfiguration({ page }, {
+      snapshot: snapshot.data!,
+      timeoutMs: 100
+    });
+    expect(restored.ok).toBe(true);
+    expect(restored.data?.restored).toBe(true);
+    expect(restored.data?.after?.active).toEqual({
+      model: "GPT-5.6 Sol",
+      effort: "Light",
+      speed: "Standard"
+    });
+  });
+
+  it("returns a dedicated blocker when configuration restoration cannot be applied", async () => {
+    const page = configurableWorkPage();
+    const snapshot = await snapshotConfiguration({ page }, {
+      experience: "work",
+      timeoutMs: 100
+    });
+
+    const restored = await restoreConfiguration({ page }, {
+      snapshot: {
+        ...snapshot.data!,
+        selection: { effort: "Unavailable effort" }
+      },
+      timeoutMs: 100
+    });
+
+    expect(restored.ok).toBe(false);
+    expect(restored.data?.restored).toBe(false);
+    expect(restored.blocker).toMatchObject({
+      kind: "configuration_restore_failed",
+      code: "configuration_restore_apply_failed",
+      resumable: false
+    });
   });
 
   it("excludes parent-menu actions from Work axis options", async () => {

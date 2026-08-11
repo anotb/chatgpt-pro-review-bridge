@@ -155,6 +155,11 @@ await chatgpt.configuration.apply({
   },
   strict: true
 });
+
+const snapshot = await chatgpt.configuration.snapshot({ experience: "chat" });
+if (snapshot.ok && snapshot.data) {
+  await chatgpt.configuration.restore({ snapshot: snapshot.data });
+}
 ```
 
 Do not assume the currently selected ChatGPT pane matches the requested

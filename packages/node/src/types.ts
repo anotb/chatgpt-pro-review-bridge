@@ -801,6 +801,29 @@ export type ApplyConfigurationData = {
   verified: boolean;
 };
 
+export type SnapshotConfigurationArgs = Omit<InspectConfigurationArgs, "includeOptions">;
+
+export type ConfigurationSnapshotData = {
+  capturedAt: string;
+  experience: Exclude<ChatGPTExperience, "unknown">;
+  selectorProfile: SurfaceSelectorProfile;
+  selection: ConfigurationSelection;
+  inspection: ConfigurationInspectionData;
+};
+
+export type RestoreConfigurationArgs = {
+  snapshot: ConfigurationSnapshotData;
+  strict?: boolean;
+  timeoutMs?: number;
+};
+
+export type RestoreConfigurationData = {
+  snapshot: ConfigurationSnapshotData;
+  restored: boolean;
+  applied?: ApplyConfigurationData;
+  after?: ConfigurationInspectionData;
+};
+
 export type WorkTaskRef = {
   url?: string;
   conversationId?: string;
