@@ -19,6 +19,7 @@ export * from "./commands/session.js";
 export * from "./commands/threads.js";
 export * from "./commands/messages.js";
 export * from "./commands/artifacts.js";
+export * from "./commands/artifact-inventory.js";
 export * from "./commands/sequence.js";
 export * from "./commands/files.js";
 export * from "./commands/project-sources.js";

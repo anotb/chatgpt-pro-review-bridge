@@ -27,6 +27,7 @@ import type {
   FileChooserLike,
   FilePreflightArgs,
   FilePreflightData,
+  GeneratedFileAffordance,
   FilePreflightFile,
   LocatorLike,
   PageLike,
@@ -717,12 +718,6 @@ export async function downloadLatestFile(
   }
 }
 
-type GeneratedFileAffordance = {
-  assistantIndex: number;
-  filename: string;
-  tag: "button" | "a";
-};
-
 async function tryGeneratedFilePreviewDownload(
   page: RuntimeEnv["page"] & {},
   args: DownloadLatestArgs
@@ -787,7 +782,7 @@ async function tryGeneratedFilePreviewDownload(
   }
 }
 
-async function inspectGeneratedFileAffordances(
+export async function inspectGeneratedFileAffordances(
   page: RuntimeEnv["page"] & {},
   timeoutMs: number
 ): Promise<GeneratedFileAffordance[]> {

@@ -53,6 +53,16 @@ if (snapshot.ok && snapshot.data) {
 
 Start a fresh Work task once, then poll or steer it:
 
+Artifact-aware workflows can snapshot visible generated images and file affordances before submission, then attribute only newly added artifacts afterward:
+
+```ts
+const before = await chatgpt.artifacts.captureBaseline();
+// Submit and wait without resubmitting the prompt.
+const delta = before.data
+  ? await chatgpt.artifacts.captureDelta({ baseline: before.data })
+  : undefined;
+```
+
 ```ts
 await chatgpt.work.start({
   prompt: "Produce a decision-ready implementation brief.",

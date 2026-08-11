@@ -568,6 +568,36 @@ export type GeneratedArtifact = {
   selectorProvenance: string;
 };
 
+export type GeneratedFileAffordance = {
+  assistantIndex: number;
+  filename: string;
+  tag: "button" | "a";
+};
+
+export type ArtifactInventoryItem =
+  | { key: string; kind: "image"; artifact: GeneratedArtifact }
+  | ({ key: string; kind: "file"; downloadAvailable: true } & GeneratedFileAffordance);
+
+export type ArtifactInventoryArgs = {
+  timeoutMs?: number;
+  maxImages?: number;
+};
+
+export type ArtifactInventoryData = {
+  capturedAt: string;
+  items: ArtifactInventoryItem[];
+};
+
+export type ArtifactDeltaArgs = ArtifactInventoryArgs & {
+  baseline: ArtifactInventoryData;
+};
+
+export type ArtifactDeltaData = {
+  baseline: ArtifactInventoryData;
+  current: ArtifactInventoryData;
+  added: ArtifactInventoryItem[];
+};
+
 export type ListArtifactsArgs = {
   kind?: ArtifactKind;
   max?: number;

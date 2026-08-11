@@ -208,6 +208,8 @@ If you run browser-required commands from an ordinary shell, the safe expected r
 Download an image-only generation through the artifact primitives:
 
 ```ts
+const before = await chatgpt.artifacts.captureBaseline();
+
 await chatgpt.artifacts.wait({
   kind: "image",
   requireDownload: true
@@ -216,6 +218,10 @@ await chatgpt.artifacts.wait({
 const downloaded = await chatgpt.artifacts.downloadLatest({
   destDir: "/absolute/output/dir"
 });
+
+const delta = before.data
+  ? await chatgpt.artifacts.captureDelta({ baseline: before.data })
+  : undefined;
 ```
 
 Generated images are artifacts, not assistant text. `messages.readLatest()` can

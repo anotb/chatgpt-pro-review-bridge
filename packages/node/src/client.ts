@@ -1,6 +1,10 @@
 import type {
   AskArgs,
   ArtifactDownloadArgs,
+  ArtifactDeltaArgs,
+  ArtifactDeltaData,
+  ArtifactInventoryArgs,
+  ArtifactInventoryData,
   ArtifactWaitArgs,
   ApplyConfigurationData,
   ApplyConfigurationArgs,
@@ -56,6 +60,7 @@ import type {
   WorkWaitData
 } from "./types.js";
 import { downloadLatestArtifact, listLatestArtifacts, waitForArtifact } from "./commands/artifacts.js";
+import { captureArtifactBaseline, captureArtifactDelta } from "./commands/artifact-inventory.js";
 import { attachFiles, downloadLatestFile, preflightFiles } from "./commands/files.js";
 import { addProjectSources, buildProjectSourceAddPlan, listProjectSources } from "./commands/project-sources.js";
 import { doctor, type DoctorArgs, type DoctorReport } from "./commands/doctor.js";
@@ -205,6 +210,8 @@ export type ChatGPTClient = {
     listLatest(args?: ListArtifactsArgs): Promise<CommandResult<unknown>>;
     wait(args?: ArtifactWaitArgs): Promise<CommandResult<unknown>>;
     downloadLatest(args: ArtifactDownloadArgs): Promise<CommandResult<unknown>>;
+    captureBaseline(args?: ArtifactInventoryArgs): Promise<CommandResult<ArtifactInventoryData>>;
+    captureDelta(args: ArtifactDeltaArgs): Promise<CommandResult<ArtifactDeltaData>>;
   };
   runPlan(plan: SequencePlan | NamedWorkflowInvocation): Promise<CommandResult<unknown>>;
   doctor(args?: DoctorArgs): Promise<CommandResult<DoctorReport>>;
@@ -377,7 +384,9 @@ export function createChatGPT(options: ChatGPTClientOptions = {}): ChatGPTClient
     artifacts: {
       listLatest: args => listLatestArtifacts(env, args),
       wait: args => waitForArtifact(env, args),
-      downloadLatest: args => downloadLatestArtifact(env, args)
+      downloadLatest: args => downloadLatestArtifact(env, args),
+      captureBaseline: args => captureArtifactBaseline(env, args),
+      captureDelta: args => captureArtifactDelta(env, args)
     },
     modes: {
       set: args => setMode(env, args),
