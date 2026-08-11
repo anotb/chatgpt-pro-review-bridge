@@ -88,6 +88,79 @@ describe("Pro review state machine", () => {
     expect(JSON.parse(await readFile(join(result.archiveDirectory!, "artifacts", "manifest.json"), "utf8"))).toHaveLength(2);
   });
 
+  it("checkpoints each artifact and resumes partial or completed downloads without duplicates", async () => {
+    const repo = await fixtureRepository();
+    const delta = {
+      baseline,
+      current: { capturedAt: "after", items: [] },
+      added: [
+        { key: "first-key", kind: "file" as const, assistantIndex: 0, filename: "first.csv", tag: "button" as const, occurrenceIndex: 0, downloadAvailable: true as const },
+        { key: "second-key", kind: "file" as const, assistantIndex: 0, filename: "second.csv", tag: "button" as const, occurrenceIndex: 1, downloadAvailable: true as const }
+      ]
+    };
+    const firstAttempts: string[] = [];
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      output: { downloadArtifacts: "all" }
+    }, makePort([], {
+      artifactDelta: async () => success(delta),
+      downloadFile: async (destDir: string, filename: string) => {
+        firstAttempts.push(filename);
+        if (filename === "second.csv") {
+          return {
+            ok: false,
+            status: "error",
+            warnings: [],
+            error: { name: "DownloadError", message: "simulated second artifact failure", recoverable: true },
+            context: context()
+          };
+        }
+        return downloaded(destDir, filename, filename);
+      }
+    }));
+
+    expect(first.status).toBe("failed");
+    expect(firstAttempts).toEqual(["first.csv", "second.csv"]);
+    const partialCheckpoint = JSON.parse(await readFile(join(first.archiveDirectory!, "artifacts", "download-checkpoint.json"), "utf8"));
+    expect(partialCheckpoint.artifacts).toEqual([
+      expect.objectContaining({ name: "first.csv", inventoryKey: "first-key" })
+    ]);
+
+    const resumeAttempts: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      output: { downloadArtifacts: "all" },
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort([], {
+      artifactDelta: async () => success(delta),
+      downloadFile: async (destDir: string, filename: string) => {
+        resumeAttempts.push(filename);
+        return downloaded(destDir, filename, filename);
+      }
+    }));
+
+    expect(resumed.status).toBe("completed");
+    expect(resumeAttempts).toEqual(["second.csv"]);
+    expect(resumed.artifacts.map(artifact => artifact.name)).toEqual(["first.csv", "second.csv"]);
+    expect(JSON.parse(await readFile(join(first.archiveDirectory!, "artifacts", "manifest.json"), "utf8"))).toHaveLength(2);
+
+    const completedCalls: string[] = [];
+    const resumedAgain = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      output: { downloadArtifacts: "all" },
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(completedCalls, {
+      artifactDelta: async () => success(delta)
+    }));
+
+    expect(resumedAgain.status).toBe("completed");
+    expect(resumedAgain.artifacts.map(artifact => artifact.name)).toEqual(["first.csv", "second.csv"]);
+    expect(completedCalls).not.toContain("downloadFile");
+  });
+
   it("returns resumable in_progress evidence after a possible submission and never reads or resubmits", async () => {
     const repo = await fixtureRepository();
     const calls: string[] = [];
@@ -111,7 +184,7 @@ describe("Pro review state machine", () => {
     });
     expect(calls.filter(call => call === "submit")).toHaveLength(1);
     expect(calls).not.toContain("readFullMarkdown");
-    expect(calls).toContain("restoreConfiguration");
+    expect(calls).not.toContain("restoreConfiguration");
   });
 
   it("fails closed when Pro drifts after completion while preserving the raw response archive", async () => {
@@ -146,10 +219,7 @@ describe("Pro review state machine", () => {
       repositoryRoot: repo,
       baseRef: "HEAD",
       resume: {
-        threadUrl: first.thread!.url!,
-        submitted: true,
-        archiveDirectory: first.archiveDirectory!,
-        artifactBaseline: baseline
+        archiveDirectory: first.archiveDirectory!
       }
     }, makePort(resumeCalls));
 
@@ -160,6 +230,32 @@ describe("Pro review state machine", () => {
     expect(resumeCalls).not.toContain("compose");
     expect(resumeCalls).not.toContain("submit");
     expect(resumeCalls.filter(call => call === "readFullMarkdown")).toHaveLength(1);
+  });
+
+  it("rejects a caller-supplied conversation id that disagrees with the archived receipt", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+
+    const calls: string[] = [];
+    const result = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: {
+        archiveDirectory: first.archiveDirectory!,
+        conversationId: "different-thread"
+      }
+    }, makePort(calls));
+
+    expect(result.status).toBe("blocked");
+    expect(result.blocker?.code).toBe("resume_thread_mismatch");
+    expect(calls).not.toContain("bootstrap");
+    expect(calls).not.toContain("submit");
   });
 
   it("returns an explicit index while preserving the complete archived response", async () => {
@@ -209,7 +305,11 @@ function makePort(calls: string[], overrides: Partial<ReviewWorkflowPort> = {}):
     bootstrap: record("bootstrap", async () => success({})),
     openChat: record("openChat", async () => success({})),
     newThread: record("newThread", async () => success({ url: "https://chatgpt.com/", title: "New chat" })),
-    openThread: record("openThread", async url => success({ url, conversationId: "review-thread" })),
+    openThread: record("openThread", async target => success({
+      url: target.url ?? `https://chatgpt.com/c/${target.conversationId}`,
+      conversationId: target.conversationId ?? "review-thread"
+    })),
+    recoverThread: record("recoverThread", async () => success({ url: "https://chatgpt.com/c/review-thread", conversationId: "review-thread" })),
     snapshotConfiguration: record("snapshotConfiguration", async () => success(snapshot)),
     applyPro: record("applyPro", async () => success({ requested: { intelligence: "Pro" }, selected: [{ axis: "intelligence", requested: "Pro", selected: "Pro" }], before: beforeInspection, after: proInspection, verified: true })),
     inspectConfiguration: record("inspectConfiguration", async () => success(proInspection)),

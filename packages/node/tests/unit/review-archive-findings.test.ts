@@ -6,7 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   collisionSafeFilename,
   preserveDownloadedArtifact,
-  sanitizeArtifactFilename
+  sanitizeArtifactFilename,
+  writeImmutableFile
 } from "../../src/reviews/archive.js";
 import { parseFindingsAppendix } from "../../src/reviews/findings.js";
 
@@ -25,6 +26,28 @@ describe("review archive helpers", () => {
     expect(saved.path).toBe(join(archive, "artifacts", "result.csv"));
     expect(saved.sha256).toMatch(/^[a-f0-9]{64}$/);
     await expect(readFile(saved.path, "utf8")).resolves.toBe("artifact body");
+
+    const sameSource = join(archive, "same-source");
+    await writeFile(sameSource, "artifact body");
+    await expect(preserveDownloadedArtifact(sameSource, archive, "result.csv", new Set())).resolves.toMatchObject({
+      path: saved.path,
+      sha256: saved.sha256
+    });
+
+    const changedSource = join(archive, "changed-source");
+    await writeFile(changedSource, "different body");
+    await expect(preserveDownloadedArtifact(changedSource, archive, "result.csv", new Set()))
+      .rejects.toThrow("different content");
+  });
+
+  it("treats identical immutable writes as idempotent and rejects changed content", async () => {
+    const archive = await mkdtemp(join(tmpdir(), "chatgpt-pro-review-immutable-"));
+    const target = join(archive, "receipt.json");
+
+    await writeImmutableFile(target, "same\n");
+    await expect(writeImmutableFile(target, "same\n")).resolves.toBeUndefined();
+    await expect(writeImmutableFile(target, "changed\n")).rejects.toThrow("immutable archive file");
+    await expect(readFile(target, "utf8")).resolves.toBe("same\n");
   });
 
   it("parses a valid appendix while leaving raw Markdown authoritative on parse failure", () => {

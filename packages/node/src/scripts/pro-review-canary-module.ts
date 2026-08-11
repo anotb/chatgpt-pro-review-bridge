@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -29,7 +29,8 @@ export type ProReviewCanaryResult = {
   review: ProCodeReviewResult;
   resume?: ProReviewCanaryResume;
   checks: {
-    fullResponseToken: boolean;
+    fullResponseCaptured: boolean;
+    fullResponseArchiveMatch: boolean;
     exactlyOneVisibleUserPrompt: boolean;
     proVerifiedBefore: boolean;
     proVerifiedAfter: boolean;
@@ -52,18 +53,18 @@ export async function runProReviewCanaryStep(
   }
   const reportDir = resolve(options.reportDir ?? join(process.cwd(), "reports", "pro-review-canary"));
   await mkdir(reportDir, { recursive: true });
-  const state = options.resume ?? await createFixture(reportDir, options.requireArtifact ?? true);
+  const state = options.resume ?? await createFixture(reportDir, options.requireArtifact ?? false);
   const chatgpt = createChatGPT({ agent: runtime.agent, ...(runtime.browser === undefined ? {} : { browser: runtime.browser }) });
   const artifactInstruction = state.requireArtifact
-    ? `Also create a downloadable CSV named review-canary-${state.token}.csv with one header named token and one row containing exactly ${state.token}.`
-    : "Do not create an artifact for this canary.";
+    ? `Also provide the findings as a downloadable Markdown file named review-canary-${state.token}.md and include the evidence reference ${state.token} in that file.`
+    : "";
   const common = {
     repositoryRoot: state.repositoryRoot,
     baseRef: "HEAD",
     headRef: "HEAD",
     request: {
       focus: ["correctness", "tests"],
-      additionalInstructions: `Start the response with the exact line CANARY_OK:${state.token}. ${artifactInstruction}`
+      ...(artifactInstruction.length === 0 ? {} : { additionalInstructions: artifactInstruction })
     },
     output: {
       mode: "full" as const,
@@ -80,8 +81,6 @@ export async function runProReviewCanaryStep(
     : await chatgpt.reviews.codeReview({
         ...common,
         resume: {
-          threadUrl: state.threadUrl,
-          submitted: true,
           archiveDirectory: state.archiveDirectory
         }
       });
@@ -91,10 +90,12 @@ export async function runProReviewCanaryStep(
   // controlled thread, after the response reaches a terminal state.
   const promptCount = review.status === "in_progress" || review.thread?.url === undefined
     ? 0
-    : await countVisibleUserPrompts(runtime.browser, review.thread.url, state.token);
+    : await countVisibleUserPrompts(runtime.browser, review.thread.url);
   const artifactToken = await artifactContainsToken(review, state.token);
+  const archiveMatch = await fullResponseMatchesArchive(review);
   const checks = {
-    fullResponseToken: review.responseMarkdown?.includes(`CANARY_OK:${state.token}`) === true,
+    fullResponseCaptured: (review.responseMarkdown?.length ?? 0) > 0,
+    fullResponseArchiveMatch: archiveMatch,
     exactlyOneVisibleUserPrompt: promptCount === 1,
     proVerifiedBefore: review.configuration.verifiedBeforeSubmit,
     proVerifiedAfter: review.configuration.verifiedAfterCompletion,
@@ -142,7 +143,7 @@ async function createFixture(reportDir: string, requireArtifact: boolean): Promi
   return { repositoryRoot, token, archiveDirectory: "", threadUrl: "", requireArtifact };
 }
 
-async function countVisibleUserPrompts(browser: BrowserLike | undefined, threadUrl: string, token: string): Promise<number> {
+async function countVisibleUserPrompts(browser: BrowserLike | undefined, threadUrl: string): Promise<number> {
   const controlledTabs = await browser?.tabs?.list?.();
   const controlledMatches: PageLike[] = [];
   for (const tab of Array.isArray(controlledTabs) ? controlledTabs : []) {
@@ -151,20 +152,29 @@ async function countVisibleUserPrompts(browser: BrowserLike | undefined, threadU
     }
   }
   if (controlledMatches.length === 1) {
-    return countTokenPrompts(controlledMatches[0]!, token);
+    return countUserPrompts(controlledMatches[0]!);
   }
 
   const openTabs = await browser?.user?.openTabs?.();
   const candidates = Array.isArray(openTabs) ? openTabs.filter(tab => tab.url === threadUrl) : [];
   if (candidates.length !== 1 || browser?.user?.claimTab === undefined) return 0;
   const page = await browser.user.claimTab(candidates[0]!);
-  return countTokenPrompts(page, token);
+  return countUserPrompts(page);
 }
 
-async function countTokenPrompts(page: PageLike, token: string): Promise<number> {
+async function countUserPrompts(page: PageLike): Promise<number> {
   if (typeof page.evaluate !== "function") return 0;
-  return page.evaluate((wanted: string) => Array.from(document.querySelectorAll("[data-message-author-role='user']"))
-    .filter(node => ((node as HTMLElement).innerText ?? node.textContent ?? "").includes(wanted)).length, token);
+  return page.evaluate(() => document.querySelectorAll("[data-message-author-role='user']").length);
+}
+
+async function fullResponseMatchesArchive(review: ProCodeReviewResult): Promise<boolean> {
+  if (review.responseMarkdown === undefined || review.archiveDirectory === undefined) return false;
+  const archived = await readFile(join(review.archiveDirectory, "response.md")).catch(() => undefined);
+  if (archived === undefined) return false;
+  const returned = Buffer.from(review.responseMarkdown, "utf8");
+  const returnedHash = createHash("sha256").update(returned).digest("hex");
+  const archivedHash = createHash("sha256").update(archived).digest("hex");
+  return archived.equals(returned) && returnedHash === archivedHash && returnedHash === review.provenance.responseSha256;
 }
 
 async function artifactContainsToken(review: ProCodeReviewResult, token: string): Promise<boolean> {
@@ -180,7 +190,7 @@ function reviewReceipt(review: ProCodeReviewResult): unknown {
     ...review,
     responseMarkdown: review.responseMarkdown === undefined
       ? undefined
-      : { bytes: Buffer.byteLength(review.responseMarkdown), containsCanaryMarker: /CANARY_OK:/.test(review.responseMarkdown) }
+      : { bytes: Buffer.byteLength(review.responseMarkdown), sha256: review.provenance.responseSha256 }
   };
 }
 

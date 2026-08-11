@@ -62,9 +62,13 @@ export type ProCodeReviewArgs = {
     pollMs?: number;
   };
   resume?: {
-    threadUrl: string;
-    submitted: true;
-    archiveDirectory?: string;
+    archiveDirectory: string;
+    /** Optional cross-check. The immutable submission receipt is authoritative. */
+    threadUrl?: string;
+    /** Optional canonical Chat conversation-id cross-check. */
+    conversationId?: string;
+    /** Backward-compatible evidence flag; the archived receipt must independently verify it. */
+    submitted?: true;
     artifactBaseline?: ArtifactInventoryData;
   };
   diagnosticMetadata?: Record<string, unknown>;
@@ -74,6 +78,7 @@ export type ReviewState =
   | "PREPARE_CONTEXT"
   | "PREFLIGHT_BROWSER"
   | "OPEN_CHAT"
+  | "RECOVER_THREAD"
   | "SNAPSHOT_CONFIGURATION"
   | "APPLY_PRO"
   | "VERIFY_PRO_BEFORE_SUBMIT"
@@ -108,6 +113,8 @@ export type ReviewArtifact = {
   sha256: string;
   sourceLabel?: string;
   sourceReference?: string;
+  /** Stable key from the pre/post visible artifact inventory. */
+  inventoryKey?: string;
 };
 
 export type PacketFileRecord = {

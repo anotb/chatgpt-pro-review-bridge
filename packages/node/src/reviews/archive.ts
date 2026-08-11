@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
-import { copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { copyFile, link, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { ReviewArtifact } from "./types.js";
@@ -29,9 +30,22 @@ export async function createReviewArchive(
 
 export async function writeImmutableFile(path: string, data: string | Buffer): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
+  const expected = Buffer.isBuffer(data) ? data : Buffer.from(data);
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
-  await writeFile(temporary, data, { flag: "wx" });
-  await rename(temporary, path);
+  await writeFile(temporary, expected, { flag: "wx" });
+  try {
+    // Hard-linking a complete same-directory temporary file publishes it
+    // atomically without POSIX rename's destination-overwrite behavior.
+    await link(temporary, path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const existing = await readFile(path);
+    if (!existing.equals(expected)) {
+      throw new Error(`Refusing to replace immutable archive file with different content: ${path}`);
+    }
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 export async function writeImmutableJson(path: string, data: unknown): Promise<void> {
@@ -75,14 +89,27 @@ export async function preserveDownloadedArtifact(
   archiveDirectory: string,
   desiredName: string,
   used: Set<string>,
-  metadata: { kind?: string; sourceLabel?: string; sourceReference?: string } = {}
+  metadata: { kind?: string; sourceLabel?: string; sourceReference?: string; inventoryKey?: string } = {}
 ): Promise<ReviewArtifact> {
   const name = collisionSafeFilename(desiredName, used);
   const artifactsRoot = resolve(archiveDirectory, "artifacts");
   const target = resolve(artifactsRoot, name);
   assertPathInside(artifactsRoot, target);
   await mkdir(artifactsRoot, { recursive: true });
-  if (resolve(downloadedPath) !== target) await copyFile(downloadedPath, target);
+  if (resolve(downloadedPath) !== target) {
+    try {
+      await copyFile(downloadedPath, target, constants.COPYFILE_EXCL);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const [existingHash, downloadedHash] = await Promise.all([
+        sha256File(target),
+        sha256File(downloadedPath)
+      ]);
+      if (existingHash !== downloadedHash) {
+        throw new Error(`Refusing to replace an archived artifact with different content: ${target}`);
+      }
+    }
+  }
   const saved = await stat(target);
   const artifact: ReviewArtifact = {
     name,
@@ -93,6 +120,7 @@ export async function preserveDownloadedArtifact(
   if (metadata.kind !== undefined) artifact.kind = metadata.kind;
   if (metadata.sourceLabel !== undefined) artifact.sourceLabel = metadata.sourceLabel;
   if (metadata.sourceReference !== undefined) artifact.sourceReference = metadata.sourceReference;
+  if (metadata.inventoryKey !== undefined) artifact.inventoryKey = metadata.inventoryKey;
   return artifact;
 }
 
