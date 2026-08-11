@@ -99,16 +99,18 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const root = detectRoot(args.root);
   const packageDir = nodePackageDir(root);
-  const runtimeDir = path.join(root, "plugins/codex-chatgpt-control/runtime/node");
+  const pluginRoots = [
+    path.join(root, "plugins/codex-chatgpt-control"),
+    path.join(root, "plugins/chatgpt-pro-review")
+  ];
 
   if (!args.skipBuild) {
-    for (const script of ["build", "bundle", "bundle:backend", "bundle:live-smoke", "bundle:release-canary"]) {
+    for (const script of ["build", "bundle", "bundle:backend", "bundle:live-smoke", "bundle:release-canary", "bundle:pro-review-canary"]) {
       const npm = npmInvocation(["run", script]);
       execFileSync(npm.program, npm.args, { cwd: packageDir, stdio: "inherit" });
     }
   }
 
-  await mkdir(runtimeDir, { recursive: true });
   const distDir = path.join(packageDir, "dist");
   const copies = [
     [
@@ -126,16 +128,23 @@ async function main() {
     [
       sourceBundle(distDir, `${PRIVATE_BUNDLE_PREFIX}-release-canary.bundle.mjs`, "codex-chatgpt-control-release-canary.bundle.mjs"),
       "codex-chatgpt-control-release-canary.bundle.mjs"
+    ],
+    [
+      sourceBundle(distDir, "chatgpt-pro-review-canary.bundle.mjs", "chatgpt-pro-review-canary.bundle.mjs"),
+      "chatgpt-pro-review-canary.bundle.mjs"
     ]
   ];
 
-  for (const [src, destName] of copies) {
-    await copySanitizedRuntime(src, path.join(runtimeDir, destName));
-  }
+  for (const pluginRoot of pluginRoots) {
+    const runtimeDir = path.join(pluginRoot, "runtime/node");
+    await mkdir(runtimeDir, { recursive: true });
+    for (const [src, destName] of copies) {
+      await copySanitizedRuntime(src, path.join(runtimeDir, destName));
+    }
 
-  await writeFile(
-    path.join(root, "plugins/codex-chatgpt-control/runtime/import-chatgpt-control.mjs"),
-    `import { pathToFileURL } from "node:url";
+    await writeFile(
+      path.join(pluginRoot, "runtime/import-chatgpt-control.mjs"),
+      `import { pathToFileURL } from "node:url";
 
 export async function importChatGPTControl({ cacheBust = true } = {}) {
   const runtimeUrl = new URL("./node/codex-chatgpt-control.bundle.mjs", import.meta.url);
@@ -149,10 +158,11 @@ export function backendBundleUrl() {
   return pathToFileURL(new URL("./node/codex-chatgpt-control-backend.mjs", import.meta.url).pathname).href;
 }
 `,
-    "utf8"
-  );
+      "utf8"
+    );
+  }
 
-  console.log(`Plugin runtime updated at ${runtimeDir}`);
+  console.log(`Plugin runtimes updated: ${pluginRoots.join(", ")}`);
 }
 
 main().catch(error => {

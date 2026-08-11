@@ -1,0 +1,45 @@
+{
+  "name": "chatgpt-pro-review",
+  "version": "0.5.1-alpha.1+codex.20260811",
+  "description": "Build deterministic repository packets and offload a full review to the strictly verified visible ChatGPT Chat Pro setting.",
+  "author": {
+    "name": "anotb",
+    "url": "https://github.com/anotb"
+  },
+  "homepage": "https://github.com/anotb/chatgpt-pro-review-bridge",
+  "repository": "https://github.com/anotb/chatgpt-pro-review-bridge",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "chatgpt",
+    "code-review",
+    "visible-ui",
+    "pro",
+    "provenance"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "ChatGPT Pro Review Bridge",
+    "shortDescription": "Verified visible-Pro reviews with full provenance",
+    "longDescription": "Build deterministic code-review packets in Codex, submit them once to the visible ChatGPT Chat Pro setting, poll compactly, preserve the complete Markdown and every new artifact, restore the previous setting, and return a provenance archive. The plugin uses visible browser controls only and never executes generated patches.",
+    "developerName": "anotb",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/anotb/chatgpt-pro-review-bridge",
+    "privacyPolicyURL": "https://github.com/anotb/chatgpt-pro-review-bridge/blob/main/docs/plugin-review-privacy.md",
+    "termsOfServiceURL": "https://github.com/anotb/chatgpt-pro-review-bridge/blob/main/docs/plugin-review-terms.md",
+    "defaultPrompt": [
+      "Use $chatgpt-pro-code-review to review this branch against main and return the complete verified Pro response.",
+      "Use $chatgpt-pro-code-review for a deep security and concurrency review of this change.",
+      "Use $chatgpt-pro-code-review to resume the submitted review in its existing ChatGPT thread without resubmitting."
+    ],
+    "brandColor": "#0B5FFF",
+    "composerIcon": "./assets/composer-icon.svg",
+    "logo": "./assets/app-icon.svg",
+    "screenshots": []
+  }
+}

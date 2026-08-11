@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Pro Review">
+  <circle cx="64" cy="64" r="60" fill="#0B5FFF"/>
+  <path d="M31 34h66v49H62L43 99V83H31z" fill="#fff"/>
+  <path d="m50 60 9 9 19-21 8 7-27 29-17-17z" fill="#0B5FFF"/>
+</svg>

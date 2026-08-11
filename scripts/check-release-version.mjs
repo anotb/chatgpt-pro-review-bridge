@@ -48,6 +48,10 @@ async function readPluginMetadata() {
   return readJson("../plugins/codex-chatgpt-control/.codex-plugin/plugin.json");
 }
 
+async function readReviewPluginMetadata() {
+  return readJson("../plugins/chatgpt-pro-review/.codex-plugin/plugin.json");
+}
+
 function tagFromEnvironment() {
   if (process.env.RELEASE_TAG) return process.env.RELEASE_TAG;
   if (process.env.GITHUB_REF_TYPE === "tag" && process.env.GITHUB_REF_NAME) return process.env.GITHUB_REF_NAME;
@@ -79,6 +83,7 @@ async function main() {
   const nodePackage = await readJson("../packages/node/package.json");
   const pythonPackage = await readPythonMetadata();
   const pluginPackage = await readPluginMetadata();
+  const reviewPluginPackage = await readReviewPluginMetadata();
 
   const tag = args.tag ?? tagFromEnvironment();
   const normalizedTag = tag ? normalizeTag(tag) : undefined;
@@ -109,6 +114,18 @@ async function main() {
   if (typeof pluginPackage.version !== "string" || !/^\d+\.\d+\.\d+-(?:alpha|beta|rc)\.\d+\+codex\.[a-z0-9-]+$/.test(pluginPackage.version)) {
     errors.push(`Plugin version ${pluginPackage.version ?? "missing"} must include one +codex.<cachebuster> suffix`);
   }
+  const reviewPluginBaseVersion = typeof reviewPluginPackage.version === "string"
+    ? reviewPluginPackage.version.split("+", 1)[0]
+    : undefined;
+  if (reviewPluginPackage.name !== "chatgpt-pro-review") {
+    errors.push(`Review plugin name ${reviewPluginPackage.name} does not match chatgpt-pro-review`);
+  }
+  if (reviewPluginBaseVersion !== nodePackage.version) {
+    errors.push(`Review plugin base version ${reviewPluginBaseVersion ?? "missing"} does not match Node package version ${nodePackage.version}`);
+  }
+  if (typeof reviewPluginPackage.version !== "string" || !/^\d+\.\d+\.\d+-(?:alpha|beta|rc)\.\d+\+codex\.[a-z0-9-]+$/.test(reviewPluginPackage.version)) {
+    errors.push(`Review plugin version ${reviewPluginPackage.version ?? "missing"} must include one +codex.<cachebuster> suffix`);
+  }
   if (normalizedTag && normalizedTag !== nodePackage.version) {
     errors.push(`Release tag ${tag} resolves to ${normalizedTag}, but Node package version is ${nodePackage.version}`);
   }
@@ -130,6 +147,11 @@ async function main() {
       package: pluginPackage.name,
       version: pluginPackage.version,
       baseVersion: pluginBaseVersion ?? null
+    },
+    reviewPlugin: {
+      package: reviewPluginPackage.name,
+      version: reviewPluginPackage.version,
+      baseVersion: reviewPluginBaseVersion ?? null
     }
   };
 

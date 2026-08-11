@@ -1,7 +1,8 @@
-#!/usr/bin/env node
-
-// src/backend/stdio-server.ts
-import { createInterface } from "node:readline";
+// src/scripts/pro-review-canary-module.ts
+import { spawn as spawn2 } from "node:child_process";
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { mkdir as mkdir5, mkdtemp as mkdtemp2, readFile as readFile6, writeFile as writeFile5 } from "node:fs/promises";
+import { join as join7, resolve as resolve5 } from "node:path";
 
 // src/commands/artifacts.ts
 import { copyFile as copyFile2, mkdir as mkdir2, stat as stat2, writeFile } from "node:fs/promises";
@@ -3234,9 +3235,9 @@ async function readImageDataUrl(page, timeoutMs, which = "latest") {
         if (/^(blob:|https?:)/i.test(src)) {
           const response = await fetch(src);
           const blob = await response.blob();
-          const dataUrl = await new Promise((resolve5, reject) => {
+          const dataUrl = await new Promise((resolve6, reject) => {
             const reader = new FileReader();
-            reader.onload = () => resolve5(String(reader.result));
+            reader.onload = () => resolve6(String(reader.result));
             reader.onerror = () => reject(reader.error ?? new Error("FileReader failed."));
             reader.readAsDataURL(blob);
           });
@@ -5222,7 +5223,7 @@ async function sleep(page, ms2) {
     await page.waitForTimeout(ms2);
     return;
   }
-  await new Promise((resolve5) => setTimeout(resolve5, ms2));
+  await new Promise((resolve6) => setTimeout(resolve6, ms2));
 }
 
 // src/commands/artifact-inventory.ts
@@ -5949,7 +5950,7 @@ async function waitForPreviewDownloadControl(page, preview, timeoutMs) {
     if (typeof page.waitForTimeout === "function") {
       await page.waitForTimeout(100);
     } else {
-      await new Promise((resolve5) => setTimeout(resolve5, 100));
+      await new Promise((resolve6) => setTimeout(resolve6, 100));
     }
   }
   return void 0;
@@ -6623,7 +6624,7 @@ async function waitForFileChooser2(page, timeoutMs) {
 async function raceFileChooserOpen(chooserPromise, page, waitMs) {
   return Promise.race([
     chooserPromise.then(() => true, () => false),
-    (page.waitForTimeout?.(waitMs) ?? new Promise((resolve5) => setTimeout(resolve5, waitMs))).then(() => false)
+    (page.waitForTimeout?.(waitMs) ?? new Promise((resolve6) => setTimeout(resolve6, waitMs))).then(() => false)
   ]);
 }
 async function locatorCount2(locator) {
@@ -6809,7 +6810,7 @@ async function waitForClipboardChange(before, timeoutMs, pollMs = 150) {
     if (current !== void 0 && current.length > 0 && current !== before) {
       return current;
     }
-    await new Promise((resolve5) => setTimeout(resolve5, pollMs));
+    await new Promise((resolve6) => setTimeout(resolve6, pollMs));
   }
   return void 0;
 }
@@ -8591,7 +8592,7 @@ async function sleep2(page, ms2) {
     await page.waitForTimeout(ms2);
     return;
   }
-  await new Promise((resolve5) => setTimeout(resolve5, ms2));
+  await new Promise((resolve6) => setTimeout(resolve6, ms2));
 }
 function submitData(userTurnText, turnCount, submissionState, generation) {
   const data = { submitted: true };
@@ -10886,14 +10887,14 @@ function sha256Text(text) {
 async function sha256File(path3) {
   const hash2 = createHash4("sha256");
   let bytes = 0;
-  await new Promise((resolve5, reject) => {
+  await new Promise((resolve6, reject) => {
     const stream = createReadStream(path3);
     stream.on("data", (chunk) => {
       bytes += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.byteLength;
       hash2.update(chunk);
     });
     stream.on("error", reject);
-    stream.on("end", resolve5);
+    stream.on("end", resolve6);
   });
   return {
     path: path3,
@@ -12955,20 +12956,20 @@ function validateResponsesCreateArgs(args) {
   return unsupported2.length === 0 ? { ok: true, unsupported: [] } : { ok: false, unsupported: unsupported2 };
 }
 function responsesCreateArgsToRunInput(args) {
-  const runInput2 = {
+  const runInput = {
     input: args.input,
     response: { format: args.text?.format ?? "markdown" }
   };
-  if (args.thread !== void 0) runInput2.thread = args.thread;
-  if (args.existingTab !== void 0) runInput2.existingTab = args.existingTab;
-  if (args.preferExistingTab !== void 0) runInput2.preferExistingTab = args.preferExistingTab;
-  if (args.experience !== void 0) runInput2.experience = args.experience;
-  if (args.configuration !== void 0) runInput2.configuration = args.configuration;
-  if (args.attachments !== void 0) runInput2.attachments = args.attachments;
-  if (args.mode !== void 0) runInput2.mode = args.mode;
-  if (args.tools !== void 0) runInput2.tools = args.tools;
-  if (args.report !== void 0) runInput2.report = args.report;
-  return runInput2;
+  if (args.thread !== void 0) runInput.thread = args.thread;
+  if (args.existingTab !== void 0) runInput.existingTab = args.existingTab;
+  if (args.preferExistingTab !== void 0) runInput.preferExistingTab = args.preferExistingTab;
+  if (args.experience !== void 0) runInput.experience = args.experience;
+  if (args.configuration !== void 0) runInput.configuration = args.configuration;
+  if (args.attachments !== void 0) runInput.attachments = args.attachments;
+  if (args.mode !== void 0) runInput.mode = args.mode;
+  if (args.tools !== void 0) runInput.tools = args.tools;
+  if (args.report !== void 0) runInput.report = args.report;
+  return runInput;
 }
 function responseFromRunResult(result, now = /* @__PURE__ */ new Date()) {
   const id2 = responseId(now);
@@ -13061,8 +13062,8 @@ function createMilestoneStream(run) {
           yield next;
           continue;
         }
-        await new Promise((resolve5) => {
-          resolveNext = resolve5;
+        await new Promise((resolve6) => {
+          resolveNext = resolve6;
         });
       }
     }
@@ -14477,14 +14478,14 @@ async function createResponse(args, runner, now) {
     return unsupportedResponse(validation.unsupported, timestamp);
   }
   const responseArgs = args;
-  const agentConfig2 = {
+  const agentConfig = {
     name: "responses-adapter",
     instructionsMode: responseArgs.instructionsMode === "visible_prefix" ? "visible_prefix" : "metadata_only"
   };
   if (typeof responseArgs.instructions === "string") {
-    agentConfig2.instructions = responseArgs.instructions;
+    agentConfig.instructions = responseArgs.instructions;
   }
-  const agent = createChatGPTAgent(agentConfig2);
+  const agent = createChatGPTAgent(agentConfig);
   const result = await runner.run(agent, responsesCreateArgsToRunInput(responseArgs));
   return responseFromRunResult(result, now?.() ?? timestamp);
 }
@@ -14980,503 +14981,120 @@ function arrayInput(input, key) {
   return value;
 }
 
-// src/backend/protocol.ts
-var BACKEND_REQUEST_SCHEMA_VERSION = "chatgpt.browser_control.backend_request.v1";
-var BACKEND_RESPONSE_SCHEMA_VERSION = "chatgpt.browser_control.backend_response.v1";
-var BACKEND_EVENT_SCHEMA_VERSION = "chatgpt.browser_control.backend_event.v1";
-var backendCommands = [
-  "backend.version",
-  "backend.health",
-  "backend.capabilities",
-  "runner.run",
-  "runner.plan",
-  "runner.stream",
-  "responses.create",
-  "ask",
-  "askInThread",
-  "askWithFiles",
-  "askAndDownload",
-  "runMessages",
-  "openThread",
-  "readLatest",
-  "copyLatest",
-  "downloadLatest",
-  "runPlan",
-  "doctor",
-  "createReport",
-  "reports.create",
-  "reports.redact",
-  "reports.summarize",
-  "commands",
-  "describe",
-  "help",
-  "session.bootstrap",
-  "experience.detect",
-  "experience.open",
-  "configuration.inspect",
-  "configuration.apply",
-  "work.start",
-  "work.status",
-  "work.wait",
-  "work.steer",
-  "work.readLatest",
-  "threads.new",
-  "threads.search",
-  "threads.open",
-  "messages.compose",
-  "messages.submit",
-  "messages.ask",
-  "messages.wait",
-  "messages.readLatest",
-  "messages.status",
-  "messages.waitAndRead",
-  "artifacts.listLatest",
-  "artifacts.wait",
-  "artifacts.downloadLatest",
-  "files.preflight",
-  "files.attach",
-  "files.downloadLatest",
-  "projects.sources.list",
-  "projects.sources.planAdd",
-  "projects.sources.add",
-  "modes.set",
-  "modes.get",
-  "tools.select",
-  "response.copy"
-];
-var ProtocolError = class extends Error {
-  constructor(code, message, recoverable) {
-    super(message);
-    this.code = code;
-    this.recoverable = recoverable;
-    this.name = "ProtocolError";
+// src/scripts/pro-review-canary-module.ts
+async function runProReviewCanaryStep(runtime, options = {}) {
+  if (runtime.agent === void 0 || runtime.agent === null) {
+    throw new Error("The Pro review canary must run in a visible Codex browser-bridge JavaScript context.");
   }
-  code;
-  recoverable;
-};
-var commandSet = new Set(backendCommands);
-function parseBackendRequest(raw) {
-  if (!isRecord7(raw)) {
-    throw new ProtocolError("invalid_request", "Backend request must be an object.", false);
-  }
-  const schemaVersion = raw.schemaVersion;
-  if (schemaVersion !== BACKEND_REQUEST_SCHEMA_VERSION) {
-    throw new ProtocolError(
-      "unsupported_schema_version",
-      `Unsupported backend request schemaVersion: ${String(schemaVersion)}`,
-      false
-    );
-  }
-  const command = raw.command;
-  if (typeof command !== "string" || !commandSet.has(command)) {
-    throw new ProtocolError("unknown_command", `Unknown backend command: ${String(command)}`, false);
-  }
-  const request = {
-    schemaVersion: BACKEND_REQUEST_SCHEMA_VERSION,
-    command,
-    payload: normalizePayload(raw.payload)
+  const reportDir = resolve5(options.reportDir ?? join7(process.cwd(), "reports", "pro-review-canary"));
+  await mkdir5(reportDir, { recursive: true });
+  const state = options.resume ?? await createFixture(reportDir, options.requireArtifact ?? true);
+  const chatgpt = createChatGPT({ agent: runtime.agent, ...runtime.browser === void 0 ? {} : { browser: runtime.browser } });
+  const artifactInstruction = state.requireArtifact ? `Also create a downloadable CSV named review-canary-${state.token}.csv with one header named token and one row containing exactly ${state.token}.` : "Do not create an artifact for this canary.";
+  const common = {
+    repositoryRoot: state.repositoryRoot,
+    baseRef: "HEAD",
+    headRef: "HEAD",
+    request: {
+      focus: ["correctness", "tests"],
+      additionalInstructions: `Start the response with the exact line CANARY_OK:${state.token}. ${artifactInstruction}`
+    },
+    output: {
+      mode: "full",
+      archive: true,
+      archiveRoot: join7(reportDir, "runs"),
+      downloadArtifacts: "all",
+      returnFullMarkdown: true
+    },
+    polling: { callTimeoutMs: 25e3, totalTimeoutMs: 25e3, maxPollCallsPerInvocation: 1, stableMs: 1500, pollMs: 750 },
+    diagnosticMetadata: { canary: true, token: state.token }
   };
-  if (raw.requestId !== void 0) {
-    if (typeof raw.requestId !== "string" || raw.requestId.length === 0) {
-      throw new ProtocolError("invalid_request", "Backend request requestId must be a non-empty string when provided.", false);
+  const review = options.resume === void 0 ? await chatgpt.reviews.codeReview(common) : await chatgpt.reviews.codeReview({
+    ...common,
+    resume: {
+      threadUrl: state.threadUrl,
+      submitted: true,
+      archiveDirectory: state.archiveDirectory
     }
-    request.requestId = raw.requestId;
-  }
-  return request;
-}
-function backendResponseOk(requestId, result) {
-  const response = {
-    schemaVersion: BACKEND_RESPONSE_SCHEMA_VERSION,
-    ok: true,
-    result
+  });
+  const promptCount = review.thread?.url === void 0 ? 0 : await countVisibleUserPrompts(runtime.browser, review.thread.url, state.token);
+  const artifactToken = await artifactContainsToken(review, state.token);
+  const checks = {
+    fullResponseToken: review.responseMarkdown?.includes(`CANARY_OK:${state.token}`) === true,
+    exactlyOneVisibleUserPrompt: promptCount === 1,
+    proVerifiedBefore: review.configuration.verifiedBeforeSubmit,
+    proVerifiedAfter: review.configuration.verifiedAfterCompletion,
+    configurationRestored: review.configuration.restorationVerified,
+    artifactsCaptured: !state.requireArtifact || review.artifacts.length > 0,
+    artifactContentToken: !state.requireArtifact || artifactToken
   };
-  if (requestId !== void 0) response.requestId = requestId;
-  return response;
-}
-function backendResponseError(requestId, error) {
-  const response = {
-    schemaVersion: BACKEND_RESPONSE_SCHEMA_VERSION,
-    ok: false,
-    error: {
-      code: error instanceof ProtocolError ? error.code : "invalid_request",
-      message: error.message,
-      recoverable: error instanceof ProtocolError ? error.recoverable : false
-    }
+  const failures = Object.entries(checks).filter(([, passed]) => !passed).map(([name]) => name);
+  if (review.status === "in_progress") failures.length = 0;
+  const diagnosticPath = join7(reportDir, `canary-${state.token}.redacted.json`);
+  const resume = review.status === "in_progress" && review.thread?.url !== void 0 && review.archiveDirectory !== void 0 ? {
+    repositoryRoot: state.repositoryRoot,
+    token: state.token,
+    archiveDirectory: review.archiveDirectory,
+    threadUrl: review.thread.url,
+    requireArtifact: state.requireArtifact
+  } : void 0;
+  const result = {
+    ok: review.status === "in_progress" ? true : review.ok && failures.length === 0,
+    status: review.status,
+    token: state.token,
+    review,
+    checks,
+    failures,
+    diagnosticPath,
+    ...resume === void 0 ? {} : { resume }
   };
-  if (requestId !== void 0) response.requestId = requestId;
-  return response;
+  await writeFile5(diagnosticPath, `${JSON.stringify(redactReportValue({ ...result, review: reviewReceipt(review) }), null, 2)}
+`, "utf8");
+  return result;
 }
-function backendEvent(requestId, payload) {
-  const event = {
-    schemaVersion: BACKEND_EVENT_SCHEMA_VERSION,
-    ...payload
-  };
-  if (requestId !== void 0) event.requestId = requestId;
-  return event;
+async function createFixture(reportDir, requireArtifact) {
+  const token = randomUUID2().replace(/-/g, "").slice(0, 16);
+  const repositoryRoot = await mkdtemp2(join7(reportDir, `fixture-${token}-`));
+  await mkdir5(join7(repositoryRoot, "src"), { recursive: true });
+  await writeFile5(join7(repositoryRoot, "src", "counter.js"), "export function next(value) { return value + 1; }\n", "utf8");
+  await runGit2(repositoryRoot, ["init", "-b", "main"]);
+  await runGit2(repositoryRoot, ["config", "user.name", "Pro Review Canary"]);
+  await runGit2(repositoryRoot, ["config", "user.email", "pro-review-canary@example.invalid"]);
+  await runGit2(repositoryRoot, ["add", "."]);
+  await runGit2(repositoryRoot, ["commit", "-m", "canary base"]);
+  await writeFile5(join7(repositoryRoot, "src", "counter.js"), "export function next(value) {\n  if (!Number.isFinite(value)) throw new TypeError('finite value required');\n  return value + 1;\n}\n", "utf8");
+  return { repositoryRoot, token, archiveDirectory: "", threadUrl: "", requireArtifact };
 }
-function backendEventCompleted(requestId, result) {
-  return backendEvent(requestId, { type: "completed", result });
+async function countVisibleUserPrompts(browser, threadUrl, token) {
+  const openTabs = await browser?.user?.openTabs?.();
+  const candidates = Array.isArray(openTabs) ? openTabs.filter((tab) => tab.url === threadUrl) : [];
+  if (candidates.length !== 1 || browser?.user?.claimTab === void 0) return 0;
+  const page = await browser.user.claimTab(candidates[0]);
+  if (typeof page.evaluate !== "function") return 0;
+  return page.evaluate((wanted) => Array.from(document.querySelectorAll("[data-message-author-role='user']")).filter((node) => (node.innerText ?? node.textContent ?? "").includes(wanted)).length, token);
 }
-function normalizePayload(value) {
-  if (value === void 0) return {};
-  if (!isRecord7(value)) {
-    throw new ProtocolError("invalid_request", "Backend request payload must be an object when provided.", false);
+async function artifactContainsToken(review, token) {
+  for (const artifact of review.artifacts) {
+    const body = await readFile6(artifact.path).catch(() => void 0);
+    if (body !== void 0 && body.includes(Buffer.from(token))) return true;
   }
-  return value;
+  return false;
 }
-function isRecord7(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-// src/backend/session.ts
-var BackendSession = class {
-  constructor(options = {}) {
-    this.options = options;
-  }
-  options;
-  clientInstance;
-  async dispatch(request) {
-    try {
-      const result = await dispatchBackendCommand(this.client(), request);
-      return backendResponseOk(request.requestId, result);
-    } catch (error) {
-      return backendResponseError(request.requestId, error instanceof Error ? error : new Error(String(error)));
-    }
-  }
-  async *stream(request) {
-    try {
-      if (request.command !== "runner.stream") {
-        const response = await this.dispatch(request);
-        if (response.ok) {
-          yield backendEventCompleted(request.requestId, response.result);
-        } else {
-          yield backendEvent(request.requestId, { type: "error", error: response.error });
-        }
-        return;
-      }
-      const payload = request.payload;
-      const agent = this.client().agent(agentConfig(payload));
-      const stream = this.client().runner.run(agent, runInput(payload), { stream: true });
-      for await (const event of stream) {
-        yield backendEvent(request.requestId, {
-          type: "run_item_stream_event",
-          name: event.name,
-          item: event.item
-        });
-      }
-      yield backendEventCompleted(request.requestId, await stream.completed);
-    } catch (error) {
-      const protocolError = error instanceof ProtocolError ? error : new ProtocolError("invalid_request", error instanceof Error ? error.message : String(error), false);
-      yield backendEvent(request.requestId, {
-        type: "error",
-        error: {
-          code: protocolError.code,
-          message: protocolError.message,
-          recoverable: protocolError.recoverable
-        }
-      });
-    }
-  }
-  client() {
-    this.clientInstance ??= createChatGPT(this.options);
-    return this.clientInstance;
-  }
-};
-async function dispatchBackendCommand(client, request) {
-  const payload = request.payload;
-  switch (request.command) {
-    case "backend.version":
-      return {
-        name: "codex-chatgpt-control-backend",
-        runtime: "node",
-        protocolVersion: BACKEND_REQUEST_SCHEMA_VERSION
-      };
-    case "backend.health":
-      return {
-        ok: true,
-        status: "ok",
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    case "backend.capabilities":
-      return backendCapabilities();
-    case "runner.run": {
-      const agent = client.agent(agentConfig(payload));
-      return client.runner.run(agent, runInput(payload));
-    }
-    case "runner.plan": {
-      const agent = client.agent(agentConfig(payload));
-      return client.runner.plan(agent, runInput(payload));
-    }
-    case "responses.create":
-      return client.responses.create(payload);
-    case "commands":
-      return client.commands(commandFilter(payload));
-    case "describe":
-      return client.describe(requiredString(payload, "name"));
-    case "help":
-      return client.help(optionalString(payload, "topic"));
-    case "doctor":
-      return client.doctor(payload);
-    case "ask":
-      return client.ask(payload);
-    case "askInThread":
-      return client.askInThread(payload);
-    case "askWithFiles":
-      return client.askWithFiles(payload);
-    case "askAndDownload":
-      return client.askAndDownload(payload);
-    case "runMessages":
-      return client.runMessages(payload);
-    case "openThread":
-      return client.openThread(payload);
-    case "readLatest":
-      return client.readLatest(emptyToUndefined(payload));
-    case "copyLatest":
-      return client.copyLatest(emptyToUndefined(payload));
-    case "downloadLatest":
-      return client.downloadLatest(payload);
-    case "runPlan":
-      return client.runPlan(runPlanPayload(payload));
-    case "createReport":
-      return client.createReport(
-        requiredRecord(payload, "result"),
-        optionalRecord(payload, "args")
-      );
-    case "reports.create":
-      return client.reports.create(
-        requiredRecord(payload, "result"),
-        optionalRecord(payload, "args")
-      );
-    case "reports.redact":
-      return client.reports.redact(
-        payload.value,
-        optionalRecord(payload, "args")
-      );
-    case "reports.summarize":
-      return client.reports.summarize(
-        requiredRecord(payload, "result"),
-        optionalRecord(payload, "args")
-      );
-    case "session.bootstrap":
-      return client.session.bootstrap(emptyToUndefined(payload));
-    case "experience.detect":
-      return client.experience.detect(emptyToUndefined(payload));
-    case "experience.open":
-      return client.experience.open(payload);
-    case "configuration.inspect":
-      return client.configuration.inspect(emptyToUndefined(payload));
-    case "configuration.apply":
-      return client.configuration.apply(payload);
-    case "work.start":
-      return client.work.start(payload);
-    case "work.status":
-      return client.work.status(emptyToUndefined(payload));
-    case "work.wait":
-      return client.work.wait(emptyToUndefined(payload));
-    case "work.steer":
-      return client.work.steer(payload);
-    case "work.readLatest":
-      return client.work.readLatest(emptyToUndefined(payload));
-    case "threads.new":
-      return client.threads.new(emptyToUndefined(payload));
-    case "threads.search":
-      return client.threads.search(payload);
-    case "threads.open":
-      return client.threads.open(payload);
-    case "messages.compose":
-      return client.messages.compose(payload);
-    case "messages.submit":
-      return client.messages.submit(emptyToUndefined(payload));
-    case "messages.ask":
-      return client.messages.ask(payload);
-    case "messages.wait":
-      return client.messages.wait(emptyToUndefined(payload));
-    case "messages.readLatest":
-      return client.messages.readLatest(emptyToUndefined(payload));
-    case "messages.status":
-      return client.messages.status(emptyToUndefined(payload));
-    case "messages.waitAndRead":
-      return client.messages.waitAndRead(payload);
-    case "artifacts.listLatest":
-      return client.artifacts.listLatest(emptyToUndefined(payload));
-    case "artifacts.wait":
-      return client.artifacts.wait(emptyToUndefined(payload));
-    case "artifacts.downloadLatest":
-      return client.artifacts.downloadLatest(payload);
-    case "files.preflight":
-      return client.files.preflight(payload);
-    case "files.attach":
-      return client.files.attach(payload);
-    case "files.downloadLatest":
-      return client.files.downloadLatest(payload);
-    case "projects.sources.list":
-      return client.projects.sources.list(payload);
-    case "projects.sources.planAdd":
-      return client.projects.sources.planAdd(payload);
-    case "projects.sources.add":
-      return client.projects.sources.add(payload);
-    case "modes.set":
-      return client.modes.set(payload);
-    case "modes.get":
-      return client.modes.get(emptyToUndefined(payload));
-    case "tools.select":
-      return client.tools.select(payload);
-    case "response.copy":
-      return client.response.copy(emptyToUndefined(payload));
-  }
-}
-function backendCapabilities() {
+function reviewReceipt(review) {
   return {
-    protocolVersion: BACKEND_REQUEST_SCHEMA_VERSION,
-    commands: [...backendCommands],
-    transports: ["stdio"],
-    streaming: {
-      modes: ["ndjson"],
-      tokenDeltas: false
-    }
+    ...review,
+    responseMarkdown: review.responseMarkdown === void 0 ? void 0 : { bytes: Buffer.byteLength(review.responseMarkdown), containsCanaryMarker: /CANARY_OK:/.test(review.responseMarkdown) }
   };
 }
-function agentConfig(payload) {
-  return requiredRecord(payload, "agent");
-}
-function runInput(payload) {
-  if (!Object.hasOwn(payload, "input")) {
-    throw new ProtocolError("invalid_request", "Backend runner command requires payload.input.", false);
-  }
-  return payload.input;
-}
-function runPlanPayload(payload) {
-  if (isRecord8(payload.plan)) return payload.plan;
-  return payload;
-}
-function commandFilter(payload) {
-  if (isRecord8(payload.filter)) return payload.filter;
-  return Object.keys(payload).length === 0 ? void 0 : payload;
-}
-function requiredString(payload, key) {
-  const value = payload[key];
-  if (typeof value !== "string" || value.length === 0) {
-    throw new ProtocolError("invalid_request", `Backend command requires payload.${key} as a non-empty string.`, false);
-  }
-  return value;
-}
-function optionalString(payload, key) {
-  const value = payload[key];
-  if (value === void 0) return void 0;
-  if (typeof value !== "string") {
-    throw new ProtocolError("invalid_request", `Backend command payload.${key} must be a string when provided.`, false);
-  }
-  return value;
-}
-function requiredRecord(payload, key) {
-  const value = payload[key];
-  if (!isRecord8(value)) {
-    throw new ProtocolError("invalid_request", `Backend command requires payload.${key} as an object.`, false);
-  }
-  return value;
-}
-function optionalRecord(payload, key) {
-  const value = payload[key];
-  if (value === void 0) return void 0;
-  if (!isRecord8(value)) {
-    throw new ProtocolError("invalid_request", `Backend command payload.${key} must be an object when provided.`, false);
-  }
-  return value;
-}
-function emptyToUndefined(payload) {
-  return Object.keys(payload).length === 0 ? void 0 : payload;
-}
-function isRecord8(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-// src/backend/stdio-server.ts
-async function runBackendStdioServer(options) {
-  const session = options.session ?? new BackendSession();
-  const lines = createInterface({
-    input: options.input,
-    crlfDelay: Infinity
-  });
-  const writeJson = createJsonLineWriter(options.output);
-  const tasks = /* @__PURE__ */ new Set();
-  for await (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    const task = handleLine(session, trimmed, writeJson, options.error);
-    tasks.add(task);
-    void task.finally(() => {
-      tasks.delete(task);
-    }).catch(() => {
-    });
-  }
-  await Promise.allSettled(tasks);
-}
-async function handleLine(session, line, writeJson, error) {
-  let request;
-  try {
-    const raw = JSON.parse(line);
-    request = parseBackendRequest(raw);
-    if (request.command === "runner.stream") {
-      for await (const event of session.stream(request)) {
-        await writeJson(event);
-      }
-      return;
-    }
-    await writeJson(await session.dispatch(request));
-  } catch (caught) {
-    const response = backendResponseError(request?.requestId ?? requestIdFromLine(line), normalizeError(caught));
-    await writeJson(response);
-    if (!(caught instanceof ProtocolError)) {
-      await writeDiagnostic(error, caught);
-    }
-  }
-}
-function normalizeError(error) {
-  if (error instanceof SyntaxError) {
-    return new ProtocolError("invalid_request", `Invalid JSON backend request line: ${error.message}`, false);
-  }
-  if (error instanceof Error) return error;
-  return new ProtocolError("invalid_request", String(error), false);
-}
-function requestIdFromLine(line) {
-  try {
-    const parsed = JSON.parse(line);
-    if (isRecord9(parsed) && typeof parsed.requestId === "string" && parsed.requestId.length > 0) {
-      return parsed.requestId;
-    }
-  } catch {
-    return void 0;
-  }
-  return void 0;
-}
-function createJsonLineWriter(output) {
-  let tail = Promise.resolve();
-  return (value) => {
-    const next = tail.then(() => writeLine(output, JSON.stringify(value)));
-    tail = next.catch(() => {
-    });
-    return next;
-  };
-}
-async function writeDiagnostic(error, value) {
-  if (error === void 0) return;
-  const message = value instanceof Error ? `${value.name}: ${value.message}` : String(value);
-  await writeLine(error, message);
-}
-async function writeLine(output, line) {
-  if (output.write(`${line}
-`)) return;
-  await new Promise((resolve5) => {
-    output.once("drain", resolve5);
+async function runGit2(root, args) {
+  await new Promise((resolvePromise, reject) => {
+    const child = spawn2("git", args, { cwd: root, windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+    const errors = [];
+    child.stderr.on("data", (chunk) => errors.push(Buffer.from(chunk)));
+    child.on("error", reject);
+    child.on("close", (code) => code === 0 ? resolvePromise() : reject(new Error(Buffer.concat(errors).toString("utf8"))));
   });
 }
-function isRecord9(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-// src/scripts/backend-server.ts
-await runBackendStdioServer({
-  input: process.stdin,
-  output: process.stdout,
-  error: process.stderr
-});
+export {
+  runProReviewCanaryStep
+};

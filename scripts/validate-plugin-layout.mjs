@@ -93,6 +93,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const root = detectRoot(args.root);
   const pluginRoot = path.join(root, "plugins/codex-chatgpt-control");
+  const reviewPluginRoot = path.join(root, "plugins/chatgpt-pro-review");
   const releaseCanary = path.join(pluginRoot, "runtime/node/codex-chatgpt-control-release-canary.bundle.mjs");
   const marketplacePath = path.join(root, ".agents/plugins/marketplace.json");
   const manifestPath = path.join(pluginRoot, ".codex-plugin/plugin.json");
@@ -112,6 +113,19 @@ async function main() {
     path.join(pluginRoot, "skills/codex-chatgpt-control/SKILL.md"),
     path.join(pluginRoot, "skills/chatgpt-delegate/SKILL.md"),
     path.join(pluginRoot, "skills/chatgpt-pro-consult/SKILL.md")
+    ,path.join(reviewPluginRoot, ".codex-plugin/plugin.json")
+    ,path.join(reviewPluginRoot, "agents/openai.yaml")
+    ,path.join(reviewPluginRoot, "runtime/import-chatgpt-control.mjs")
+    ,path.join(reviewPluginRoot, "runtime/node/codex-chatgpt-control.bundle.mjs")
+    ,path.join(reviewPluginRoot, "runtime/node/codex-chatgpt-control-backend.mjs")
+    ,path.join(reviewPluginRoot, "runtime/node/codex-chatgpt-control-live-smoke.bundle.mjs")
+    ,path.join(reviewPluginRoot, "runtime/node/codex-chatgpt-control-release-canary.bundle.mjs")
+    ,path.join(reviewPluginRoot, "runtime/node/chatgpt-pro-review-canary.bundle.mjs")
+    ,path.join(reviewPluginRoot, "skills/chatgpt-pro-code-review/SKILL.md")
+    ,path.join(reviewPluginRoot, "skills/chatgpt-pro-code-review/references/review-contract.md")
+    ,path.join(reviewPluginRoot, "skills/chatgpt-pro-code-review/references/packet-policy.md")
+    ,path.join(reviewPluginRoot, "skills/chatgpt-pro-code-review/references/output-and-artifacts.md")
+    ,path.join(reviewPluginRoot, "skills/chatgpt-pro-code-review/references/troubleshooting.md")
   ];
   for (const file of requiredFiles) {
     assert(existsSync(file), `Missing required plugin file: ${path.relative(root, file)}`);
@@ -122,14 +136,24 @@ async function main() {
     "--eval",
     `process.argv = undefined; await import(${JSON.stringify(pathToFileURL(releaseCanary).href)});`
   ], { stdio: "pipe" });
+  execFileSync(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    `process.argv = undefined; await import(${JSON.stringify(pathToFileURL(path.join(reviewPluginRoot, "runtime/node/chatgpt-pro-review-canary.bundle.mjs")).href)});`
+  ], { stdio: "pipe" });
 
   const marketplace = await readJson(marketplacePath);
-  assert(marketplace.name === "codex-chatgpt-control", "Marketplace name must be codex-chatgpt-control");
+  assert(marketplace.name === "chatgpt-pro-review-bridge", "Marketplace name must be chatgpt-pro-review-bridge");
   const entry = marketplace.plugins?.find(plugin => plugin.name === "codex-chatgpt-control");
   assert(entry, "Marketplace must include codex-chatgpt-control entry");
   assert(entry.source?.path === "./plugins/codex-chatgpt-control", "Marketplace plugin path is incorrect");
   assert(entry.policy?.installation === "AVAILABLE", "Marketplace installation policy must be AVAILABLE");
   assert(entry.policy?.authentication === "ON_INSTALL", "Marketplace authentication policy must be ON_INSTALL");
+  const reviewEntry = marketplace.plugins?.find(plugin => plugin.name === "chatgpt-pro-review");
+  assert(reviewEntry, "Marketplace must include chatgpt-pro-review entry");
+  assert(reviewEntry.source?.path === "./plugins/chatgpt-pro-review", "Review marketplace plugin path is incorrect");
+  assert(reviewEntry.policy?.installation === "AVAILABLE", "Review marketplace installation policy must be AVAILABLE");
+  assert(reviewEntry.policy?.authentication === "ON_INSTALL", "Review marketplace authentication policy must be ON_INSTALL");
 
   const manifest = await readJson(manifestPath);
   const releasePackage = await readJson(releasePackagePath);
@@ -166,16 +190,43 @@ async function main() {
   assert(proSkill.includes("../../runtime/import-chatgpt-control.mjs"), "Pro skill must use plugin runtime loader");
   assert(!proSkill.includes("~/.codex/skills/"), "Pro skill must not depend on an installed skill runtime");
 
+  const reviewManifest = await readJson(path.join(reviewPluginRoot, ".codex-plugin/plugin.json"));
+  const reviewBaseVersion = typeof reviewManifest.version === "string" ? reviewManifest.version.split("+", 1)[0] : undefined;
+  assert(reviewManifest.name === "chatgpt-pro-review", "Review plugin manifest name mismatch");
+  assert(reviewBaseVersion === releasePackage.version, "Review plugin base version must match the release package version");
+  assert(/^\d+\.\d+\.\d+-(?:alpha|beta|rc)\.\d+\+codex\.[a-z0-9-]+$/.test(reviewManifest.version), "Review plugin version must contain exactly one +codex.<cachebuster> suffix");
+  assert(reviewManifest.skills === "./skills/", "Review plugin manifest must point at ./skills/");
+  assert(!reviewManifest.mcpServers, "Review plugin must not declare MCP servers");
+  assert(!reviewManifest.apps, "Review plugin must not declare apps");
+  assert(reviewManifest.interface?.defaultPrompt?.length <= 3, "Review plugin defaultPrompt must contain at most 3 entries");
+  await assertReferencedAsset(reviewPluginRoot, reviewManifest.interface?.logo, "Review plugin logo", 256);
+  await assertReferencedAsset(reviewPluginRoot, reviewManifest.interface?.composerIcon, "Review plugin composerIcon", 64);
+
+  const reviewSkillRoot = path.join(reviewPluginRoot, "skills");
+  const reviewSkills = (await readdir(reviewSkillRoot, { withFileTypes: true }))
+    .filter(entry => entry.isDirectory())
+    .map(entry => entry.name)
+    .sort();
+  assert(JSON.stringify(reviewSkills) === JSON.stringify(["chatgpt-pro-code-review"]), `Review plugin skill inventory mismatch: ${reviewSkills.join(", ")}`);
+  const reviewSkill = await readFile(path.join(reviewSkillRoot, "chatgpt-pro-code-review/SKILL.md"), "utf8");
+  validateSkillFrontmatter(reviewSkill, "chatgpt-pro-code-review");
+  assert(reviewSkill.includes("../../runtime/import-chatgpt-control.mjs"), "Review skill must use its plugin runtime loader");
+  assert(reviewSkill.includes("chatgpt.reviews.codeReview"), "Review skill must invoke the first-class workflow");
+  assert(reviewSkill.includes("resubmitAllowed"), "Review skill must document exactly-once resumption");
+  assert(!reviewSkill.includes("~/.codex/skills/"), "Review skill must not depend on a developer checkout");
+  const reviewAgentMetadata = await readFile(path.join(reviewPluginRoot, "agents/openai.yaml"), "utf8");
+  assert(reviewAgentMetadata.includes('$chatgpt-pro-code-review'), "Review agents/openai.yaml must explicitly invoke $chatgpt-pro-code-review");
+
   const agentMetadata = await readFile(path.join(pluginRoot, "agents/openai.yaml"), "utf8");
   assert(agentMetadata.includes('$codex-chatgpt-control'), "agents/openai.yaml default_prompt must explicitly invoke $codex-chatgpt-control");
 
-  const pluginFiles = await listTextFiles(pluginRoot);
+  const pluginFiles = [...await listTextFiles(pluginRoot), ...await listTextFiles(reviewPluginRoot)];
   for (const file of pluginFiles) {
     const text = await readFile(file, "utf8");
     assert(!text.includes("[TODO:"), `TODO marker found in ${path.relative(root, file)}`);
   }
 
-  console.log(`Plugin layout is valid at ${pluginRoot}`);
+  console.log(`Plugin layouts are valid at ${pluginRoot} and ${reviewPluginRoot}`);
 }
 
 function validateSkillFrontmatter(text, expectedName) {

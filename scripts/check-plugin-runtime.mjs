@@ -93,41 +93,52 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const root = detectRoot(args.root);
   const distDir = path.join(nodePackageDir(root), "dist");
-  const runtimeDir = path.join(root, "plugins/codex-chatgpt-control/runtime/node");
-  const pairs = [
+  const pluginRoots = [
+    path.join(root, "plugins/codex-chatgpt-control"),
+    path.join(root, "plugins/chatgpt-pro-review")
+  ];
+  const sourcePairs = [
     [
       sourceBundle(distDir, `${PRIVATE_BUNDLE_PREFIX}.bundle.mjs`, "codex-chatgpt-control.bundle.mjs"),
-      path.join(runtimeDir, "codex-chatgpt-control.bundle.mjs")
+      "codex-chatgpt-control.bundle.mjs"
     ],
     [
       sourceBundle(distDir, `${PRIVATE_BUNDLE_PREFIX}-backend.mjs`, "codex-chatgpt-control-backend.mjs"),
-      path.join(runtimeDir, "codex-chatgpt-control-backend.mjs")
+      "codex-chatgpt-control-backend.mjs"
     ],
     [
       sourceBundle(distDir, `${PRIVATE_BUNDLE_PREFIX}-live-smoke.bundle.mjs`, "codex-chatgpt-control-live-smoke.bundle.mjs"),
-      path.join(runtimeDir, "codex-chatgpt-control-live-smoke.bundle.mjs")
+      "codex-chatgpt-control-live-smoke.bundle.mjs"
     ],
     [
       sourceBundle(distDir, `${PRIVATE_BUNDLE_PREFIX}-release-canary.bundle.mjs`, "codex-chatgpt-control-release-canary.bundle.mjs"),
-      path.join(runtimeDir, "codex-chatgpt-control-release-canary.bundle.mjs")
+      "codex-chatgpt-control-release-canary.bundle.mjs"
+    ],
+    [
+      sourceBundle(distDir, "chatgpt-pro-review-canary.bundle.mjs", "chatgpt-pro-review-canary.bundle.mjs"),
+      "chatgpt-pro-review-canary.bundle.mjs"
     ]
   ];
 
-  for (const [source, runtime] of pairs) {
-    if (!existsSync(runtime)) throw new Error(`Missing plugin runtime bundle: ${runtime}`);
-    const [sourceHash, runtimeHash] = await Promise.all([sanitizedSha256(source), sha256(runtime)]);
-    if (sourceHash !== runtimeHash) {
-      throw new Error(`Plugin runtime bundle is stale: ${path.basename(runtime)}`);
+  for (const pluginRoot of pluginRoots) {
+    const runtimeDir = path.join(pluginRoot, "runtime/node");
+    for (const [source, runtimeName] of sourcePairs) {
+      const runtime = path.join(runtimeDir, runtimeName);
+      if (!existsSync(runtime)) throw new Error(`Missing plugin runtime bundle: ${runtime}`);
+      const [sourceHash, runtimeHash] = await Promise.all([sanitizedSha256(source), sha256(runtime)]);
+      if (sourceHash !== runtimeHash) {
+        throw new Error(`Plugin runtime bundle is stale: ${path.basename(runtime)}`);
+      }
+    }
+
+    const loaderPath = path.join(pluginRoot, "runtime/import-chatgpt-control.mjs");
+    const loader = await readFile(loaderPath, "utf8");
+    if (!loader.includes("./node/codex-chatgpt-control.bundle.mjs")) {
+      throw new Error(`Plugin runtime loader does not import the bundled runtime: ${pluginRoot}`);
     }
   }
 
-  const loaderPath = path.join(root, "plugins/codex-chatgpt-control/runtime/import-chatgpt-control.mjs");
-  const loader = await readFile(loaderPath, "utf8");
-  if (!loader.includes("./node/codex-chatgpt-control.bundle.mjs")) {
-    throw new Error("Plugin runtime loader does not import the bundled runtime");
-  }
-
-  console.log("Plugin runtime bundles match package dist output");
+  console.log("Both plugin runtime bundles match package dist output");
 }
 
 main().catch(error => {

@@ -1,0 +1,5 @@
+interface:
+  display_name: "ChatGPT Pro Review Bridge"
+  short_description: "Verified visible-Pro repository review workflow"
+  brand_color: "#0B5FFF"
+  default_prompt: "Use $chatgpt-pro-code-review to review this branch against main and return the complete verified Pro response."

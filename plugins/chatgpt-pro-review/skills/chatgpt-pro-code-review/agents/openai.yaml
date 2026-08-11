@@ -1,0 +1,4 @@
+interface:
+  display_name: "ChatGPT Pro Code Review"
+  short_description: "Offload full repository reviews to visible Pro"
+  default_prompt: "Use $chatgpt-pro-code-review to review this branch against main and return the complete verified Pro response."
