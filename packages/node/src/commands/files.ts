@@ -765,8 +765,9 @@ async function tryGeneratedFilePreviewDownload(
 
     const assistant = assistantMessages.nth?.(selected.assistantIndex) ?? assistantMessages;
     const role = selected.tag === "button" ? "button" : "link";
-    const affordances = assistant.getByRole?.(role, { name: selected.filename, exact: true })
-      ?? assistant.locator?.(`${selected.tag}[aria-label="${escapeCssAttribute(selected.filename)}"]`);
+    const controlLabel = selected.controlLabel ?? selected.filename;
+    const affordances = assistant.getByRole?.(role, { name: controlLabel, exact: true })
+      ?? assistant.locator?.(`${selected.tag}[aria-label="${escapeCssAttribute(controlLabel)}"]`);
     const affordanceCount = await locatorCountWithTimeout(
       affordances,
       localGuardTimeout(timeoutMs, 5000),
@@ -794,7 +795,17 @@ async function tryGeneratedFilePreviewDownload(
     }
 
     await affordance.click({ timeoutMs: localGuardTimeout(timeoutMs, 10000) });
-    const preview = requiredLocator(page, `section[aria-label="${escapeCssAttribute(selected.filename)}"]`);
+    const labelledPreview = requiredLocator(page, `section[aria-label="${escapeCssAttribute(selected.filename)}"]`);
+    const labelledPreviewCount = typeof labelledPreview.count === "function"
+      ? await locatorCountWithTimeout(
+          labelledPreview,
+          localGuardTimeout(timeoutMs, 2000),
+          "generated_file_labelled_preview_count_timeout"
+        )
+      : undefined;
+    const workbookPreviews = requiredLocator(page, "section[data-testid^='popcorn-']");
+    const workbookPreview = workbookPreviews.filter?.({ hasText: selected.filename }) ?? workbookPreviews;
+    const preview = labelledPreviewCount === 0 ? workbookPreview : labelledPreview;
     const download = await waitForPreviewDownloadControl(page, preview, timeoutMs);
     if (download === undefined) {
       throw new Error(`The artifact preview for ${selected.filename} did not expose a visible Download control.`);
@@ -833,23 +844,38 @@ export async function inspectGeneratedFileAffordances(
           return true;
         };
         const fileLike = (value: string): boolean => /^[^\\/\r\n]{1,255}\.[a-z0-9][a-z0-9._-]{0,15}$/i.test(value);
+        const normalizedFilename = (value: string): string => {
+          const trimmed = value.trim();
+          return /^download\s+(.+\.[a-z0-9][a-z0-9._-]{0,15})$/i.exec(trimmed)?.[1]?.trim() ?? trimmed;
+        };
         const assistants = Array.from(document.querySelectorAll("[data-message-author-role='assistant']"));
         return assistants.flatMap((assistant, assistantIndex) => {
           const occurrences = new Map<string, number>();
           return Array.from(assistant.querySelectorAll("button[aria-label], a[download], a[href*='/backend-api/files/']"))
             .filter(visible)
-            .map(element => ({
-              assistantIndex,
-              filename: (element.getAttribute("aria-label") ?? element.textContent ?? "").trim(),
-              tag: element.tagName.toLocaleLowerCase(),
-              text: (element.textContent ?? "").trim()
-            }))
-            .filter(item => (item.tag === "button" || item.tag === "a") && fileLike(item.filename) && item.filename === item.text)
-            .map(({ assistantIndex: index, filename, tag }) => {
-              const key = `${tag}\u0000${filename}`;
+            .map(element => {
+              const controlLabel = (element.getAttribute("aria-label") ?? element.textContent ?? "").trim();
+              const text = (element.textContent ?? "").trim();
+              return {
+                assistantIndex,
+                filename: normalizedFilename(controlLabel),
+                controlLabel,
+                tag: element.tagName.toLocaleLowerCase(),
+                textFilename: normalizedFilename(text)
+              };
+            })
+            .filter(item => (item.tag === "button" || item.tag === "a") && fileLike(item.filename) && item.filename === item.textFilename)
+            .map(({ assistantIndex: index, filename, controlLabel, tag }) => {
+              const key = `${tag}\u0000${controlLabel}`;
               const occurrenceIndex = occurrences.get(key) ?? 0;
               occurrences.set(key, occurrenceIndex + 1);
-              return { assistantIndex: index, filename, tag, occurrenceIndex };
+              return {
+                assistantIndex: index,
+                filename,
+                ...(controlLabel === filename ? {} : { controlLabel }),
+                tag,
+                occurrenceIndex
+              };
             });
         });
       }),
@@ -870,17 +896,30 @@ export async function inspectGeneratedFileAffordances(
   const buttonPattern = /<(button|a)\b[^>]*\baria-label=(['"])(.*?)\2[^>]*>([\s\S]*?)<\/\1>/gi;
   let match: RegExpExecArray | null;
   while ((match = buttonPattern.exec(html)) !== null) {
-    const filename = decodeBasicHtml(match[3] ?? "").trim();
+    const controlLabel = decodeBasicHtml(match[3] ?? "").trim();
     const text = decodeBasicHtml((match[4] ?? "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
-    if (/^[^\\/\r\n]{1,255}\.[a-z0-9][a-z0-9._-]{0,15}$/i.test(filename) && filename === text) {
+    const filename = normalizeGeneratedFileControlLabel(controlLabel);
+    const textFilename = normalizeGeneratedFileControlLabel(text);
+    if (/^[^\\/\r\n]{1,255}\.[a-z0-9][a-z0-9._-]{0,15}$/i.test(filename) && filename === textFilename) {
       const tag = (match[1] ?? "button").toLocaleLowerCase() as "button" | "a";
-      const key = `${tag}\u0000${filename}`;
+      const key = `${tag}\u0000${controlLabel}`;
       const occurrenceIndex = occurrences.get(key) ?? 0;
       occurrences.set(key, occurrenceIndex + 1);
-      candidates.push({ assistantIndex: 0, filename, tag, occurrenceIndex });
+      candidates.push({
+        assistantIndex: 0,
+        filename,
+        ...(controlLabel === filename ? {} : { controlLabel }),
+        tag,
+        occurrenceIndex
+      });
     }
   }
   return candidates;
+}
+
+function normalizeGeneratedFileControlLabel(value: string): string {
+  const trimmed = value.trim();
+  return /^download\s+(.+\.[a-z0-9][a-z0-9._-]{0,15})$/i.exec(trimmed)?.[1]?.trim() ?? trimmed;
 }
 
 function selectGeneratedFileAffordance(

@@ -572,6 +572,7 @@ export type GeneratedArtifact = {
 export type GeneratedFileAffordance = {
   assistantIndex: number;
   filename: string;
+  controlLabel?: string;
   tag: "button" | "a";
   occurrenceIndex: number;
 };
