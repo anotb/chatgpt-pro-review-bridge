@@ -103,6 +103,8 @@ import {
 import { streamFromRunResult } from "./runner/stream.js";
 import { redactReportValue, type ReportRedactionOptions } from "./safety/report-redaction.js";
 import { explainCommandBlocker, type BlockerExplanation, type ExplainBlockerOptions } from "./diagnostics/blockers.js";
+import { codeReview } from "./reviews/code-review.js";
+import type { ProCodeReviewArgs, ProCodeReviewResult } from "./reviews/types.js";
 
 export type ChatGPTClientOptions = RuntimeEnv & {
   defaults?: {
@@ -287,6 +289,9 @@ export type ChatGPTClient = {
   response: {
     copy(args?: CopyResponseArgs): Promise<CommandResult<unknown>>;
   };
+  reviews: {
+    codeReview(args: ProCodeReviewArgs): Promise<ProCodeReviewResult>;
+  };
 };
 
 export function createChatGPT(options: ChatGPTClientOptions = {}): ChatGPTClient {
@@ -397,6 +402,9 @@ export function createChatGPT(options: ChatGPTClientOptions = {}): ChatGPTClient
     },
     response: {
       copy: args => copyResponse(env, args)
+    },
+    reviews: {
+      codeReview: args => codeReview(env, args)
     }
   };
 }

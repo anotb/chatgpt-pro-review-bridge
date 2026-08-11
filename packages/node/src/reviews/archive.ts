@@ -1,0 +1,113 @@
+import { createHash, randomBytes } from "node:crypto";
+import { copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+
+import type { ReviewArtifact } from "./types.js";
+
+export async function sha256File(path: string): Promise<string> {
+  return createHash("sha256").update(await readFile(path)).digest("hex");
+}
+
+export function sha256Text(value: string | Buffer): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+export async function createReviewArchive(
+  repositoryRoot: string,
+  archiveRoot: string,
+  headSha: string | undefined,
+  now = new Date()
+): Promise<string> {
+  const root = isAbsolute(archiveRoot) ? resolve(archiveRoot) : resolve(repositoryRoot, archiveRoot);
+  const timestamp = now.toISOString().replace(/[:.]/g, "-");
+  const suffix = headSha?.slice(0, 12) ?? randomBytes(6).toString("hex");
+  const path = join(root, `${timestamp}-${suffix}`);
+  await mkdir(join(path, "context"), { recursive: true });
+  await mkdir(join(path, "artifacts"), { recursive: true });
+  return path;
+}
+
+export async function writeImmutableFile(path: string, data: string | Buffer): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
+  await writeFile(temporary, data, { flag: "wx" });
+  await rename(temporary, path);
+}
+
+export async function writeImmutableJson(path: string, data: unknown): Promise<void> {
+  await writeImmutableFile(path, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+export function sanitizeArtifactFilename(name: string, fallback = "artifact"): string {
+  const leaf = basename(name.replace(/\\/g, "/"));
+  const cleaned = leaf
+    .normalize("NFKC")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/[. ]+$/g, "")
+    .trim();
+  const usable = cleaned.length > 0 && cleaned !== "." && cleaned !== ".." ? cleaned : fallback;
+  return usable.slice(0, 180);
+}
+
+export function collisionSafeFilename(name: string, used: Set<string>): string {
+  const safe = sanitizeArtifactFilename(name);
+  const key = safe.toLocaleLowerCase();
+  if (!used.has(key)) {
+    used.add(key);
+    return safe;
+  }
+  const dot = safe.lastIndexOf(".");
+  const stem = dot > 0 ? safe.slice(0, dot) : safe;
+  const extension = dot > 0 ? safe.slice(dot) : "";
+  for (let index = 2; index < 10_000; index += 1) {
+    const candidate = `${stem}-${index}${extension}`;
+    const candidateKey = candidate.toLocaleLowerCase();
+    if (!used.has(candidateKey)) {
+      used.add(candidateKey);
+      return candidate;
+    }
+  }
+  throw new Error(`Unable to allocate a collision-safe artifact filename for ${JSON.stringify(name)}.`);
+}
+
+export async function preserveDownloadedArtifact(
+  downloadedPath: string,
+  archiveDirectory: string,
+  desiredName: string,
+  used: Set<string>,
+  metadata: { kind?: string; sourceLabel?: string; sourceReference?: string } = {}
+): Promise<ReviewArtifact> {
+  const name = collisionSafeFilename(desiredName, used);
+  const artifactsRoot = resolve(archiveDirectory, "artifacts");
+  const target = resolve(artifactsRoot, name);
+  assertPathInside(artifactsRoot, target);
+  await mkdir(artifactsRoot, { recursive: true });
+  if (resolve(downloadedPath) !== target) await copyFile(downloadedPath, target);
+  const saved = await stat(target);
+  const artifact: ReviewArtifact = {
+    name,
+    path: target,
+    sizeBytes: saved.size,
+    sha256: await sha256File(target)
+  };
+  if (metadata.kind !== undefined) artifact.kind = metadata.kind;
+  if (metadata.sourceLabel !== undefined) artifact.sourceLabel = metadata.sourceLabel;
+  if (metadata.sourceReference !== undefined) artifact.sourceReference = metadata.sourceReference;
+  return artifact;
+}
+
+export function assertPathInside(root: string, target: string): void {
+  const rel = relative(resolve(root), resolve(target));
+  if (rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel))) return;
+  throw new Error(`Refusing path outside archive root: ${target}`);
+}
+
+export function markdownSectionIndex(markdown: string): Array<{ heading: string; level: number; offset: number }> {
+  const entries: Array<{ heading: string; level: number; offset: number }> = [];
+  const pattern = /^(#{1,6})\s+(.+?)\s*$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(markdown)) !== null) {
+    entries.push({ heading: match[2] ?? "", level: match[1]?.length ?? 1, offset: match.index });
+  }
+  return entries;
+}

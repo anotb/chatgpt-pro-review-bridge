@@ -147,6 +147,7 @@ describe("createChatGPT", () => {
     expect(typeof chatgpt.files.preflight).toBe("function");
     expect(typeof chatgpt.files.attach).toBe("function");
     expect(typeof chatgpt.response.copy).toBe("function");
+    expect(typeof chatgpt.reviews.codeReview).toBe("function");
   });
 
   it("plans create-image downloads through artifact primitives", () => {

@@ -1,0 +1,527 @@
+import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
+
+import { readPageState, type PageState } from "../browser/page-state.js";
+import { captureArtifactBaseline, captureArtifactDelta } from "../commands/artifact-inventory.js";
+import { downloadLatestArtifact } from "../commands/artifacts.js";
+import { applyConfiguration, configurationMatchesSelection, inspectConfiguration, restoreConfiguration, snapshotConfiguration } from "../commands/configuration.js";
+import { openExperience } from "../commands/experience.js";
+import { attachFiles, downloadLatestFile } from "../commands/files.js";
+import { composeMessage, messageStatus, readLatest, submitMessage, waitForMessage } from "../commands/messages.js";
+import { bootstrap } from "../commands/session.js";
+import { newThread, openThread } from "../commands/threads.js";
+import { redactReportValue } from "../safety/report-redaction.js";
+import type {
+  ApplyConfigurationData,
+  ArtifactDeltaData,
+  ArtifactInventoryData,
+  CommandResult,
+  ConfigurationInspectionData,
+  ConfigurationSnapshotData,
+  DownloadedFile,
+  MessageStatusData,
+  OpenThreadData,
+  ReadLatestData,
+  RestoreConfigurationData,
+  RuntimeEnv,
+  SubmitData,
+  WaitData
+} from "../types.js";
+import {
+  markdownSectionIndex,
+  preserveDownloadedArtifact,
+  sanitizeArtifactFilename,
+  sha256Text,
+  writeImmutableFile,
+  writeImmutableJson
+} from "./archive.js";
+import { parseFindingsAppendix } from "./findings.js";
+import { prepareReviewContext, ReviewPreparationError } from "./packet-builder.js";
+import type {
+  PreparedReviewContext,
+  ProCodeReviewArgs,
+  ProCodeReviewResult,
+  ReviewArtifact,
+  ReviewState,
+  ReviewStepEvidence
+} from "./types.js";
+
+export type ReviewWorkflowPort = {
+  now(): Date;
+  bootstrap(): Promise<CommandResult<unknown>>;
+  openChat(): Promise<CommandResult<unknown>>;
+  newThread(): Promise<CommandResult<OpenThreadData>>;
+  openThread(url: string): Promise<CommandResult<OpenThreadData>>;
+  snapshotConfiguration(): Promise<CommandResult<ConfigurationSnapshotData>>;
+  applyPro(): Promise<CommandResult<ApplyConfigurationData>>;
+  inspectConfiguration(): Promise<CommandResult<ConfigurationInspectionData>>;
+  restoreConfiguration(snapshot: ConfigurationSnapshotData): Promise<CommandResult<RestoreConfigurationData>>;
+  pageState(): Promise<PageState>;
+  artifactBaseline(): Promise<CommandResult<ArtifactInventoryData>>;
+  artifactDelta(baseline: ArtifactInventoryData): Promise<CommandResult<ArtifactDeltaData>>;
+  attach(paths: string[]): Promise<CommandResult<unknown>>;
+  messageStatus(): Promise<CommandResult<MessageStatusData>>;
+  compose(text: string): Promise<CommandResult<unknown>>;
+  submit(text: string, previousTurnCount: number | undefined): Promise<CommandResult<SubmitData>>;
+  waitMetadata(afterAssistantTurnCount: number, timeoutMs: number, stableMs: number, pollMs: number): Promise<CommandResult<WaitData>>;
+  readFullMarkdown(): Promise<CommandResult<ReadLatestData>>;
+  downloadFile(destDir: string, filename: string, assistantIndex: number): Promise<CommandResult<DownloadedFile>>;
+  downloadImage(destDir: string, index: number, turnId?: string): Promise<CommandResult<DownloadedFile>>;
+};
+
+class ReviewWorkflowError extends Error {
+  constructor(readonly result: CommandResult<unknown>, readonly state: ReviewState) {
+    super(result.blocker?.message ?? result.error?.message ?? `Review workflow failed during ${state}.`);
+    this.name = "ReviewWorkflowError";
+  }
+}
+
+class ReviewInProgress extends Error {
+  constructor() {
+    super("The submitted review is still generating.");
+    this.name = "ReviewInProgress";
+  }
+}
+
+export async function codeReview(env: RuntimeEnv, args: ProCodeReviewArgs): Promise<ProCodeReviewResult> {
+  return runCodeReviewWithPort(args, defaultReviewWorkflowPort(env));
+}
+
+export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: ReviewWorkflowPort): Promise<ProCodeReviewResult> {
+  const headRef = args.headRef ?? "HEAD";
+  const requested = { experience: "chat" as const, intelligence: "Pro" as const };
+  const steps: ReviewStepEvidence[] = [];
+  const warnings: string[] = [];
+  const artifacts: ReviewArtifact[] = [];
+  let prepared: PreparedReviewContext | undefined;
+  let archiveDirectory = args.resume?.archiveDirectory;
+  let configurationBefore: ConfigurationSnapshotData | undefined;
+  let applied: ConfigurationInspectionData | undefined;
+  let verifiedBeforeSubmit = false;
+  let verifiedAfterCompletion = false;
+  let restored = false;
+  let restorationVerified = false;
+  let submitted = args.resume?.submitted === true;
+  let threadUrl = args.resume?.threadUrl;
+  let threadId: string | undefined;
+  let responseMarkdown: string | undefined;
+  let responseSha256: string | undefined;
+  let blocker: CommandResult["blocker"] | undefined;
+  let terminalStatus: ProCodeReviewResult["status"] = "failed";
+  let artifactBaseline: ArtifactInventoryData | undefined = args.resume?.artifactBaseline;
+  let primaryError: unknown;
+
+  const runStep = async <T>(state: ReviewState, operation: () => Promise<T>): Promise<T> => {
+    const startedAt = port.now().toISOString();
+    try {
+      const value = await operation();
+      const endedAt = port.now().toISOString();
+      if (isCommandResult(value)) {
+        const evidence: ReviewStepEvidence = { state, startedAt, endedAt, ok: value.ok, status: value.status };
+        if (value.data !== undefined) evidence.data = state === "READ_FULL_MARKDOWN_ONCE" ? responseMetadata(value.data) : value.data;
+        if (value.blocker !== undefined) evidence.blocker = value.blocker;
+        steps.push(evidence);
+      } else {
+        steps.push({ state, startedAt, endedAt, ok: true, data: value });
+      }
+      return value;
+    } catch (error) {
+      steps.push({ state, startedAt, endedAt: port.now().toISOString(), ok: false, status: error instanceof Error ? error.name : "error" });
+      throw error;
+    }
+  };
+
+  try {
+    if (args.resume === undefined) {
+      prepared = await runStep("PREPARE_CONTEXT", () => prepareReviewContext(args, port.now()));
+      archiveDirectory = prepared.archiveDirectory;
+    } else if (archiveDirectory === undefined) {
+      throw new ReviewPreparationError("resume.archiveDirectory is required so provenance and the original configuration can be recovered without resubmitting.", "resume_archive_required");
+    }
+
+    requireOk(await runStep("PREFLIGHT_BROWSER", () => port.bootstrap()), "PREFLIGHT_BROWSER");
+    requireOk(await runStep("OPEN_CHAT", () => port.openChat()), "OPEN_CHAT");
+    if (args.resume === undefined) {
+      const opened = requireData(await runStep("OPEN_CHAT", () => port.newThread()), "OPEN_CHAT");
+      threadUrl = opened.data.url || opened.context.url;
+      threadId = opened.data.conversationId ?? opened.context.conversationId;
+    } else {
+      const opened = requireData(await runStep("OPEN_CHAT", () => port.openThread(args.resume!.threadUrl)), "OPEN_CHAT");
+      threadUrl = opened.data.url || opened.context.url || args.resume.threadUrl;
+      threadId = opened.data.conversationId ?? opened.context.conversationId;
+    }
+    await assertPageSafe(port, "PREFLIGHT_BROWSER");
+
+    if (args.resume !== undefined && archiveDirectory !== undefined) {
+      configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory).catch(() => undefined);
+    }
+    if (configurationBefore === undefined) {
+      configurationBefore = requireData(await runStep("SNAPSHOT_CONFIGURATION", () => port.snapshotConfiguration()), "SNAPSHOT_CONFIGURATION").data;
+    } else {
+      steps.push({
+        state: "SNAPSHOT_CONFIGURATION",
+        startedAt: port.now().toISOString(),
+        endedAt: port.now().toISOString(),
+        ok: true,
+        status: "restored_from_archive",
+        data: { capturedAt: configurationBefore.capturedAt, selection: configurationBefore.selection }
+      });
+    }
+    if (archiveDirectory !== undefined && args.resume === undefined) {
+      await writeImmutableJson(join(archiveDirectory, "configuration.before.json"), configurationBefore);
+    }
+
+    const appliedResult = requireData(await runStep("APPLY_PRO", () => port.applyPro()), "APPLY_PRO");
+    applied = appliedResult.data.after;
+    verifiedBeforeSubmit = appliedResult.data.verified && configurationMatchesSelection(appliedResult.data.after, { intelligence: "Pro" });
+    if (!verifiedBeforeSubmit) throw workflowBlocker("model_fallback", "pro_precondition_unverified", "The visible Chat setting did not strictly verify Pro before submission.", "VERIFY_PRO_BEFORE_SUBMIT");
+    await runStep("VERIFY_PRO_BEFORE_SUBMIT", async () => {
+      await assertPageSafe(port, "VERIFY_PRO_BEFORE_SUBMIT");
+      return { verified: true, active: appliedResult.data.after.active };
+    });
+
+    if (artifactBaseline === undefined) {
+      artifactBaseline = requireData(await runStep("BASELINE_ARTIFACTS", () => port.artifactBaseline()), "BASELINE_ARTIFACTS").data;
+    }
+
+    let baselineAssistantCount = 0;
+    if (args.resume === undefined) {
+      const attachments = [prepared!.manifestPath, ...prepared!.packetPaths];
+      requireOk(await runStep("ATTACH_PACKETS", () => port.attach(attachments)), "ATTACH_PACKETS");
+      const beforeMessage = requireData(await port.messageStatus(), "SUBMIT_ONCE");
+      baselineAssistantCount = beforeMessage.data.assistantTurnCount;
+      requireOk(await port.compose(prepared!.prompt), "SUBMIT_ONCE");
+      await assertPageSafe(port, "VERIFY_PRO_BEFORE_SUBMIT");
+      submitted = true;
+      const submitResult = await runStep("SUBMIT_ONCE", () => port.submit(prepared!.prompt, beforeMessage.data.turnCount));
+      threadUrl = submitResult.context.url ?? threadUrl;
+      threadId = submitResult.context.conversationId ?? threadId;
+      if (archiveDirectory !== undefined) {
+        await writeImmutableJson(join(archiveDirectory, "submission.json"), {
+          submitted: true,
+          resubmitAllowed: false,
+          submittedAt: port.now().toISOString(),
+          thread: { url: threadUrl, id: threadId },
+          artifactBaseline,
+          result: redactReportValue(submitResult)
+        });
+      }
+      requireOk(submitResult, "SUBMIT_ONCE");
+    } else {
+      const current = requireData(await port.messageStatus(), "POLL_METADATA");
+      baselineAssistantCount = Math.max(0, current.data.assistantTurnCount - (current.data.completionState === "complete" ? 1 : 0));
+    }
+
+    const callTimeoutMs = positive(args.polling?.callTimeoutMs, 45_000);
+    const totalTimeoutMs = positive(args.polling?.totalTimeoutMs, 1_800_000);
+    const stableMs = positive(args.polling?.stableMs, 3_000);
+    const pollMs = positive(args.polling?.pollMs, 1_000);
+    const maxCalls = Math.max(1, Math.ceil(totalTimeoutMs / callTimeoutMs));
+    let complete = false;
+    for (let call = 0; call < maxCalls; call += 1) {
+      const wait = await runStep("POLL_METADATA", () => port.waitMetadata(baselineAssistantCount, callTimeoutMs, stableMs, pollMs));
+      await assertPageSafe(port, "POLL_METADATA");
+      if (wait.ok && wait.data?.complete === true) {
+        complete = true;
+        break;
+      }
+      if (wait.status !== "timeout") requireOk(wait, "POLL_METADATA");
+    }
+    if (!complete) throw new ReviewInProgress();
+
+    const read = requireData(await runStep("READ_FULL_MARKDOWN_ONCE", () => port.readFullMarkdown()), "READ_FULL_MARKDOWN_ONCE");
+    responseMarkdown = read.data.markdown ?? read.data.text;
+    responseSha256 = sha256Text(responseMarkdown);
+    if (archiveDirectory !== undefined) await writeImmutableFile(join(archiveDirectory, "response.md"), responseMarkdown);
+
+    const after = requireData(await runStep("VERIFY_PRO_AFTER_COMPLETION", () => port.inspectConfiguration()), "VERIFY_PRO_AFTER_COMPLETION");
+    await assertPageSafe(port, "VERIFY_PRO_AFTER_COMPLETION");
+    verifiedAfterCompletion = after.data.verified && configurationMatchesSelection(after.data, { intelligence: "Pro" });
+    if (!verifiedAfterCompletion) throw workflowBlocker("model_fallback", "pro_postcondition_unverified", "The visible Chat setting no longer strictly verifies Pro after completion; the response is archived but is not accepted as a verified Pro review.", "VERIFY_PRO_AFTER_COMPLETION");
+
+    const delta = requireData(await runStep("ENUMERATE_NEW_ARTIFACTS", () => port.artifactDelta(artifactBaseline!)), "ENUMERATE_NEW_ARTIFACTS").data;
+    if ((args.output?.downloadArtifacts ?? "all") === "all" && archiveDirectory !== undefined) {
+      const artifactArchiveDirectory = archiveDirectory;
+      await runStep("DOWNLOAD_AND_HASH_ARTIFACTS", async () => {
+        const staging = await mkdtemp(join(tmpdir(), "chatgpt-pro-review-artifacts-"));
+        const used = new Set<string>();
+        try {
+          for (const item of delta.added) {
+            let downloaded: CommandResult<DownloadedFile>;
+            let desiredName: string;
+            let metadata: { kind?: string; sourceLabel?: string; sourceReference?: string };
+            if (item.kind === "file") {
+              desiredName = sanitizeArtifactFilename(item.filename, "generated-file");
+              downloaded = await port.downloadFile(staging, item.filename, item.assistantIndex);
+              metadata = { kind: "file", sourceLabel: item.filename, sourceReference: `assistant:${item.assistantIndex}` };
+            } else {
+              desiredName = `generated-image-${String(item.artifact.index + 1).padStart(3, "0")}.png`;
+              downloaded = await port.downloadImage(staging, item.artifact.index, item.artifact.turnId);
+              metadata = {
+                kind: "image",
+                sourceLabel: item.artifact.alt ?? item.artifact.ariaLabel ?? `image ${item.artifact.index}`,
+                ...(item.artifact.turnId === undefined ? {} : { sourceReference: item.artifact.turnId })
+              };
+            }
+            const saved = requireData(downloaded, "DOWNLOAD_AND_HASH_ARTIFACTS").data;
+            artifacts.push(await preserveDownloadedArtifact(saved.path, artifactArchiveDirectory, desiredName, used, metadata));
+          }
+        } finally {
+          await rm(staging, { recursive: true, force: true });
+        }
+        return { downloaded: artifacts.length };
+      });
+    } else if (delta.added.length > 0) {
+      warnings.push(`${delta.added.length} new artifacts were detected but downloadArtifacts was explicitly disabled.`);
+    }
+
+    if (archiveDirectory !== undefined && responseMarkdown !== undefined) {
+      const completedArchiveDirectory = archiveDirectory;
+      const archivedResponse = responseMarkdown;
+      await runStep("ARCHIVE_RUN", async () => {
+        const findings = parseFindingsAppendix(archivedResponse);
+        if (findings !== undefined) await writeImmutableJson(join(completedArchiveDirectory, "findings.json"), findings);
+        await writeImmutableJson(join(completedArchiveDirectory, "artifacts", "manifest.json"), artifacts);
+        return { responseSha256, findingsParsed: findings !== undefined, artifacts: artifacts.length };
+      });
+    }
+    terminalStatus = warnings.length > 0 ? "completed_with_warnings" : "completed";
+  } catch (error) {
+    primaryError = error;
+    if (error instanceof ReviewInProgress) {
+      terminalStatus = "in_progress";
+    } else if (error instanceof ReviewPreparationError) {
+      archiveDirectory = error.archiveDirectory ?? archiveDirectory;
+      terminalStatus = "blocked";
+      blocker = {
+        kind: error.code.includes("secret") ? "confirmation" : "unknown",
+        code: error.code,
+        message: error.message,
+        resumable: false
+      };
+    } else if (error instanceof ReviewWorkflowError) {
+      terminalStatus = error.result.status === "blocked" || error.result.status === "needs_confirmation" ? "blocked" : "failed";
+      blocker = error.result.blocker;
+      if (error.result.error !== undefined) warnings.push(error.result.error.message);
+    } else {
+      terminalStatus = "failed";
+      warnings.push(error instanceof Error ? error.message : String(error));
+    }
+  } finally {
+    if (configurationBefore !== undefined && (args.safeguards?.restorePreviousConfiguration ?? true)) {
+      try {
+        const restore = await runStep("RESTORE_PREVIOUS_CONFIGURATION", () => port.restoreConfiguration(configurationBefore!));
+        restored = restore.data?.restored === true;
+        restorationVerified = restore.ok && restored;
+        if (!restorationVerified) {
+          const message = restore.blocker?.message ?? restore.error?.message ?? "The prior visible Chat configuration could not be strictly restored.";
+          warnings.push(message);
+          blocker = restore.blocker ?? { kind: "configuration_restore_failed", code: "configuration_restore_failed", message, resumable: false };
+          if (terminalStatus === "completed") terminalStatus = "completed_with_warnings";
+        }
+        steps.push({
+          state: "VERIFY_RESTORATION",
+          startedAt: port.now().toISOString(),
+          endedAt: port.now().toISOString(),
+          ok: restorationVerified,
+          status: restorationVerified ? "verified" : "unverified"
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        warnings.push(`Configuration restoration failed: ${message}`);
+        blocker = { kind: "configuration_restore_failed", code: "configuration_restore_error", message, resumable: false };
+        if (terminalStatus === "completed") terminalStatus = "completed_with_warnings";
+      }
+    }
+  }
+
+  const provenance: ProCodeReviewResult["provenance"] = {
+    repositoryRoot: prepared?.manifest.repositoryRoot ?? args.repositoryRoot,
+    baseRef: prepared?.manifest.baseRef ?? args.baseRef,
+    headRef: prepared?.manifest.headRef ?? headRef
+  };
+  if (prepared?.manifest.baseSha !== undefined) provenance.baseSha = prepared.manifest.baseSha;
+  if (prepared?.manifest.headSha !== undefined) provenance.headSha = prepared.manifest.headSha;
+  if (prepared?.manifest.mergeBaseSha !== undefined) provenance.mergeBaseSha = prepared.manifest.mergeBaseSha;
+  if (prepared !== undefined) {
+    provenance.packetManifestPath = prepared.manifestPath;
+    provenance.packetManifestSha256 = prepared.manifestSha256;
+  }
+  if (responseSha256 !== undefined) provenance.responseSha256 = responseSha256;
+
+  const result: ProCodeReviewResult = {
+    ok: (terminalStatus === "completed" || terminalStatus === "completed_with_warnings")
+      && blocker?.kind !== "configuration_restore_failed",
+    status: terminalStatus,
+    submitted,
+    resubmitAllowed: false,
+    artifacts,
+    configuration: {
+      requested,
+      verifiedBeforeSubmit,
+      verifiedAfterCompletion,
+      restored,
+      restorationVerified
+    },
+    provenance,
+    warnings,
+    rawSteps: steps
+  };
+  if (configurationBefore !== undefined) result.configuration.before = configurationBefore;
+  if (applied !== undefined) result.configuration.applied = applied;
+  if (archiveDirectory !== undefined) result.archiveDirectory = archiveDirectory;
+  if (threadUrl !== undefined || threadId !== undefined) result.thread = { ...(threadUrl === undefined ? {} : { url: threadUrl }), ...(threadId === undefined ? {} : { id: threadId }) };
+  if (blocker !== undefined) result.blocker = blocker;
+  if (terminalStatus === "in_progress") result.nextAction = "poll_same_thread";
+
+  if (responseMarkdown !== undefined && (terminalStatus === "completed" || terminalStatus === "completed_with_warnings")) {
+    const mode = args.output?.mode ?? "full";
+    const hardLimit = args.output?.hardTransportLimitBytes;
+    const overHardLimit = hardLimit !== undefined && Buffer.byteLength(responseMarkdown) > hardLimit;
+    if (mode === "full" && !overHardLimit && args.output?.returnFullMarkdown !== false) {
+      result.responseMarkdown = responseMarkdown;
+    } else {
+      result.responseIndex = markdownSectionIndex(responseMarkdown);
+      if (overHardLimit) {
+        result.warnings.push(`The complete response is archived at ${join(archiveDirectory ?? "", "response.md")}, but its ${Buffer.byteLength(responseMarkdown)} bytes exceed the explicitly configured hard transport limit of ${hardLimit}. No content was summarized or truncated.`);
+        if (result.status === "completed") result.status = "completed_with_warnings";
+      }
+    }
+  }
+
+  if (archiveDirectory !== undefined) {
+    const configurationRecord = {
+      before: configurationBefore,
+      requested,
+      applied,
+      verifiedBeforeSubmit,
+      verifiedAfterCompletion,
+      restored,
+      restorationVerified
+    };
+    await writeJsonReplacing(join(archiveDirectory, "configuration.json"), configurationRecord).catch(error => result.warnings.push(`Could not archive configuration evidence: ${String(error)}`));
+    const receipt = {
+      ...result,
+      responseMarkdown: responseMarkdown === undefined ? undefined : { bytes: Buffer.byteLength(responseMarkdown), sha256: responseSha256 },
+      diagnosticMetadata: args.diagnosticMetadata,
+      primaryError: primaryError instanceof Error ? { name: primaryError.name, message: primaryError.message } : undefined
+    };
+    await writeJsonReplacing(join(archiveDirectory, "receipt.json"), receipt).catch(error => result.warnings.push(`Could not archive receipt: ${String(error)}`));
+    await writeJsonReplacing(join(archiveDirectory, "run-report.redacted.json"), redactReportValue(receipt)).catch(error => result.warnings.push(`Could not archive redacted run report: ${String(error)}`));
+  }
+  steps.push({ state: "RETURN_FULL_RESULT", startedAt: port.now().toISOString(), endedAt: port.now().toISOString(), ok: result.ok, status: result.status });
+  return result;
+}
+
+export function defaultReviewWorkflowPort(env: RuntimeEnv): ReviewWorkflowPort {
+  return {
+    now: () => env.now?.() ?? new Date(),
+    bootstrap: () => bootstrap(env, { preferExistingTab: true }),
+    openChat: () => openExperience(env, { experience: "chat" }),
+    newThread: () => newThread(env),
+    openThread: url => openThread(env, { url }),
+    snapshotConfiguration: () => snapshotConfiguration(env, { experience: "chat" }),
+    applyPro: () => applyConfiguration(env, { experience: "chat", desired: { intelligence: "Pro" }, strict: true }),
+    inspectConfiguration: () => inspectConfiguration(env, { experience: "chat", includeOptions: false }),
+    restoreConfiguration: snapshot => restoreConfiguration(env, { snapshot, strict: true }),
+    pageState: async () => {
+      if (env.page === undefined) throw new Error("No visible ChatGPT page is attached.");
+      return readPageState(env.page);
+    },
+    artifactBaseline: () => captureArtifactBaseline(env),
+    artifactDelta: baseline => captureArtifactDelta(env, { baseline }),
+    attach: paths => attachFiles(env, { paths, includeHashes: true }),
+    messageStatus: () => messageStatus(env, { maxPreviewChars: 0 }),
+    compose: text => composeMessage(env, { text, mode: "replace" }),
+    submit: (text, previousTurnCount) => submitMessage(env, { text, ...(previousTurnCount === undefined ? {} : { previousTurnCount }) }),
+    waitMetadata: (afterAssistantTurnCount, timeoutMs, stableMs, pollMs) => waitForMessage(env, {
+      afterAssistantTurnCount,
+      timeoutMs,
+      stableMs,
+      pollMs,
+      responseContent: "metadata"
+    }),
+    readFullMarkdown: () => readLatest(env, { role: "assistant", format: "markdown" }),
+    downloadFile: (destDir, filename, assistantIndex) => downloadLatestFile(env, {
+      destDir,
+      filenamePattern: `^${escapeRegExp(filename)}$`,
+      from: { assistantIndex }
+    }),
+    downloadImage: (destDir, index, turnId) => downloadLatestArtifact(env, {
+      destDir,
+      prefer: "visible_image_source",
+      which: { index, ...(turnId === undefined ? {} : { turnId }) }
+    })
+  };
+}
+
+async function assertPageSafe(port: ReviewWorkflowPort, state: ReviewState): Promise<void> {
+  const page = await port.pageState();
+  if (page.blocker !== undefined && page.blocker.kind !== "modal") {
+    throw new ReviewWorkflowError({
+      ok: false,
+      status: "blocked",
+      warnings: [],
+      blocker: { ...page.blocker, resumable: page.blocker.kind !== "model_fallback" && page.blocker.kind !== "model_unavailable" },
+      context: { timestamp: port.now().toISOString(), url: page.url }
+    }, state);
+  }
+}
+
+function requireOk<T>(result: CommandResult<T>, state: ReviewState): CommandResult<T> {
+  if (!result.ok) throw new ReviewWorkflowError(result, state);
+  return result;
+}
+
+function requireData<T>(result: CommandResult<T>, state: ReviewState): CommandResult<T> & { data: T } {
+  if (!result.ok || result.data === undefined) throw new ReviewWorkflowError(result, state);
+  return result as CommandResult<T> & { data: T };
+}
+
+function workflowBlocker(kind: NonNullable<CommandResult["blocker"]>["kind"], code: string, message: string, state: ReviewState): ReviewWorkflowError {
+  return new ReviewWorkflowError({
+    ok: false,
+    status: "blocked",
+    warnings: [],
+    blocker: { kind, code, message, resumable: false },
+    context: { timestamp: new Date().toISOString() }
+  }, state);
+}
+
+function isCommandResult(value: unknown): value is CommandResult<unknown> {
+  return typeof value === "object" && value !== null && typeof (value as { ok?: unknown }).ok === "boolean" && typeof (value as { status?: unknown }).status === "string";
+}
+
+function responseMetadata(value: unknown): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  const data = value as Partial<ReadLatestData>;
+  const text = data.markdown ?? data.text;
+  return text === undefined ? value : { format: data.format, bytes: Buffer.byteLength(text), sha256: sha256Text(text) };
+}
+
+async function readArchivedConfigurationSnapshot(archiveDirectory: string): Promise<ConfigurationSnapshotData> {
+  const value = JSON.parse(await readFile(join(archiveDirectory, "configuration.before.json"), "utf8")) as ConfigurationSnapshotData;
+  if (value.experience !== "chat" || typeof value.capturedAt !== "string") throw new Error("Archived configuration snapshot is invalid.");
+  return value;
+}
+
+async function writeJsonReplacing(path: string, value: unknown): Promise<void> {
+  const temporary = `${path}.next-${process.pid}`;
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx" });
+  try {
+    await rename(temporary, path);
+  } catch (error) {
+    if (!(["EEXIST", "EPERM", "ENOTEMPTY"] as Array<string | undefined>).includes((error as NodeJS.ErrnoException).code)) throw error;
+    await rm(path, { force: true });
+    await rename(temporary, path);
+  }
+}
+
+function positive(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && (value ?? 0) > 0 ? value! : fallback;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
