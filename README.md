@@ -101,7 +101,7 @@ The plugin contains:
 This fork also exposes a separate non-conflicting marketplace plugin. Install a pinned tag, then start a new Codex task:
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.4
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.5
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -123,7 +123,7 @@ snapshot and add the new ref explicitly before reinstalling:
 ```bash
 codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
 codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.4
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.5
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -376,6 +376,13 @@ File attachments need two separate permission gates:
 2. **Codex app gate:** in Codex settings, allow Google Chrome uploads under **Computer Use > Google Chrome > Permissions > Uploads**. Choose the most restrictive setting that still fits your workflow; for unattended local smoke tests, use the setting that always allows uploads.
 
 If either gate is missing, file upload workflows should stop with a structured permission blocker instead of retrying blindly.
+
+On current Chrome bridge builds, the Node runtime uses the tab's origin-scoped
+CDP capability only to click Chat's hidden file input with a browser user
+gesture. The approved native chooser still performs the local-file handoff;
+packet bytes are not copied through page scripts or hidden network endpoints.
+An unavailable browser upload surface and a disconnected bridge are reported
+separately from an explicit permission denial.
 
 ## Repository Layout
 

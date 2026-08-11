@@ -12,7 +12,7 @@ The bridge lets any Codex host invoke the same installed workflow while the dele
 ## Install a pinned release
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.4
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.5
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -28,6 +28,12 @@ The workflow fails closed before submission when either permission is absent.
 The signed-in session and these local settings are not distributed by the
 plugin.
 
+The current Chrome bridge opens Chat's hidden file input with an origin-scoped
+browser user gesture and then uses the approved native file chooser. It does
+not copy review-packet bytes through page scripts or call hidden ChatGPT
+endpoints. Upload-surface failures remain distinct from permission denials and
+always stop before prompt submission.
+
 Start a new Codex task so skill metadata reloads. A marketplace pinned with
 `--ref` remains pinned when refreshed. To move it to a newer immutable tag,
 remove the installed plugin and marketplace snapshot, then add the new tag:
@@ -35,7 +41,7 @@ remove the installed plugin and marketplace snapshot, then add the new tag:
 ```bash
 codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
 codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.4
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.5
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 

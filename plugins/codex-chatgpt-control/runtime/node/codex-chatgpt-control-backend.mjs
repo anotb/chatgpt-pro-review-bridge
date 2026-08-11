@@ -5452,7 +5452,34 @@ async function attachFiles(env, args) {
     }
     return resultOk(data, await contextFromPage(page), preflight.warnings);
   } catch (error) {
-    if (isUploadBridgeBlocker(error)) {
+    if (isUploadTransportFailure(error)) {
+      return {
+        ok: false,
+        status: "blocked",
+        warnings: [],
+        blocker: {
+          kind: "browser_bridge_unavailable",
+          code: "upload_transport_failed",
+          message: "The Codex Chrome bridge disconnected while handing files to ChatGPT's visible composer. File attachment did not complete, so callers must not submit the prompt.",
+          visibleText: error instanceof Error ? error.message : String(error),
+          remediation: [
+            {
+              label: "Retry live attachment",
+              instruction: "Retry the attachment from the live Codex Chrome runtime; the operation is safe to resume because file attachment did not complete.",
+              userActionRequired: false
+            },
+            {
+              label: "Restart bridge if repeated",
+              instruction: "If the bridge disconnects again, restart Chrome or Codex before retrying. Do not change upload permissions unless Chrome explicitly reports a permission denial.",
+              userActionRequired: true
+            }
+          ],
+          resumable: true
+        },
+        context: await contextFromPage(page)
+      };
+    }
+    if (isUploadPermissionBlocker(error)) {
       return {
         ok: false,
         status: "blocked",
@@ -5463,6 +5490,28 @@ async function attachFiles(env, args) {
           message: uploadPermissionMessage(error),
           visibleText: uploadPermissionDetails(error),
           remediation: uploadPermissionRemediation(),
+          resumable: true
+        },
+        context: await contextFromPage(page)
+      };
+    }
+    if (isUploadPathFailure(error)) {
+      return {
+        ok: false,
+        status: "blocked",
+        warnings: [],
+        blocker: {
+          kind: "upload_failed",
+          code: "upload_path_unavailable",
+          message: "None of the browser's supported ChatGPT file-attachment paths completed. Callers must not submit the prompt.",
+          visibleText: error instanceof Error ? error.message : String(error),
+          remediation: [
+            {
+              label: "Retry live attachment",
+              instruction: "Retry from the live Codex Chrome runtime after confirming the ChatGPT composer is visible. Do not change upload permissions unless Chrome explicitly reports a permission denial.",
+              userActionRequired: false
+            }
+          ],
           resumable: true
         },
         context: await contextFromPage(page)
@@ -5658,6 +5707,12 @@ async function uploadFiles(page, files, timeoutMs) {
       }
     },
     {
+      name: "cdp-file-input-chooser",
+      run: async () => {
+        await clickHiddenFileInputWithCdp(page, paths, timeoutMs);
+      }
+    },
+    {
       name: "add-photos-files-menu-item",
       run: async () => {
         await clickChatGPTAddPhotosMenuItem(page, paths, timeoutMs);
@@ -5747,6 +5802,43 @@ async function clickFileChooserLocator(page, locator, paths, timeoutMs) {
   await validateChooserMultiplicity(chooser, paths);
   try {
     await chooser.setFiles(paths);
+  } catch (error) {
+    throw new Error(`fileChooser.setFiles failed. ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+async function clickHiddenFileInputWithCdp(page, paths, timeoutMs) {
+  if (typeof page.waitForEvent !== "function") {
+    throw new Error("The active browser page does not expose file chooser events.");
+  }
+  const rawCapability = await Promise.resolve(page.capabilities?.get?.("cdp"));
+  const cdp = rawCapability;
+  if (typeof cdp?.send !== "function") {
+    throw new Error("The active browser page does not expose the scoped CDP capability needed to click a hidden file input.");
+  }
+  const chooserPromise = waitForFileChooser(page, timeoutMs).then(
+    (chooser) => ({ ok: true, chooser }),
+    (error) => ({ ok: false, error })
+  );
+  try {
+    await cdp.send("Runtime.evaluate", {
+      expression: `document.querySelector("#upload-files, input[type='file']:not([accept='image/*']), input[type='file']")?.click()`,
+      userGesture: true,
+      awaitPromise: true,
+      returnByValue: true
+    }, {
+      timeoutMs: Math.min(timeoutMs, 1e4)
+    });
+  } catch (error) {
+    await chooserPromise;
+    throw error;
+  }
+  const chooserResult = await chooserPromise;
+  if (!chooserResult.ok) {
+    throw chooserResult.error;
+  }
+  await validateChooserMultiplicity(chooserResult.chooser, paths);
+  try {
+    await chooserResult.chooser.setFiles(paths);
   } catch (error) {
     throw new Error(`fileChooser.setFiles failed. ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -6135,9 +6227,17 @@ function guessMimeType(name) {
   if (/\.md$/i.test(name)) return "text/markdown";
   return "application/octet-stream";
 }
-function isUploadBridgeBlocker(error) {
+function isUploadPermissionBlocker(error) {
   const message = error instanceof Error ? error.message : String(error);
-  return /DataTransfer is not a constructor|No file chooser|setInputFiles|Allow access to file URLs|file upload|fileChooser\.setFiles failed|Not allowed|No ChatGPT upload path completed/i.test(message);
+  return /Allow access to file URLs|Codex Settings > Computer Use|Browser Use rejected|requested that files not be uploaded|permission denied|browser blocked|fileChooser\.setFiles failed[^\n]*(?:Not allowed|permission|denied|rejected)/i.test(message);
+}
+function isUploadTransportFailure(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /native pipe closed before response|browser bridge.*(?:closed|disconnect)|connection (?:was )?closed|target page, context or browser has been closed/i.test(message);
+}
+function isUploadPathFailure(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /No ChatGPT upload path completed/i.test(message);
 }
 function uploadPermissionMessage(error) {
   const message = error instanceof Error ? error.message : String(error);
@@ -13462,6 +13562,7 @@ var SECRET_PATH_PATTERNS = [
 ];
 var GENERATED_DIRECTORY_PATTERN = /(^|\/)(?:node_modules|dist|build|coverage|vendor|target|\.next|\.cache)\//i;
 var GENERATED_PLUGIN_RUNTIME_PATTERN = /^plugins\/[^/]+\/runtime\/node\/[^/]+\.mjs$/i;
+var LOCAL_CODEX_STATE_PATTERN = /^\.codex\//i;
 var GENERATED_DIFF_EXCLUDES = [
   "**/node_modules/**",
   "**/dist/**",
@@ -13513,10 +13614,16 @@ async function prepareReviewContext(args, now = /* @__PURE__ */ new Date()) {
     const branch = (await runGit(repositoryRoot, ["branch", "--show-current"])).stdout.trim() || void 0;
     const status = await runGit(repositoryRoot, ["status", "--porcelain=v1", "--untracked-files=all"]);
     const dirty = status.stdout.trim().length > 0;
+    const packetStatus = filterPacketStatus(status.stdout);
     const includeWorkingTree = args.context?.includeWorkingTree ?? true;
     const changed = await changedFiles(repositoryRoot, mergeBaseSha, headSha, includeWorkingTree);
     let validation = await validationOutput(args, repositoryRoot);
-    const fileRecords = [];
+    const fileRecords = packetStatus.excludedLocalCodexState.map((path3) => ({
+      path: path3,
+      category: "changed-file",
+      status: "excluded",
+      reason: "untracked_local_codex_state"
+    }));
     const secretFindings = [];
     const sourceSections = [];
     const dependencies = /* @__PURE__ */ new Map();
@@ -13635,8 +13742,9 @@ ${numbered}
           "",
           "git status --porcelain:",
           "```text",
-          status.stdout.trimEnd(),
-          "```"
+          packetStatus.visible.trimEnd(),
+          "```",
+          `Excluded untracked local Codex state paths: ${packetStatus.excludedLocalCodexState.length}`
         ].join("\n")
       },
       { title: "Changed paths and rename evidence", files: changed, body: `\`\`\`text
@@ -13734,8 +13842,19 @@ async function changedFiles(root, mergeBase, headSha, includeWorkingTree) {
   const committed = parseNameStatus((await runGit(root, ["diff", "--name-status", "--find-renames", `${mergeBase}..${headSha}`])).stdout);
   if (!includeWorkingTree) return [...new Set(committed)].sort();
   const unstaged = parseNameStatus((await runGit(root, ["diff", "--name-status", "--find-renames", "HEAD"])).stdout);
-  const untracked = (await runGit(root, ["ls-files", "--others", "--exclude-standard"])).stdout.split(/\r?\n/).filter(Boolean);
+  const untracked = (await runGit(root, ["ls-files", "--others", "--exclude-standard"])).stdout.split(/\r?\n/).filter(Boolean).map(normalizeRepoPath).filter((path3) => !LOCAL_CODEX_STATE_PATTERN.test(path3));
   return [...new Set([...committed, ...unstaged, ...untracked].map(normalizeRepoPath))].sort();
+}
+function filterPacketStatus(value) {
+  const excludedLocalCodexState = [];
+  const visible = value.split(/\r?\n/).filter((line) => {
+    if (!line.startsWith("?? ")) return true;
+    const path3 = normalizeRepoPath(line.slice(3));
+    if (!LOCAL_CODEX_STATE_PATTERN.test(path3)) return true;
+    excludedLocalCodexState.push(path3);
+    return false;
+  }).join("\n");
+  return { visible, excludedLocalCodexState };
 }
 function parseNameStatus(value) {
   return value.split(/\r?\n/).filter(Boolean).flatMap((line) => {
@@ -13786,7 +13905,7 @@ async function buildNameStatus(root, mergeBase, headSha, includeWorkingTree) {
   const committed = (await runGit(root, ["diff", "--name-status", "--find-renames", `${mergeBase}..${headSha}`])).stdout;
   if (!includeWorkingTree) return committed;
   const working = (await runGit(root, ["diff", "--name-status", "--find-renames", "HEAD"])).stdout;
-  const untracked = (await runGit(root, ["ls-files", "--others", "--exclude-standard"])).stdout.split(/\r?\n/).filter(Boolean).map((path3) => `?	${path3}`).join("\n");
+  const untracked = (await runGit(root, ["ls-files", "--others", "--exclude-standard"])).stdout.split(/\r?\n/).filter(Boolean).map(normalizeRepoPath).filter((path3) => !LOCAL_CODEX_STATE_PATTERN.test(path3)).map((path3) => `?	${path3}`).join("\n");
   return [committed, working, untracked].filter(Boolean).join("\n");
 }
 async function callerEvidence(root, symbols, changed) {

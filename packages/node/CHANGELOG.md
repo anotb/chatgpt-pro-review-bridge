@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0-alpha.5
+
+- Prevents untracked local `.codex/` archives and task state from recursively
+  entering review packets, while retaining tracked `.codex/` repository files
+  and explicit exclusion provenance.
+- Uses the Chrome bridge's scoped CDP capability only to open Chat's hidden
+  file input with a user gesture; the approved chooser remains responsible for
+  transferring absolute local paths, including large review packets.
+- Reports native-pipe disconnects and unavailable upload surfaces separately
+  from explicit Chrome/Codex permission denials.
+
 ## 0.6.0-alpha.4
 
 - Treats `plugins/*/runtime/node/*.mjs` as deterministic generated artifacts:

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0-alpha.5
+
+- Excludes untracked local `.codex/` state from review packet paths, source
+  snapshots, and working-tree evidence while recording each exclusion in the
+  manifest. Tracked repository `.codex/` changes remain reviewable.
+- Opens Chat's hidden file input through the Chrome bridge's origin-scoped CDP
+  user gesture, then hands absolute paths to the approved native file chooser.
+  This supports multi-megabyte review packets without copying their bytes
+  through the browser-control transport.
+- Separates browser disconnects and incompatible upload surfaces from genuine
+  upload-permission denials while keeping every attachment failure pre-submit.
+
 ## 0.6.0-alpha.4
 
 - Records deterministic plugin runtime bundles in packet provenance while
