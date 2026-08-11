@@ -65,7 +65,7 @@ describe("Pro review state machine", () => {
       repositoryRoot: repo,
       baseRef: "HEAD",
       output: { mode: "full", archiveRoot: ".codex/pro-reviews", downloadArtifacts: "all" },
-      polling: { callTimeoutMs: 10, totalTimeoutMs: 30, stableMs: 1, pollMs: 1 }
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 30, maxPollCallsPerInvocation: 2, stableMs: 1, pollMs: 1 }
     }, port);
 
     expect(result.status).toBe("completed");

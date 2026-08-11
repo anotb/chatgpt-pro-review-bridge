@@ -57,6 +57,7 @@ export type ProCodeReviewArgs = {
   polling?: {
     callTimeoutMs?: number;
     totalTimeoutMs?: number;
+    maxPollCallsPerInvocation?: number;
     stableMs?: number;
     pollMs?: number;
   };

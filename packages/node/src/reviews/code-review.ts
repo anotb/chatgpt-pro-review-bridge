@@ -32,6 +32,7 @@ import {
   markdownSectionIndex,
   preserveDownloadedArtifact,
   sanitizeArtifactFilename,
+  sha256File,
   sha256Text,
   writeImmutableFile,
   writeImmutableJson
@@ -138,6 +139,8 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       archiveDirectory = prepared.archiveDirectory;
     } else if (archiveDirectory === undefined) {
       throw new ReviewPreparationError("resume.archiveDirectory is required so provenance and the original configuration can be recovered without resubmitting.", "resume_archive_required");
+    } else {
+      prepared = await readArchivedPreparedContext(archiveDirectory);
     }
 
     requireOk(await runStep("PREFLIGHT_BROWSER", () => port.bootstrap()), "PREFLIGHT_BROWSER");
@@ -182,6 +185,11 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     });
 
     if (artifactBaseline === undefined) {
+      if (args.resume !== undefined && archiveDirectory !== undefined) {
+        artifactBaseline = await readArchivedArtifactBaseline(archiveDirectory).catch(() => undefined);
+      }
+    }
+    if (artifactBaseline === undefined) {
       artifactBaseline = requireData(await runStep("BASELINE_ARTIFACTS", () => port.artifactBaseline()), "BASELINE_ARTIFACTS").data;
     }
 
@@ -217,7 +225,10 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     const totalTimeoutMs = positive(args.polling?.totalTimeoutMs, 1_800_000);
     const stableMs = positive(args.polling?.stableMs, 3_000);
     const pollMs = positive(args.polling?.pollMs, 1_000);
-    const maxCalls = Math.max(1, Math.ceil(totalTimeoutMs / callTimeoutMs));
+    const maxCalls = Math.max(1, Math.min(
+      positive(args.polling?.maxPollCallsPerInvocation, 1),
+      Math.ceil(totalTimeoutMs / callTimeoutMs)
+    ));
     let complete = false;
     for (let call = 0; call < maxCalls; call += 1) {
       const wait = await runStep("POLL_METADATA", () => port.waitMetadata(baselineAssistantCount, callTimeoutMs, stableMs, pollMs));
@@ -504,6 +515,29 @@ async function readArchivedConfigurationSnapshot(archiveDirectory: string): Prom
   const value = JSON.parse(await readFile(join(archiveDirectory, "configuration.before.json"), "utf8")) as ConfigurationSnapshotData;
   if (value.experience !== "chat" || typeof value.capturedAt !== "string") throw new Error("Archived configuration snapshot is invalid.");
   return value;
+}
+
+async function readArchivedPreparedContext(archiveDirectory: string): Promise<PreparedReviewContext> {
+  const manifestPath = join(archiveDirectory, "context", "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as PreparedReviewContext["manifest"];
+  if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.packets)) throw new Error("Archived review packet manifest is invalid.");
+  const promptPath = join(archiveDirectory, "prompt.md");
+  return {
+    archiveDirectory,
+    requestPath: join(archiveDirectory, "request.md"),
+    promptPath,
+    packetPaths: manifest.packets.map(packet => join(archiveDirectory, "context", packet.path)),
+    manifestPath,
+    manifest,
+    manifestSha256: await sha256File(manifestPath),
+    prompt: await readFile(promptPath, "utf8")
+  };
+}
+
+async function readArchivedArtifactBaseline(archiveDirectory: string): Promise<ArtifactInventoryData> {
+  const submission = JSON.parse(await readFile(join(archiveDirectory, "submission.json"), "utf8")) as { artifactBaseline?: ArtifactInventoryData };
+  if (submission.artifactBaseline === undefined || !Array.isArray(submission.artifactBaseline.items)) throw new Error("Archived artifact baseline is invalid.");
+  return submission.artifactBaseline;
 }
 
 async function writeJsonReplacing(path: string, value: unknown): Promise<void> {
