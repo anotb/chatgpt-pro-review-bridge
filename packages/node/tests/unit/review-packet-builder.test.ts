@@ -85,6 +85,36 @@ describe("deterministic review packet builder", () => {
     expect(packets).toContain("[REDACTED:aws_access_key]");
     expect(prepared.manifest.secretFindings).toContainEqual(expect.objectContaining({ action: "redacted", kind: "aws_access_key" }));
   });
+
+  it("lists generated plugin runtimes but excludes their content from review packets", async () => {
+    const repo = await fixtureRepository();
+    const runtimeDirectory = join(repo, "plugins", "sample", "runtime", "node");
+    await mkdir(runtimeDirectory, { recursive: true });
+    await writeFile(join(repo, "src", "example.ts"), "export function answer() { return 42; }\n");
+    await writeFile(
+      join(runtimeDirectory, "sample.bundle.mjs"),
+      "// GENERATED_BUNDLE_MARKER\nexport const generated = 42;\n".repeat(10_000)
+    );
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "change source and generated runtime");
+
+    const prepared = await prepareReviewContext({
+      repositoryRoot: repo,
+      baseRef: "HEAD^",
+      headRef: "HEAD",
+      context: { includeWorkingTree: false }
+    });
+    const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
+
+    expect(prepared.manifest.files).toContainEqual(expect.objectContaining({
+      path: "plugins/sample/runtime/node/sample.bundle.mjs",
+      status: "generated",
+      reason: "generated_plugin_runtime"
+    }));
+    expect(packets).toContain("plugins/sample/runtime/node/sample.bundle.mjs");
+    expect(packets).not.toContain("GENERATED_BUNDLE_MARKER");
+    expect(packets).toContain("return 42");
+  });
 });
 
 async function fixtureRepository(): Promise<string> {

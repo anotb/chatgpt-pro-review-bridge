@@ -27,7 +27,19 @@ const SECRET_PATH_PATTERNS = [
   /(^|\/)Cookies(?:-journal)?$/i,
   /(^|\/)Local Storage\//i
 ];
-const GENERATED_PATH_PATTERN = /(^|\/)(?:node_modules|dist|build|coverage|vendor|target|\.next|\.cache)\//i;
+const GENERATED_DIRECTORY_PATTERN = /(^|\/)(?:node_modules|dist|build|coverage|vendor|target|\.next|\.cache)\//i;
+const GENERATED_PLUGIN_RUNTIME_PATTERN = /^plugins\/[^/]+\/runtime\/node\/[^/]+\.mjs$/i;
+const GENERATED_DIFF_EXCLUDES = [
+  "**/node_modules/**",
+  "**/dist/**",
+  "**/build/**",
+  "**/coverage/**",
+  "**/vendor/**",
+  "**/target/**",
+  "**/.next/**",
+  "**/.cache/**",
+  "plugins/*/runtime/node/*.mjs"
+].map(pattern => `:(exclude,glob)${pattern}`);
 const MANIFEST_PATTERN = /(^|\/)(?:package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|pyproject\.toml|poetry\.lock|requirements[^/]*\.txt|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|Gemfile(?:\.lock)?|composer\.json|Dockerfile|docker-compose[^/]*\.ya?ml|.*\.config\.[cm]?[jt]s|.*\.schema\.json)$/i;
 const TEST_PATTERN = /(?:^|\/)(?:test|tests|__tests__)\/|(?:\.|_)(?:test|spec)\.[^.\/]+$/i;
 const SECRET_PATTERNS: Array<{ kind: string; pattern: RegExp }> = [
@@ -91,8 +103,9 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
         fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "secret_path_policy" });
         continue;
       }
-      if (GENERATED_PATH_PATTERN.test(normalized)) {
-        fileRecords.push({ path: normalized, category: candidate.category, status: "generated", reason: "generated_directory" });
+      const generatedReason = generatedPathReason(normalized);
+      if (generatedReason !== undefined) {
+        fileRecords.push({ path: normalized, category: candidate.category, status: "generated", reason: generatedReason });
         continue;
       }
       const absolute = resolve(repositoryRoot, normalized);
@@ -327,9 +340,10 @@ function affectsChangedPath(path: string, changed: string[]): boolean {
 }
 
 async function buildDiff(root: string, mergeBase: string, headSha: string, includeWorkingTree: boolean): Promise<string> {
-  const committed = (await runGit(root, ["diff", "--no-ext-diff", "--find-renames", "--unified=80", `${mergeBase}..${headSha}`])).stdout;
+  const pathspec = ["--", ".", ...GENERATED_DIFF_EXCLUDES];
+  const committed = (await runGit(root, ["diff", "--no-ext-diff", "--find-renames", "--unified=80", `${mergeBase}..${headSha}`, ...pathspec])).stdout;
   if (!includeWorkingTree) return committed;
-  const working = (await runGit(root, ["diff", "--no-ext-diff", "--find-renames", "--unified=80", "HEAD"])).stdout;
+  const working = (await runGit(root, ["diff", "--no-ext-diff", "--find-renames", "--unified=80", "HEAD", ...pathspec])).stdout;
   return [committed, working.length > 0 ? `\n# WORKING TREE DIFF\n${working}` : ""].join("");
 }
 
@@ -516,6 +530,12 @@ function hash(value: Buffer): string {
 
 function normalizeRepoPath(value: string): string {
   return value.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function generatedPathReason(path: string): string | undefined {
+  if (GENERATED_PLUGIN_RUNTIME_PATTERN.test(path)) return "generated_plugin_runtime";
+  if (GENERATED_DIRECTORY_PATTERN.test(path)) return "generated_directory";
+  return undefined;
 }
 
 function assertInside(root: string, target: string): void {
