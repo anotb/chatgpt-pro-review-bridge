@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0-alpha.1
+
+- Adds the resumable, exactly-once `chatgpt.reviews.codeReview` workflow with
+  deterministic review packets, strict visible Chat Pro verification, full
+  Markdown capture, provenance archives, and verified setting restoration.
+- Adds visible artifact baselines, complete delta downloads (including
+  duplicate same-name files), collision-safe archive names, and SHA-256
+  manifests.
+- Adds portable plugin packaging and a bounded live canary while preserving the
+  visible-session boundary and fail-closed model/fallback behavior.
+
 ## 0.5.1-alpha.1
 
 - Fixes current Chat/Work switching through the visible surface-radio group and

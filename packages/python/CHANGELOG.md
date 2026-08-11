@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0a1
+
+- Qualifies the Python package against the fork's hardened visible-session
+  backend and cross-platform release gates.
+- Keeps the Python API unchanged; the new first-class Pro review orchestrator
+  is currently provided by the Node SDK and Codex plugin.
+
 ## 0.5.1a1
 
 - Picks up the corrected Node-backed Chat/Work radio selection and active Work

@@ -1,6 +1,6 @@
 [project]
 name = "codex-chatgpt-control"
-version = "0.5.1a1"
+version = "0.6.0a1"
 description = "Python SDK for controlling visible ChatGPT Chat and Work through a local backend."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,9 +27,9 @@ dependencies = [
 chatgpt-thread = "codex_chatgpt_control.thread_entrypoint:main"
 
 [project.urls]
-Homepage = "https://github.com/adamallcock/codex-chatgpt-control"
-Issues = "https://github.com/adamallcock/codex-chatgpt-control/issues"
-Source = "https://github.com/adamallcock/codex-chatgpt-control"
+Homepage = "https://github.com/anotb/chatgpt-pro-review-bridge"
+Issues = "https://github.com/anotb/chatgpt-pro-review-bridge/issues"
+Source = "https://github.com/anotb/chatgpt-pro-review-bridge"
 
 [project.optional-dependencies]
 dev = [

@@ -8087,14 +8087,18 @@ async function tryGeneratedFilePreviewDownload(page, args) {
     }
     const assistant = assistantMessages.nth?.(selected.assistantIndex) ?? assistantMessages;
     const role = selected.tag === "button" ? "button" : "link";
-    const affordance = assistant.getByRole?.(role, { name: selected.filename, exact: true }) ?? assistant.locator?.(`${selected.tag}[aria-label="${escapeCssAttribute(selected.filename)}"]`);
+    const affordances = assistant.getByRole?.(role, { name: selected.filename, exact: true }) ?? assistant.locator?.(`${selected.tag}[aria-label="${escapeCssAttribute(selected.filename)}"]`);
     const affordanceCount = await locatorCountWithTimeout(
-      affordance,
+      affordances,
       localGuardTimeout(timeoutMs, 5e3),
       "generated_file_affordance_count_timeout"
     );
-    if (affordance === void 0 || affordanceCount !== 1 || typeof affordance.click !== "function") {
-      throw new Error(`Expected one clickable generated-file affordance for ${selected.filename}, found ${affordanceCount}.`);
+    if (affordances === void 0 || selected.occurrenceIndex < 0 || selected.occurrenceIndex >= affordanceCount) {
+      throw new Error(`Expected generated-file occurrence ${selected.occurrenceIndex} for ${selected.filename}, found ${affordanceCount}.`);
+    }
+    const affordance = affordanceCount === 1 ? affordances : affordances.nth?.(selected.occurrenceIndex);
+    if (affordance === void 0 || typeof affordance.click !== "function") {
+      throw new Error(`Generated-file occurrence ${selected.occurrenceIndex} for ${selected.filename} was not clickable.`);
     }
     if (selected.tag === "a") {
       const downloaded2 = await waitForDownloadFromClick(
@@ -8142,12 +8146,20 @@ async function inspectGeneratedFileAffordances(page, timeoutMs) {
         };
         const fileLike = (value) => /^[^\\/\r\n]{1,255}\.[a-z0-9][a-z0-9._-]{0,15}$/i.test(value);
         const assistants = Array.from(document.querySelectorAll("[data-message-author-role='assistant']"));
-        return assistants.flatMap((assistant, assistantIndex) => Array.from(assistant.querySelectorAll("button[aria-label], a[download], a[href*='/backend-api/files/']")).filter(visible).map((element) => ({
-          assistantIndex,
-          filename: (element.getAttribute("aria-label") ?? element.textContent ?? "").trim(),
-          tag: element.tagName.toLocaleLowerCase(),
-          text: (element.textContent ?? "").trim()
-        })).filter((item) => (item.tag === "button" || item.tag === "a") && fileLike(item.filename) && item.filename === item.text).map(({ assistantIndex: assistantIndex2, filename, tag }) => ({ assistantIndex: assistantIndex2, filename, tag })));
+        return assistants.flatMap((assistant, assistantIndex) => {
+          const occurrences2 = /* @__PURE__ */ new Map();
+          return Array.from(assistant.querySelectorAll("button[aria-label], a[download], a[href*='/backend-api/files/']")).filter(visible).map((element) => ({
+            assistantIndex,
+            filename: (element.getAttribute("aria-label") ?? element.textContent ?? "").trim(),
+            tag: element.tagName.toLocaleLowerCase(),
+            text: (element.textContent ?? "").trim()
+          })).filter((item) => (item.tag === "button" || item.tag === "a") && fileLike(item.filename) && item.filename === item.text).map(({ assistantIndex: index, filename, tag }) => {
+            const key = `${tag}\0${filename}`;
+            const occurrenceIndex = occurrences2.get(key) ?? 0;
+            occurrences2.set(key, occurrenceIndex + 1);
+            return { assistantIndex: index, filename, tag, occurrenceIndex };
+          });
+        });
       }),
       timeoutMs,
       "Timed out while inspecting generated-file buttons."
@@ -8161,13 +8173,18 @@ async function inspectGeneratedFileAffordances(page, timeoutMs) {
     "Timed out while reading generated-file button markup."
   ).catch(() => "");
   const candidates = [];
+  const occurrences = /* @__PURE__ */ new Map();
   const buttonPattern = /<(button|a)\b[^>]*\baria-label=(['"])(.*?)\2[^>]*>([\s\S]*?)<\/\1>/gi;
   let match;
   while ((match = buttonPattern.exec(html)) !== null) {
     const filename = decodeBasicHtml(match[3] ?? "").trim();
     const text = decodeBasicHtml((match[4] ?? "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
     if (/^[^\\/\r\n]{1,255}\.[a-z0-9][a-z0-9._-]{0,15}$/i.test(filename) && filename === text) {
-      candidates.push({ assistantIndex: 0, filename, tag: (match[1] ?? "button").toLocaleLowerCase() });
+      const tag = (match[1] ?? "button").toLocaleLowerCase();
+      const key = `${tag}\0${filename}`;
+      const occurrenceIndex = occurrences.get(key) ?? 0;
+      occurrences.set(key, occurrenceIndex + 1);
+      candidates.push({ assistantIndex: 0, filename, tag, occurrenceIndex });
     }
   }
   return candidates;
@@ -8183,6 +8200,9 @@ function selectGeneratedFileAffordance(candidates, args) {
   }
   if (args.filenamePattern !== void 0) {
     scoped = scoped.filter((candidate) => filenameMatches(candidate.filename, args.filenamePattern));
+  }
+  if (args.occurrenceIndex !== void 0) {
+    scoped = scoped.filter((candidate) => candidate.occurrenceIndex === args.occurrenceIndex);
   }
   return scoped.at(-1);
 }
@@ -13503,6 +13523,12 @@ var ReviewPreparationError = class extends Error {
   archiveDirectory;
 };
 async function prepareReviewContext(args, now = /* @__PURE__ */ new Date()) {
+  if (args.output?.archive === false) {
+    throw new ReviewPreparationError(
+      "A Pro review requires a durable provenance archive; output.archive cannot be false.",
+      "archive_required"
+    );
+  }
   const repositoryRoot = await resolveRepositoryRoot(args.repositoryRoot);
   const baseRef = requireNonEmpty(args.baseRef, "baseRef");
   const headRef = requireNonEmpty(args.headRef ?? "HEAD", "headRef");
@@ -14151,8 +14177,8 @@ async function runCodeReviewWithPort(args, port) {
             let metadata;
             if (item.kind === "file") {
               desiredName = sanitizeArtifactFilename(item.filename, "generated-file");
-              downloaded = await port.downloadFile(staging, item.filename, item.assistantIndex);
-              metadata = { kind: "file", sourceLabel: item.filename, sourceReference: `assistant:${item.assistantIndex}` };
+              downloaded = await port.downloadFile(staging, item.filename, item.assistantIndex, item.occurrenceIndex);
+              metadata = { kind: "file", sourceLabel: item.filename, sourceReference: `assistant:${item.assistantIndex}:occurrence:${item.occurrenceIndex}` };
             } else {
               desiredName = `generated-image-${String(item.artifact.index + 1).padStart(3, "0")}.png`;
               downloaded = await port.downloadImage(staging, item.artifact.index, item.artifact.turnId);
@@ -14334,9 +14360,10 @@ function defaultReviewWorkflowPort(env) {
       responseContent: "metadata"
     }),
     readFullMarkdown: () => readLatest(env, { role: "assistant", format: "markdown" }),
-    downloadFile: (destDir, filename, assistantIndex) => downloadLatestFile(env, {
+    downloadFile: (destDir, filename, assistantIndex, occurrenceIndex) => downloadLatestFile(env, {
       destDir,
       filenamePattern: `^${escapeRegExp4(filename)}$`,
+      occurrenceIndex,
       from: { assistantIndex }
     }),
     downloadImage: (destDir, index, turnId) => downloadLatestArtifact(env, {
