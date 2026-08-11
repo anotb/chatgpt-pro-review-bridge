@@ -3202,8 +3202,9 @@ async function readPageState(page) {
   const rawTitle = typeof page.title === "function" ? await page.title().catch(() => void 0) : void 0;
   const title = typeof rawTitle === "string" ? rawTitle : void 0;
   const visibleText = await readVisibleText(page);
-  const signedIn = isLikelySignedIn(visibleText);
   const classifiedBlocker = classifyVisibleText(visibleText);
+  const loginWall = classifiedBlocker?.kind === "login_required" && isLikelyLoginWall(visibleText);
+  const signedIn = isLikelySignedIn(visibleText) && !loginWall;
   const blocker = classifiedBlocker?.kind === "login_required" && signedIn ? void 0 : classifiedBlocker;
   const conversationId = parseConversationId(url);
   const state = {
@@ -3253,6 +3254,11 @@ function htmlToText(html) {
 function isLikelySignedIn(visibleText) {
   const markers = localeLabels.signedInMarkers.map(escapeRegExp).join("|");
   return new RegExp(`\\b(${markers})\\b`, "i").test(visibleText);
+}
+function isLikelyLoginWall(visibleText) {
+  const labels = localeLabels.loginBlocker.map(escapeRegExp).join("|");
+  const matches = visibleText.match(new RegExp(`(?:${labels})`, "gi")) ?? [];
+  return matches.length >= 2 || /\bsign\s?up\b|\bcreate (?:an )?account\b/i.test(visibleText);
 }
 
 // src/browser/attach.ts

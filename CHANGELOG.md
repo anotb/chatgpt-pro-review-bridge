@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0-alpha.2
+
+- Correctly classifies the current logged-out Chat shell even though it exposes
+  generic `New chat` and `Search chats` navigation, so review preflight returns
+  `login_required` before configuration inspection or submission.
+
 ## 0.6.0-alpha.1
 
 - Adds the separate `chatgpt-pro-review` marketplace plugin and `chatgpt-pro-code-review` Agent Skill with bundled runtime files.

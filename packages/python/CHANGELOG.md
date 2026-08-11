@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0a2
+
+- Picks up corrected logged-out Chat shell classification from the bundled
+  Node backend without changing the Python API or shared wire shapes.
+
 ## 0.6.0a1
 
 - Qualifies the Python package against the fork's hardened visible-session

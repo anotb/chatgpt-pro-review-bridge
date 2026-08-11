@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-alpha.2
+
+- Fixes logged-out shell detection so visible login walls fail closed as
+  `login_required` instead of being masked by generic navigation markers.
+
 ## 0.6.0-alpha.1
 
 - Adds the resumable, exactly-once `chatgpt.reviews.codeReview` workflow with
