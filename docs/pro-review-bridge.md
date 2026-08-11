@@ -12,7 +12,7 @@ The bridge lets any Codex host invoke the same installed workflow while the dele
 ## Install a pinned release
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.2
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.3
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -23,7 +23,7 @@ remove the installed plugin and marketplace snapshot, then add the new tag:
 ```bash
 codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
 codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.2
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.3
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -83,7 +83,7 @@ const result = await chatgpt.reviews.codeReview({
 });
 ```
 
-One invocation performs one bounded poll by default. If it returns `in_progress`, call the workflow again with the returned `thread.url` and `archiveDirectory`; never resend the prompt.
+One invocation performs one bounded poll by default. If it returns `in_progress`, call the workflow again with `resume: { archiveDirectory }`; never resend the prompt. The immutable submission receipt holds the canonical `/c/<conversation-id>` URL and conversation ID. Optional caller-supplied `threadUrl` or `conversationId` values are treated only as mismatch-detecting cross-checks.
 
 ## Archive and trust boundary
 
@@ -97,8 +97,7 @@ From the browser-enabled persistent JavaScript host, import the installed plugin
 
 ```js
 let canary = await module.runProReviewCanaryStep(globalThis, {
-  reportDir: "/absolute/local/report/directory",
-  requireArtifact: true
+  reportDir: "/absolute/local/report/directory"
 });
 
 // Repeat in a later bounded host call while in progress:
@@ -110,7 +109,7 @@ if (canary.status === "in_progress") {
 }
 ```
 
-The canary uses a harmless synthetic Git repository and unique token. It verifies full response handoff, one visible user prompt, Pro before/after evidence, restoration, artifact attribution, and artifact content. Diagnostics are redacted; raw review archives remain local.
+The optional canary uses a harmless synthetic Git repository. It verifies byte-for-byte full-response/archive agreement, one visible user prompt, Pro before/after evidence, and restoration without asking Pro to echo a magic marker or create a throwaway artifact. Prefer a substantive repository review for release qualification. Exercise artifact transport separately with the fast Chat setting unless the real review naturally creates artifacts. Diagnostics are redacted; raw review archives remain local.
 
 ## Platform status
 

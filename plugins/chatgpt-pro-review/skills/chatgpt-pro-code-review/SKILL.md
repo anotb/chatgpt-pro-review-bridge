@@ -70,7 +70,7 @@ Do not branch on the selected Codex host model. Do not replace this call with a 
 
 ## Resume without duplication
 
-If `status === "in_progress"`, require `submitted === true` and `resubmitAllowed === false`, keep the returned thread URL and archive directory, and invoke the same workflow again with:
+If `status === "in_progress"`, require `submitted === true` and `resubmitAllowed === false`, keep the archive directory, and invoke the same workflow again with:
 
 ```js
 const resumed = await chatgpt.reviews.codeReview({
@@ -78,14 +78,12 @@ const resumed = await chatgpt.reviews.codeReview({
   baseRef: "origin/main",
   headRef: "HEAD",
   resume: {
-    threadUrl: review.thread.url,
-    submitted: true,
     archiveDirectory: review.archiveDirectory
   }
 });
 ```
 
-Never submit the original prompt again after an attempted submission. The archive restores the original packet manifest, artifact baseline, and configuration snapshot.
+Never submit the original prompt again after an attempted submission. The immutable submission receipt is authoritative: it restores and validates the canonical Chat conversation ID/URL, original packet manifest, artifact baseline, and configuration snapshot. Caller-supplied `conversationId` or `threadUrl` values are optional cross-checks and must match the receipt.
 
 ## Return and verify
 
