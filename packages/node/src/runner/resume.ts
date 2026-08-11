@@ -5,6 +5,9 @@ const NEVER_AUTO_RESUME = new Set<ChatGPTCommandBlocker["kind"]>([
   "captcha",
   "login_required",
   "rate_limit",
+  "model_unavailable",
+  "model_fallback",
+  "configuration_restore_failed",
   "selector_drift",
   "artifact_selector_drift",
   "unknown"

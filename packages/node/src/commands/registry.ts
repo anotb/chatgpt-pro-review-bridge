@@ -399,7 +399,15 @@ function primitiveBlockers(name: string): string[] {
 }
 
 function commonBlockers(): string[] {
-  return ["browser_bridge_unavailable", "login_required", "captcha", "rate_limit", "selector_drift"];
+  return [
+    "browser_bridge_unavailable",
+    "login_required",
+    "captcha",
+    "rate_limit",
+    "model_unavailable",
+    "model_fallback",
+    "selector_drift"
+  ];
 }
 
 function groupByLayer(items: CommandDescriptor[]): Record<CommandLayer, CommandDescriptor[]> {

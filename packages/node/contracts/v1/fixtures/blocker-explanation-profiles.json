@@ -32,6 +32,27 @@
         "userActionRequired": true
       },
       {
+        "category": "model",
+        "kind": "model_unavailable",
+        "severity": "action_required",
+        "title": "Requested model unavailable",
+        "userActionRequired": true
+      },
+      {
+        "category": "model",
+        "kind": "model_fallback",
+        "severity": "blocked",
+        "title": "Model fallback detected",
+        "userActionRequired": true
+      },
+      {
+        "category": "configuration",
+        "kind": "configuration_restore_failed",
+        "severity": "action_required",
+        "title": "Configuration restoration failed",
+        "userActionRequired": true
+      },
+      {
         "category": "runtime",
         "kind": "modal",
         "severity": "action_required",

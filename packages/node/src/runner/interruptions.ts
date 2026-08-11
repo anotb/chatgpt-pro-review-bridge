@@ -68,9 +68,18 @@ function interruptionType(
       return "captcha";
     case "rate_limit":
       return "rate_limit";
+    case "model_unavailable":
+      return "model_unavailable";
+    case "model_fallback":
+      return "model_fallback";
+    case "configuration_restore_failed":
+      return "configuration_restore_failed";
     case "selector_drift":
       return "selector_drift";
     case "browser_bridge_unavailable":
+    case "artifact_unavailable":
+    case "artifact_selector_drift":
+    case "artifact_download_unavailable":
     case "not_found":
     case "modal":
     case "unknown":

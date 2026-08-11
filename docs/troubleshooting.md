@@ -16,6 +16,9 @@ This section is checked by `npm run docs:drift`. Keep it aligned with `BlockerKi
 - `login_required`: Login required (category: `auth`, severity: `action_required`, user action: yes)
 - `captcha`: Captcha or human verification required (category: `auth`, severity: `action_required`, user action: yes)
 - `rate_limit`: Rate limited (category: `auth`, severity: `action_required`, user action: yes)
+- `model_unavailable`: Requested model unavailable (category: `model`, severity: `action_required`, user action: yes)
+- `model_fallback`: Model fallback detected (category: `model`, severity: `blocked`, user action: yes)
+- `configuration_restore_failed`: Configuration restoration failed (category: `configuration`, severity: `action_required`, user action: yes)
 - `modal`: Modal is blocking the page (category: `runtime`, severity: `action_required`, user action: yes)
 - `permission`: Permission required (category: `permission`, severity: `action_required`, user action: yes)
 - `confirmation`: Confirmation required (category: `user_confirmation`, severity: `action_required`, user action: yes)
@@ -53,6 +56,10 @@ Then rerun the Python smoke from `packages/python`.
 ## Selector Drift
 
 Treat selector drift as a product-change blocker. Capture the smallest public-safe reproduction and update selectors/tests together.
+
+## Model unavailable, fallback, or restore failure
+
+Treat `model_unavailable` and `model_fallback` as strict target failures, not generic retry hints. Preserve compact visible evidence and do not accept a response as the requested model. If `configuration_restore_failed` is returned, leave the browser visible and require manual restoration before another delegated run.
 
 ## Doctor Preflight
 

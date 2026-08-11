@@ -14,6 +14,36 @@ describe("classifyVisibleText", () => {
     expect(classifyVisibleText("You've reached your usage limit. Try again later.")?.kind).toBe("rate_limit");
   });
 
+  it("detects Pro unavailability before generic rate limits", () => {
+    for (const text of [
+      "You're out of messages with the Pro model until your usage resets.",
+      "Pro is temporarily unavailable.",
+      "Pro will be unavailable until your usage resets."
+    ]) {
+      expect(classifyVisibleText(text)?.kind).toBe("model_unavailable");
+    }
+  });
+
+  it("detects explicit visible model fallback warnings", () => {
+    for (const text of [
+      "Responses will use a less powerful model until your limit resets.",
+      "Responses will use a smaller model.",
+      "ChatGPT will fall back to a smaller model."
+    ]) {
+      expect(classifyVisibleText(text)?.kind).toBe("model_fallback");
+    }
+  });
+
+  it("does not classify ordinary discussion of Pro or fallback behavior", () => {
+    for (const text of [
+      "Review whether the fallback implementation preserves the model contract.",
+      "The Pro model is useful for this code review.",
+      "If parsing fails, fall back to the default serializer."
+    ]) {
+      expect(classifyVisibleText(text)).toBeUndefined();
+    }
+  });
+
   it("detects upload failures", () => {
     expect(classifyVisibleText("Upload failed. This file is too large.")?.kind).toBe("upload_failed");
   });

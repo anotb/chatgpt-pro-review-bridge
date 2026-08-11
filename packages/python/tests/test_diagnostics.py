@@ -16,6 +16,19 @@ CONTEXT = {
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_model_and_restore_blockers_fail_closed(self) -> None:
+        expected = {
+            "model_unavailable": ("model", "action_required"),
+            "model_fallback": ("model", "blocked"),
+            "configuration_restore_failed": ("configuration", "action_required"),
+        }
+        for kind, (category, severity) in expected.items():
+            with self.subTest(kind=kind):
+                explanation = explain_blocker({"kind": kind, "message": "visible blocker"})
+                self.assertEqual(explanation["category"], category)
+                self.assertEqual(explanation["severity"], severity)
+                self.assertFalse(explanation["resume"]["supported"])
+
     def test_explain_blocker_accepts_command_result_and_client_method(self) -> None:
         result = CommandResult.from_wire({
             "ok": False,

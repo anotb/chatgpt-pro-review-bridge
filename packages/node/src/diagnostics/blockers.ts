@@ -9,6 +9,8 @@ export type BlockerSeverity = "info" | "warning" | "action_required" | "blocked"
 export type BlockerCategory =
   | "environment"
   | "auth"
+  | "model"
+  | "configuration"
   | "permission"
   | "ui_drift"
   | "user_confirmation"
@@ -99,6 +101,27 @@ const PROFILES: Record<BlockerKind, BlockerProfile> = {
     severity: "action_required",
     userActionRequired: true,
     defaultRetryReason: "Retry only after the usage window resets or the user selects a different safe path."
+  },
+  model_unavailable: {
+    title: "Requested model unavailable",
+    category: "model",
+    severity: "action_required",
+    userActionRequired: true,
+    defaultRetryReason: "Retry only after the requested visible model becomes available; do not silently use another model."
+  },
+  model_fallback: {
+    title: "Model fallback detected",
+    category: "model",
+    severity: "blocked",
+    userActionRequired: true,
+    defaultRetryReason: "Do not accept or resubmit as the requested model while the visible fallback warning remains."
+  },
+  configuration_restore_failed: {
+    title: "Configuration restoration failed",
+    category: "configuration",
+    severity: "action_required",
+    userActionRequired: true,
+    defaultRetryReason: "Inspect the visible configuration and restore it manually before starting another delegated run."
   },
   modal: {
     title: "Modal is blocking the page",

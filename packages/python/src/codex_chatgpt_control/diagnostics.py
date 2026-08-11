@@ -34,6 +34,27 @@ BLOCKER_PROFILES: dict[str, dict[str, Any]] = {
         "userActionRequired": True,
         "retryReason": "Retry only after the usage window resets or the user selects a different safe path.",
     },
+    "model_unavailable": {
+        "title": "Requested model unavailable",
+        "category": "model",
+        "severity": "action_required",
+        "userActionRequired": True,
+        "retryReason": "Retry only after the requested visible model becomes available; do not silently use another model.",
+    },
+    "model_fallback": {
+        "title": "Model fallback detected",
+        "category": "model",
+        "severity": "blocked",
+        "userActionRequired": True,
+        "retryReason": "Do not accept or resubmit as the requested model while the visible fallback warning remains.",
+    },
+    "configuration_restore_failed": {
+        "title": "Configuration restoration failed",
+        "category": "configuration",
+        "severity": "action_required",
+        "userActionRequired": True,
+        "retryReason": "Inspect the visible configuration and restore it manually before starting another delegated run.",
+    },
     "modal": {
         "title": "Modal is blocking the page",
         "category": "runtime",
@@ -113,7 +134,17 @@ BLOCKER_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
-NEVER_AUTO_RESUME = {"captcha", "login_required", "rate_limit", "selector_drift", "artifact_selector_drift", "unknown"}
+NEVER_AUTO_RESUME = {
+    "captcha",
+    "login_required",
+    "rate_limit",
+    "model_unavailable",
+    "model_fallback",
+    "configuration_restore_failed",
+    "selector_drift",
+    "artifact_selector_drift",
+    "unknown",
+}
 
 
 def explain_blocker(

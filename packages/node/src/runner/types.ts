@@ -196,6 +196,9 @@ export type ChatGPTInterruption = {
     | "login_required"
     | "selector_drift"
     | "rate_limit"
+    | "model_unavailable"
+    | "model_fallback"
+    | "configuration_restore_failed"
     | "captcha"
     | "unsupported"
     | "timeout";

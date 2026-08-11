@@ -25,6 +25,23 @@ const RULES: BlockerRule[] = [
     patterns: [/\bcaptcha\b/i, /verify (?:you are|that you are) human/i, /suspicious activity/i]
   },
   {
+    kind: "model_unavailable",
+    message: "The requested visible ChatGPT model is unavailable for this account or usage window.",
+    patterns: [
+      /\bout of messages (?:with|for) (?:the )?pro model\b/i,
+      /\bpro(?: model)? is temporarily unavailable\b/i,
+      /\bpro\b.{0,80}\buntil (?:your )?usage resets\b/i
+    ]
+  },
+  {
+    kind: "model_fallback",
+    message: "ChatGPT is visibly warning that responses will fall back to another model.",
+    patterns: [
+      /\bresponses? will use (?:a )?(?:less powerful|smaller) model\b/i,
+      /\b(?:responses?|chatgpt|we)\b.{0,60}\bfall(?:ing)? back\b.{0,60}\bmodel\b/i
+    ]
+  },
+  {
     kind: "rate_limit",
     message: "ChatGPT is rate limited or out of usage for this account.",
     patterns: [/usage limit/i, /rate limit/i, /try again later/i, /too many requests/i]

@@ -17,6 +17,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -50,6 +52,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -87,6 +91,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -121,6 +127,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -154,6 +162,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -187,6 +197,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -221,6 +233,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -253,6 +267,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -286,6 +302,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -317,6 +335,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {},
@@ -339,6 +359,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -367,6 +389,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -394,6 +418,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -420,6 +446,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -448,6 +476,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -476,6 +506,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {
@@ -588,6 +620,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {},
@@ -778,6 +812,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {},
@@ -798,6 +834,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {},
@@ -816,6 +854,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {},
@@ -834,6 +874,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {},
@@ -852,6 +894,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {},
@@ -870,6 +914,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {},
@@ -894,6 +940,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {},
@@ -915,6 +963,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {},
@@ -935,6 +985,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {},
@@ -953,6 +1005,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {},
@@ -1187,6 +1241,8 @@
         "login_required",
         "captcha",
         "rate_limit",
+        "model_unavailable",
+        "model_fallback",
         "selector_drift"
       ],
       "defaults": {},

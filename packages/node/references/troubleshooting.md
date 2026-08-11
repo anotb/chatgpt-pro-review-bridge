@@ -9,6 +9,9 @@ This section is checked by `npm run docs:drift`. Keep it aligned with `BlockerKi
 - `login_required`: Login required (category: `auth`, severity: `action_required`, user action: yes)
 - `captcha`: Captcha or human verification required (category: `auth`, severity: `action_required`, user action: yes)
 - `rate_limit`: Rate limited (category: `auth`, severity: `action_required`, user action: yes)
+- `model_unavailable`: Requested model unavailable (category: `model`, severity: `action_required`, user action: yes)
+- `model_fallback`: Model fallback detected (category: `model`, severity: `blocked`, user action: yes)
+- `configuration_restore_failed`: Configuration restoration failed (category: `configuration`, severity: `action_required`, user action: yes)
 - `modal`: Modal is blocking the page (category: `runtime`, severity: `action_required`, user action: yes)
 - `permission`: Permission required (category: `permission`, severity: `action_required`, user action: yes)
 - `confirmation`: Confirmation required (category: `user_confirmation`, severity: `action_required`, user action: yes)
@@ -62,6 +65,14 @@ Stop. Do not attempt bypass.
 ## `rate_limit`
 
 Return the visible limit text and stop unless the user asks to wait or try a different path.
+
+## Model availability and fallback
+
+`model_unavailable` means the requested visible model cannot currently be used. `model_fallback` means the page warns that another model will answer instead. Both fail closed: preserve the compact visible evidence, do not label the result as the requested model, and do not resubmit automatically.
+
+## `configuration_restore_failed`
+
+Leave the browser visible on the current setting, return the visible candidates, and ask the user to restore the prior configuration manually. Never hide this failure behind an otherwise successful delegated response.
 
 ## `selector_drift`
 
