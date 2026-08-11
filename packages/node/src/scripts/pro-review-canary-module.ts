@@ -86,7 +86,10 @@ export async function runProReviewCanaryStep(
         }
       });
 
-  const promptCount = review.thread?.url === undefined
+  // Do not reclaim the active tab merely to count prompts during a bounded
+  // in-progress poll. Exactly-once is checked once, against the completed
+  // controlled thread, after the response reaches a terminal state.
+  const promptCount = review.status === "in_progress" || review.thread?.url === undefined
     ? 0
     : await countVisibleUserPrompts(runtime.browser, review.thread.url, state.token);
   const artifactToken = await artifactContainsToken(review, state.token);
@@ -140,10 +143,25 @@ async function createFixture(reportDir: string, requireArtifact: boolean): Promi
 }
 
 async function countVisibleUserPrompts(browser: BrowserLike | undefined, threadUrl: string, token: string): Promise<number> {
+  const controlledTabs = await browser?.tabs?.list?.();
+  const controlledMatches: PageLike[] = [];
+  for (const tab of Array.isArray(controlledTabs) ? controlledTabs : []) {
+    if (await Promise.resolve(tab.url?.()).catch(() => undefined) === threadUrl) {
+      controlledMatches.push(tab);
+    }
+  }
+  if (controlledMatches.length === 1) {
+    return countTokenPrompts(controlledMatches[0]!, token);
+  }
+
   const openTabs = await browser?.user?.openTabs?.();
   const candidates = Array.isArray(openTabs) ? openTabs.filter(tab => tab.url === threadUrl) : [];
   if (candidates.length !== 1 || browser?.user?.claimTab === undefined) return 0;
   const page = await browser.user.claimTab(candidates[0]!);
+  return countTokenPrompts(page, token);
+}
+
+async function countTokenPrompts(page: PageLike, token: string): Promise<number> {
   if (typeof page.evaluate !== "function") return 0;
   return page.evaluate((wanted: string) => Array.from(document.querySelectorAll("[data-message-author-role='user']"))
     .filter(node => ((node as HTMLElement).innerText ?? node.textContent ?? "").includes(wanted)).length, token);
