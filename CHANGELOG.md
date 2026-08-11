@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.0-alpha.3
+
+- Supports the current compact Chat power slider and Advanced effort picker
+  while still requiring an exact visible Pro postcondition.
+- Targets the current focusable `Add photos & files` command-palette row and
+  settles early file-chooser rejection paths without terminating the host.
+- Makes the immutable archive receipt authoritative for resume, reconciles a
+  provisional `WEB:` conversation to its stable visible Chat ID, and rejects
+  mismatched caller-supplied targets without resubmitting.
+- Reads and archives the full Markdown once, reuses its verified hash on later
+  polls, leaves Pro active while a response is still generating, and restores
+  the prior setting only after a terminal outcome.
+- Preserves every new artifact with per-file hashes and crash-safe checkpoints,
+  including Chat's download-prefixed workbook controls, without duplicating
+  already archived files on repeated resumes.
+- Reuses already-controlled Chat tabs before external claims and verifies that
+  direct navigation reached the exact requested conversation.
+- Removes marker-echo and throwaway-artifact requirements from the optional
+  Pro canary in favor of byte-for-byte archive agreement and visible turn count.
+
 ## 0.6.0-alpha.2
 
 - Correctly classifies the current logged-out Chat shell even though it exposes

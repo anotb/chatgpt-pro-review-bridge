@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0a3
+
+- Picks up current Chat slider, upload-palette, exact conversation targeting,
+  archive-backed resume, one-read response capture, terminal restoration, and
+  checkpointed artifact fixes from the bundled Node backend without changing
+  Python APIs.
+
 ## 0.6.0a2
 
 - Picks up corrected logged-out Chat shell classification from the bundled

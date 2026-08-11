@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0-alpha.3
+
+- Adds strictly verified selection through the current five-position Chat
+  power slider, with the current Advanced effort picker as a fallback.
+- Updates file attachment for Chat's focusable upload command-palette row and
+  handles early chooser timeouts without unhandled rejections.
+- Makes archived submission evidence authoritative for bounded resume and
+  checkpoints the stable conversation ID recovered from visible Chat history.
+- Keeps Pro active across `in_progress` results, reads full Markdown once, and
+  restores the prior visible setting only for terminal results.
+- Normalizes current download-prefixed artifact controls, supports workbook
+  previews, and checkpoints each verified artifact for duplicate-free resume.
+- Makes immutable archive writes idempotent for equal content while rejecting
+  changed content, and prefers controlled tabs before external tab claims.
+- Replaces canary marker and synthetic-artifact checks with full-response hash
+  agreement and exactly-one-visible-user-turn verification.
+
 ## 0.6.0-alpha.2
 
 - Fixes logged-out shell detection so visible login walls fail closed as
