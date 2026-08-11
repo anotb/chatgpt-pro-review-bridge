@@ -2,7 +2,7 @@ import { copyFile, mkdir, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { waitForDownloadFromClick } from "../browser/downloads.js";
 import { readPageState } from "../browser/page-state.js";
-import { countPageArtifacts, listPageArtifacts, readLatestImageDataUrl } from "../dom/artifacts.js";
+import { countPageArtifacts, listPageArtifacts, readImageDataUrl } from "../dom/artifacts.js";
 import { cssSelectors, requiredLocator } from "../dom/selectors.js";
 import { localeLabels } from "../dom/locale-labels.js";
 import { resultOk } from "../errors.js";
@@ -153,7 +153,7 @@ export async function downloadLatestArtifact(
   }
 
   try {
-    const byImageSource = await saveLatestVisibleImageSource(page, args.destDir, timeoutMs);
+    const byImageSource = await saveVisibleImageSource(page, args.destDir, timeoutMs, args.which ?? "latest");
     if (byImageSource !== undefined) {
       return resultOk(byImageSource, await contextFromPage(page));
     }
@@ -162,7 +162,7 @@ export async function downloadLatestArtifact(
   }
 
   try {
-    const byPageAssets = await saveLatestPageAssetImage(env, page, args.destDir, timeoutMs);
+    const byPageAssets = await savePageAssetImage(env, page, args.destDir, timeoutMs, args.which ?? "latest");
     if (byPageAssets !== undefined) {
       return resultOk(byPageAssets, await contextFromPage(page));
     }
@@ -203,7 +203,9 @@ async function tryDownloadControl(
       return artifactDownloadBlocker(new Error("No visible generated-image download control was found."), await contextFromPage(page));
     }
 
-    const target = controls.last?.() ?? controls;
+    const target = args.which !== undefined && args.which !== "latest" && controls.nth !== undefined
+      ? controls.nth(args.which.index)
+      : controls.last?.() ?? controls;
     const downloaded = await waitForDownloadFromClick(
       page,
       async () => {
@@ -218,12 +220,13 @@ async function tryDownloadControl(
   }
 }
 
-async function saveLatestVisibleImageSource(
+async function saveVisibleImageSource(
   page: RuntimeEnv["page"] & {},
   destDir: string,
-  timeoutMs: number
+  timeoutMs: number,
+  which: "latest" | { index: number; turnId?: string }
 ): Promise<DownloadedFile | undefined> {
-  const source = await readLatestImageDataUrl(page, timeoutMs);
+  const source = await readImageDataUrl(page, timeoutMs, which);
   if (source === undefined) return undefined;
   const parsed = parseDataUrl(source.dataUrl);
   if (parsed === undefined) return undefined;
@@ -295,22 +298,24 @@ async function listPageAssetArtifacts(
     .map((artifact, index) => ({ ...artifact, index }));
 }
 
-async function saveLatestPageAssetImage(
+async function savePageAssetImage(
   env: RuntimeEnv,
   page: RuntimeEnv["page"] & {},
   destDir: string,
-  timeoutMs: number
+  timeoutMs: number,
+  which: "latest" | { index: number; turnId?: string }
 ): Promise<DownloadedFile | undefined> {
-  return await saveLatestPageAssetImageFromPage(page, destDir, timeoutMs).catch(() => undefined)
+  return await savePageAssetImageFromPage(page, destDir, timeoutMs, which).catch(() => undefined)
     ?? await withTemporaryBridgeOwnedPage(env, page, timeoutMs, async freshPage => {
-      return await saveLatestPageAssetImageFromPage(freshPage, destDir, timeoutMs).catch(() => undefined);
+      return await savePageAssetImageFromPage(freshPage, destDir, timeoutMs, which).catch(() => undefined);
     });
 }
 
-async function saveLatestPageAssetImageFromPage(
+async function savePageAssetImageFromPage(
   page: RuntimeEnv["page"] & {},
   destDir: string,
-  timeoutMs: number
+  timeoutMs: number,
+  which: "latest" | { index: number; turnId?: string }
 ): Promise<DownloadedFile | undefined> {
   const capability = await getPageAssetsCapability(page);
   if (capability === undefined) return undefined;
@@ -331,9 +336,8 @@ async function saveLatestPageAssetImageFromPage(
     localGuardTimeout(timeoutMs, 30000),
     "Timed out while bundling generated image page asset."
   );
-  const asset = bundled.assets
-    .filter(item => !isInlineSvgAsset(item) && isLikelyRasterImageAsset(item))
-    .at(-1);
+  const rasterAssets = bundled.assets.filter(item => !isInlineSvgAsset(item) && isLikelyRasterImageAsset(item));
+  const asset = which === "latest" ? rasterAssets.at(-1) : rasterAssets[which.index];
   if (asset === undefined) return undefined;
 
   const absoluteDest = resolve(destDir);

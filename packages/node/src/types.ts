@@ -628,6 +628,7 @@ export type ArtifactWaitData = {
 export type ArtifactDownloadArgs = DownloadLatestArgs & {
   kind?: ArtifactKind;
   prefer?: "download_control" | "visible_image_source";
+  which?: "latest" | { index: number; turnId?: string };
 };
 
 export type CopyResponseArgs = {

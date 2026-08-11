@@ -83,10 +83,18 @@ export async function readLatestImageDataUrl(
   page: PageLike,
   timeoutMs: number | undefined
 ): Promise<{ dataUrl: string; alt?: string } | undefined> {
+  return readImageDataUrl(page, timeoutMs, "latest");
+}
+
+export async function readImageDataUrl(
+  page: PageLike,
+  timeoutMs: number | undefined,
+  which: "latest" | { index: number; turnId?: string } = "latest"
+): Promise<{ dataUrl: string; alt?: string } | undefined> {
   const guardMs = localGuardTimeout(timeoutMs, 5000);
   if (typeof page.evaluate === "function") {
     const fromDom = await withTimeout(
-      page.evaluate(async () => {
+      page.evaluate(async (selector: "latest" | { index: number; turnId?: string }) => {
         const images = Array.from(document.querySelectorAll("main img")) as HTMLImageElement[];
         const candidates = images.filter(image => {
           const rect = image.getBoundingClientRect();
@@ -97,7 +105,12 @@ export async function readLatestImageDataUrl(
           return !image.closest("nav, aside, header, footer, form, [contenteditable='true'], textarea")
             && (width >= 96 || height >= 96 || /^data:image\//i.test(src) || /^blob:/i.test(src) || /\b(generated|image|photo|picture)\b/i.test(label));
         });
-        const image = candidates.at(-1);
+        const image = selector === "latest"
+          ? candidates.at(-1)
+          : candidates.filter(candidate => {
+              if (selector.turnId === undefined) return true;
+              return candidate.closest("[data-testid^='conversation-turn']")?.getAttribute("data-testid") === selector.turnId;
+            })[selector.index];
         if (image === undefined) return undefined;
         const src = image.currentSrc || image.src;
         if (/^data:image\//i.test(src)) {
@@ -117,7 +130,7 @@ export async function readLatestImageDataUrl(
           return alt === undefined ? { dataUrl } : { dataUrl, alt };
         }
         return undefined;
-      }),
+      }, which),
       guardMs,
       "Timed out while reading the visible generated image source."
     ).catch(() => undefined);
@@ -126,7 +139,8 @@ export async function readLatestImageDataUrl(
 
   const html = await readContentWithTimeout(page, guardMs).catch(() => undefined);
   if (html === undefined) return undefined;
-  const artifact = parseArtifactsFromHtml(html).at(-1);
+  const parsed = parseArtifactsFromHtml(html);
+  const artifact = which === "latest" ? parsed.at(-1) : parsed[which.index];
   if (artifact?.src === undefined || !/^data:image\//i.test(artifact.src)) return undefined;
   return artifact.alt === undefined
     ? { dataUrl: artifact.src }

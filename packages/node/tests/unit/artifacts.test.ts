@@ -77,6 +77,26 @@ describe("generated image artifacts", () => {
     await expect(readFile(result.data?.path ?? "", "utf8")).resolves.toBe("image-bytes");
   });
 
+  it("can save a specifically inventoried image instead of always choosing the latest", async () => {
+    const destDir = await mkdtemp(join(tmpdir(), "chatgpt-control-artifact-index-download-"));
+    const first = Buffer.from("first-image").toString("base64");
+    const second = Buffer.from("second-image").toString("base64");
+    const page = fixturePage(`<main>
+      <img src="data:image/png;base64,${first}" alt="generated first image" width="128" height="128">
+      <img src="data:image/png;base64,${second}" alt="generated second image" width="128" height="128">
+    </main>`);
+
+    const result = await downloadLatestArtifact({ page }, {
+      destDir,
+      prefer: "visible_image_source",
+      which: { index: 0 },
+      timeoutMs: 100
+    });
+
+    expect(result.ok).toBe(true);
+    await expect(readFile(result.data?.path ?? "", "utf8")).resolves.toBe("first-image");
+  });
+
   it("classifies a stalled artifact DOM probe when no content fallback is available", async () => {
     const page: PageLike = {
       evaluate: async () => new Promise(() => {}),
