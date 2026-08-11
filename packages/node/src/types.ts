@@ -542,6 +542,7 @@ export type ProjectSourcesAddData = Omit<ProjectSourcesAddPlanData, "dryRun"> & 
 export type DownloadLatestArgs = {
   destDir: string;
   filenamePattern?: string;
+  occurrenceIndex?: number;
   from?: "latest_assistant" | "visible_conversation" | { assistantIndex: number };
   timeoutMs?: number;
 };
@@ -572,6 +573,7 @@ export type GeneratedFileAffordance = {
   assistantIndex: number;
   filename: string;
   tag: "button" | "a";
+  occurrenceIndex: number;
 };
 
 export type ArtifactInventoryItem =

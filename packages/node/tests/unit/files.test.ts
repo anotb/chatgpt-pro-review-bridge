@@ -512,6 +512,56 @@ describe("attachFiles", () => {
 });
 
 describe("downloadLatestFile", () => {
+  it("downloads the selected occurrence when duplicate generated files share a visible name", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "chatgpt-control-duplicate-generated-file-"));
+    const dest = join(dir, "out");
+    const browserDownload = join(dir, "duplicate-second.csv");
+    await mkdir(dest);
+    await writeFile(browserDownload, "selected,occurrence\nsecond,1\n");
+
+    let clickedOccurrence = -1;
+    const buttons: LocatorLike[] = [0, 1].map(index => ({
+      count: async () => 1,
+      click: async () => {
+        clickedOccurrence = index;
+      }
+    }));
+    const duplicateButtons: LocatorLike = {
+      count: async () => 2,
+      nth: index => buttons[index]!
+    };
+    const assistant: LocatorLike = {
+      getByRole: (_role, options) => options?.name === "duplicate.csv" ? duplicateButtons : { count: async () => 0 }
+    };
+    const assistants: LocatorLike = {
+      count: async () => 1,
+      nth: () => assistant
+    };
+    const page: PageLike = {
+      content: async () => [
+        "<main><div data-message-author-role='assistant'>",
+        "<a download aria-label='duplicate.csv'>duplicate.csv</a>",
+        "<a download aria-label='duplicate.csv'>duplicate.csv</a>",
+        "</div></main>"
+      ].join(""),
+      locator: selector => selector === "[data-message-author-role='assistant']" ? assistants : { count: async () => 0 },
+      waitForEvent: async () => ({ path: async () => browserDownload }),
+      title: async () => "ChatGPT",
+      url: () => "https://chatgpt.com/c/mock"
+    };
+
+    const result = await downloadLatestFile({ page }, {
+      destDir: dest,
+      filenamePattern: "^duplicate\\.csv$",
+      occurrenceIndex: 1,
+      timeoutMs: 100
+    });
+
+    expect(result.ok).toBe(true);
+    expect(clickedOccurrence).toBe(1);
+    await expect(readFile(join(dest, "duplicate.csv"), "utf8")).resolves.toContain("second");
+  });
+
   it("opens a filename-labelled artifact preview and copies a path-only Chrome download", async () => {
     const dir = await mkdtemp(join(tmpdir(), "chatgpt-control-generated-file-download-"));
     const dest = join(dir, "out");

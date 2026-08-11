@@ -21,7 +21,7 @@ describe("artifact inventory baselines", () => {
     const baseline: ArtifactInventoryData = {
       capturedAt: "2026-08-11T00:00:00.000Z",
       items: artifactInventoryItems([oldImage], [
-        { assistantIndex: 0, filename: "older.csv", tag: "button" }
+        { assistantIndex: 0, filename: "older.csv", tag: "button", occurrenceIndex: 0 }
       ])
     };
     const newImage: GeneratedArtifact = {
@@ -33,9 +33,9 @@ describe("artifact inventory baselines", () => {
     const current: ArtifactInventoryData = {
       capturedAt: "2026-08-11T00:01:00.000Z",
       items: artifactInventoryItems([oldImage, newImage], [
-        { assistantIndex: 0, filename: "older.csv", tag: "button" },
-        { assistantIndex: 1, filename: "review.md", tag: "button" },
-        { assistantIndex: 1, filename: "findings.csv", tag: "a" }
+        { assistantIndex: 0, filename: "older.csv", tag: "button", occurrenceIndex: 0 },
+        { assistantIndex: 1, filename: "review.md", tag: "button", occurrenceIndex: 0 },
+        { assistantIndex: 1, filename: "findings.csv", tag: "a", occurrenceIndex: 0 }
       ])
     };
 
@@ -49,12 +49,14 @@ describe("artifact inventory baselines", () => {
   });
 
   it("uses stable keys and preserves duplicate occurrence counts", () => {
-    const file = { assistantIndex: 1, filename: "same.csv", tag: "button" as const };
+    const file = { assistantIndex: 1, filename: "same.csv", tag: "button" as const, occurrenceIndex: 0 };
     const item = artifactInventoryItems([], [file])[0]!;
     const baseline = { capturedAt: "before", items: [item] };
-    const current = { capturedAt: "after", items: [item, { ...item }] };
+    const second = artifactInventoryItems([], [{ ...file, occurrenceIndex: 1 }])[0]!;
+    const current = { capturedAt: "after", items: [item, second] };
 
-    expect(diffArtifactInventories(baseline, current).added).toEqual([{ ...item }]);
+    expect(diffArtifactInventories(baseline, current).added).toEqual([second]);
+    expect(second.key).not.toBe(item.key);
     expect(artifactInventoryItems([], [file])[0]?.key).toBe(item.key);
   });
 });

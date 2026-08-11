@@ -51,7 +51,7 @@ describe("Pro review state machine", () => {
         baseline,
         current: { capturedAt: "after", items: [] },
         added: [
-          { key: "file", kind: "file", assistantIndex: 0, filename: "review.csv", tag: "button", downloadAvailable: true },
+          { key: "file", kind: "file", assistantIndex: 0, filename: "review.csv", tag: "button", occurrenceIndex: 0, downloadAvailable: true },
           {
             key: "image",
             kind: "image",

@@ -740,15 +740,21 @@ async function tryGeneratedFilePreviewDownload(
 
     const assistant = assistantMessages.nth?.(selected.assistantIndex) ?? assistantMessages;
     const role = selected.tag === "button" ? "button" : "link";
-    const affordance = assistant.getByRole?.(role, { name: selected.filename, exact: true })
+    const affordances = assistant.getByRole?.(role, { name: selected.filename, exact: true })
       ?? assistant.locator?.(`${selected.tag}[aria-label="${escapeCssAttribute(selected.filename)}"]`);
     const affordanceCount = await locatorCountWithTimeout(
-      affordance,
+      affordances,
       localGuardTimeout(timeoutMs, 5000),
       "generated_file_affordance_count_timeout"
     );
-    if (affordance === undefined || affordanceCount !== 1 || typeof affordance.click !== "function") {
-      throw new Error(`Expected one clickable generated-file affordance for ${selected.filename}, found ${affordanceCount}.`);
+    if (affordances === undefined || selected.occurrenceIndex < 0 || selected.occurrenceIndex >= affordanceCount) {
+      throw new Error(`Expected generated-file occurrence ${selected.occurrenceIndex} for ${selected.filename}, found ${affordanceCount}.`);
+    }
+    const affordance = affordanceCount === 1
+      ? affordances
+      : affordances.nth?.(selected.occurrenceIndex);
+    if (affordance === undefined || typeof affordance.click !== "function") {
+      throw new Error(`Generated-file occurrence ${selected.occurrenceIndex} for ${selected.filename} was not clickable.`);
     }
 
     if (selected.tag === "a") {
@@ -803,16 +809,24 @@ export async function inspectGeneratedFileAffordances(
         };
         const fileLike = (value: string): boolean => /^[^\\/\r\n]{1,255}\.[a-z0-9][a-z0-9._-]{0,15}$/i.test(value);
         const assistants = Array.from(document.querySelectorAll("[data-message-author-role='assistant']"));
-        return assistants.flatMap((assistant, assistantIndex) => Array.from(assistant.querySelectorAll("button[aria-label], a[download], a[href*='/backend-api/files/']"))
-          .filter(visible)
-          .map(element => ({
-            assistantIndex,
-            filename: (element.getAttribute("aria-label") ?? element.textContent ?? "").trim(),
-            tag: element.tagName.toLocaleLowerCase(),
-            text: (element.textContent ?? "").trim()
-          }))
-          .filter(item => (item.tag === "button" || item.tag === "a") && fileLike(item.filename) && item.filename === item.text)
-          .map(({ assistantIndex, filename, tag }) => ({ assistantIndex, filename, tag })));
+        return assistants.flatMap((assistant, assistantIndex) => {
+          const occurrences = new Map<string, number>();
+          return Array.from(assistant.querySelectorAll("button[aria-label], a[download], a[href*='/backend-api/files/']"))
+            .filter(visible)
+            .map(element => ({
+              assistantIndex,
+              filename: (element.getAttribute("aria-label") ?? element.textContent ?? "").trim(),
+              tag: element.tagName.toLocaleLowerCase(),
+              text: (element.textContent ?? "").trim()
+            }))
+            .filter(item => (item.tag === "button" || item.tag === "a") && fileLike(item.filename) && item.filename === item.text)
+            .map(({ assistantIndex: index, filename, tag }) => {
+              const key = `${tag}\u0000${filename}`;
+              const occurrenceIndex = occurrences.get(key) ?? 0;
+              occurrences.set(key, occurrenceIndex + 1);
+              return { assistantIndex: index, filename, tag, occurrenceIndex };
+            });
+        });
       }),
       timeoutMs,
       "Timed out while inspecting generated-file buttons."
@@ -827,13 +841,18 @@ export async function inspectGeneratedFileAffordances(
     "Timed out while reading generated-file button markup."
   ).catch(() => "");
   const candidates: GeneratedFileAffordance[] = [];
+  const occurrences = new Map<string, number>();
   const buttonPattern = /<(button|a)\b[^>]*\baria-label=(['"])(.*?)\2[^>]*>([\s\S]*?)<\/\1>/gi;
   let match: RegExpExecArray | null;
   while ((match = buttonPattern.exec(html)) !== null) {
     const filename = decodeBasicHtml(match[3] ?? "").trim();
     const text = decodeBasicHtml((match[4] ?? "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
     if (/^[^\\/\r\n]{1,255}\.[a-z0-9][a-z0-9._-]{0,15}$/i.test(filename) && filename === text) {
-      candidates.push({ assistantIndex: 0, filename, tag: (match[1] ?? "button").toLocaleLowerCase() as "button" | "a" });
+      const tag = (match[1] ?? "button").toLocaleLowerCase() as "button" | "a";
+      const key = `${tag}\u0000${filename}`;
+      const occurrenceIndex = occurrences.get(key) ?? 0;
+      occurrences.set(key, occurrenceIndex + 1);
+      candidates.push({ assistantIndex: 0, filename, tag, occurrenceIndex });
     }
   }
   return candidates;
@@ -853,6 +872,9 @@ function selectGeneratedFileAffordance(
   }
   if (args.filenamePattern !== undefined) {
     scoped = scoped.filter(candidate => filenameMatches(candidate.filename, args.filenamePattern!));
+  }
+  if (args.occurrenceIndex !== undefined) {
+    scoped = scoped.filter(candidate => candidate.occurrenceIndex === args.occurrenceIndex);
   }
   return scoped.at(-1);
 }
