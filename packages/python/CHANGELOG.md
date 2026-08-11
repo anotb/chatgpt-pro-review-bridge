@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0a4
+
+- Picks up generated plugin-runtime packet exclusion from the bundled Node
+  backend without changing Python APIs.
+
 ## 0.6.0a3
 
 - Picks up current Chat slider, upload-palette, exact conversation targeting,

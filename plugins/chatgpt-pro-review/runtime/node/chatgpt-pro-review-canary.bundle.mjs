@@ -13461,7 +13461,19 @@ var SECRET_PATH_PATTERNS = [
   /(^|\/)Cookies(?:-journal)?$/i,
   /(^|\/)Local Storage\//i
 ];
-var GENERATED_PATH_PATTERN = /(^|\/)(?:node_modules|dist|build|coverage|vendor|target|\.next|\.cache)\//i;
+var GENERATED_DIRECTORY_PATTERN = /(^|\/)(?:node_modules|dist|build|coverage|vendor|target|\.next|\.cache)\//i;
+var GENERATED_PLUGIN_RUNTIME_PATTERN = /^plugins\/[^/]+\/runtime\/node\/[^/]+\.mjs$/i;
+var GENERATED_DIFF_EXCLUDES = [
+  "**/node_modules/**",
+  "**/dist/**",
+  "**/build/**",
+  "**/coverage/**",
+  "**/vendor/**",
+  "**/target/**",
+  "**/.next/**",
+  "**/.cache/**",
+  "plugins/*/runtime/node/*.mjs"
+].map((pattern) => `:(exclude,glob)${pattern}`);
 var MANIFEST_PATTERN = /(^|\/)(?:package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|pyproject\.toml|poetry\.lock|requirements[^/]*\.txt|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|Gemfile(?:\.lock)?|composer\.json|Dockerfile|docker-compose[^/]*\.ya?ml|.*\.config\.[cm]?[jt]s|.*\.schema\.json)$/i;
 var TEST_PATTERN = /(?:^|\/)(?:test|tests|__tests__)\/|(?:\.|_)(?:test|spec)\.[^.\/]+$/i;
 var SECRET_PATTERNS = [
@@ -13519,8 +13531,9 @@ async function prepareReviewContext(args, now = /* @__PURE__ */ new Date()) {
         fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "secret_path_policy" });
         continue;
       }
-      if (GENERATED_PATH_PATTERN.test(normalized)) {
-        fileRecords.push({ path: normalized, category: candidate.category, status: "generated", reason: "generated_directory" });
+      const generatedReason = generatedPathReason(normalized);
+      if (generatedReason !== void 0) {
+        fileRecords.push({ path: normalized, category: candidate.category, status: "generated", reason: generatedReason });
         continue;
       }
       const absolute = resolve4(repositoryRoot, normalized);
@@ -13762,9 +13775,10 @@ function affectsChangedPath(path3, changed) {
   return changed.some((item) => dir === "." || item.startsWith(`${dir}/`));
 }
 async function buildDiff(root, mergeBase, headSha, includeWorkingTree) {
-  const committed = (await runGit(root, ["diff", "--no-ext-diff", "--find-renames", "--unified=80", `${mergeBase}..${headSha}`])).stdout;
+  const pathspec = ["--", ".", ...GENERATED_DIFF_EXCLUDES];
+  const committed = (await runGit(root, ["diff", "--no-ext-diff", "--find-renames", "--unified=80", `${mergeBase}..${headSha}`, ...pathspec])).stdout;
   if (!includeWorkingTree) return committed;
-  const working = (await runGit(root, ["diff", "--no-ext-diff", "--find-renames", "--unified=80", "HEAD"])).stdout;
+  const working = (await runGit(root, ["diff", "--no-ext-diff", "--find-renames", "--unified=80", "HEAD", ...pathspec])).stdout;
   return [committed, working.length > 0 ? `
 # WORKING TREE DIFF
 ${working}` : ""].join("");
@@ -13945,6 +13959,11 @@ function hash(value) {
 }
 function normalizeRepoPath(value) {
   return value.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+function generatedPathReason(path3) {
+  if (GENERATED_PLUGIN_RUNTIME_PATTERN.test(path3)) return "generated_plugin_runtime";
+  if (GENERATED_DIRECTORY_PATTERN.test(path3)) return "generated_directory";
+  return void 0;
 }
 function assertInside(root, target) {
   const rel = relative2(resolve4(root), resolve4(target));

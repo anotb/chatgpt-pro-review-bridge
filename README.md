@@ -101,9 +101,21 @@ The plugin contains:
 This fork also exposes a separate non-conflicting marketplace plugin. Install a pinned tag, then start a new Codex task:
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.3
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.4
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
+
+Before the first file-backed review on each computer, sign into ChatGPT in the
+visible browser and enable both local upload gates:
+
+1. Codex Settings > Computer Use > Google Chrome > Permissions > Uploads:
+   allow `chatgpt.com` or choose **Always allow**.
+2. Chrome `chrome://extensions` > Codex extension > Details: enable
+   **Allow access to file URLs**.
+
+The bridge fails closed before submission when either permission is missing.
+These settings and the signed-in browser session are per-machine and are not
+included in the plugin.
 
 To move a pinned installation to a newer release tag, remove its installed
 snapshot and add the new ref explicitly before reinstalling:
@@ -111,7 +123,7 @@ snapshot and add the new ref explicitly before reinstalling:
 ```bash
 codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
 codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.3
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.4
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 

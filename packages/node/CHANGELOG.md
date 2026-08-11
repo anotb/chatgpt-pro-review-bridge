@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0-alpha.4
+
+- Treats `plugins/*/runtime/node/*.mjs` as deterministic generated artifacts:
+  they remain listed in the review manifest but are excluded from packet source
+  snapshots and diffs in favor of the source plus bundle-parity evidence.
+
 ## 0.6.0-alpha.3
 
 - Adds strictly verified selection through the current five-position Chat

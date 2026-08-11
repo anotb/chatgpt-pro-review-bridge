@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0-alpha.4
+
+- Records deterministic plugin runtime bundles in packet provenance while
+  excluding their generated contents from source snapshots and unified diffs.
+  The source and bundle-parity gate remain authoritative, avoiding multi-megabyte
+  duplicate review context without silent truncation.
+- Promotes both per-machine browser upload permission gates into pinned-install
+  onboarding and the Pro review skill's mandatory preflight.
+
 ## 0.6.0-alpha.3
 
 - Supports the current compact Chat power slider and Advanced effort picker

@@ -12,9 +12,21 @@ The bridge lets any Codex host invoke the same installed workflow while the dele
 ## Install a pinned release
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.3
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.4
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
+
+Before the first file-backed review on each computer, sign into ChatGPT in the
+visible browser and enable both upload gates:
+
+1. Codex Settings > Computer Use > Google Chrome > Permissions > Uploads:
+   allow `chatgpt.com` or choose **Always allow**.
+2. Chrome `chrome://extensions` > Codex extension > Details: enable
+   **Allow access to file URLs**.
+
+The workflow fails closed before submission when either permission is absent.
+The signed-in session and these local settings are not distributed by the
+plugin.
 
 Start a new Codex task so skill metadata reloads. A marketplace pinned with
 `--ref` remains pinned when refreshed. To move it to a newer immutable tag,
@@ -23,7 +35,7 @@ remove the installed plugin and marketplace snapshot, then add the new tag:
 ```bash
 codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
 codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.3
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.4
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
