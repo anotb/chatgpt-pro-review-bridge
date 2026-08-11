@@ -72,6 +72,7 @@ jobs:
 
   publish-npm:
     name: publish npm
+    if: github.repository == 'adamallcock/codex-chatgpt-control'
     needs: [preflight, package-smoke-macos]
     runs-on: ubuntu-latest
     environment: release
@@ -95,6 +96,7 @@ jobs:
 
   publish-pypi:
     name: publish PyPI
+    if: github.repository == 'adamallcock/codex-chatgpt-control'
     needs: [preflight, package-smoke-macos]
     runs-on: ubuntu-latest
     environment: release
@@ -124,6 +126,7 @@ jobs:
 
   verify-published:
     name: verify published registry installs
+    if: github.repository == 'adamallcock/codex-chatgpt-control'
     needs: [publish-npm, publish-pypi]
     runs-on: ubuntu-latest
     steps:
@@ -138,6 +141,7 @@ jobs:
 
   github-release:
     name: publish GitHub prerelease
+    if: github.repository == 'adamallcock/codex-chatgpt-control'
     needs: verify-published
     runs-on: ubuntu-latest
     permissions:
@@ -154,3 +158,23 @@ jobs:
           --prerelease
           --generate-notes
           --title "ChatGPT Surface Control ${GITHUB_REF_NAME#v}"
+
+  fork-plugin-prerelease:
+    name: publish fork plugin prerelease
+    if: github.repository == 'anotb/chatgpt-pro-review-bridge'
+    needs: [preflight, package-smoke-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Publish the verified plugin prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          --repo "${GITHUB_REPOSITORY}"
+          --verify-tag
+          --prerelease
+          --generate-notes
+          --title "ChatGPT Pro Review Bridge ${GITHUB_REF_NAME#v}"

@@ -1,5 +1,7 @@
 # codex-chatgpt-control
 
+> This fork adds the portable **ChatGPT Pro Review Bridge** plugin. It keeps Codex as the repository executor while a first-class workflow builds deterministic review packets, submits once to the strictly verified visible ChatGPT **Chat / Pro** setting, polls by metadata, returns and archives the complete Markdown once, downloads every new artifact, and restores the previous visible setting. See [Pro review bridge](docs/pro-review-bridge.md).
+
 [![CI](https://img.shields.io/github/actions/workflow/status/adamallcock/codex-chatgpt-control/parity.yml?branch=main&label=CI&logo=github)](https://github.com/adamallcock/codex-chatgpt-control/actions/workflows/parity.yml)
 [![npm](https://img.shields.io/npm/v/codex-chatgpt-control?logo=npm)](https://www.npmjs.com/package/codex-chatgpt-control)
 [![PyPI](https://img.shields.io/pypi/v/codex-chatgpt-control?logo=pypi)](https://pypi.org/project/codex-chatgpt-control/)
@@ -95,6 +97,15 @@ The plugin contains:
 - `chatgpt-delegate`: the preferred surface-neutral Chat/Work delegation workflow.
 - `chatgpt-pro-consult`: a backward-compatible visible Chat Pro-setting alias.
 - bundled Node runtime files for bridge-enabled imports.
+
+This fork also exposes a separate non-conflicting marketplace plugin. Install a pinned tag, then start a new Codex task:
+
+```bash
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.1
+codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
+```
+
+Invoke `$chatgpt-pro-code-review` for full repository reviews. Each computer must separately sign in to ChatGPT and initialize its visible browser bridge; never copy browser credentials or profiles between machines.
 
 Manual skill-only install is still available as a fallback at [skills/codex-chatgpt-control/SKILL.md](skills/codex-chatgpt-control/SKILL.md):
 

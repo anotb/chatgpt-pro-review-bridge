@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0-alpha.1
+
+- Adds the separate `chatgpt-pro-review` marketplace plugin and `chatgpt-pro-code-review` Agent Skill with bundled runtime files.
+- Adds `chatgpt.reviews.codeReview(...)`: deterministic Git evidence packets, exclusions and secret scanning, coherent partitioning, strict visible Chat/Pro verification, exactly-once submission, bounded resume polling, complete Markdown capture, and provenance archives.
+- Adds configuration snapshot/restore, specific Pro unavailability/fallback blockers, artifact baseline/delta attribution, selected-image downloads, collision-safe artifact preservation, hashing, and raw-first findings appendix parsing.
+- Adds an opt-in installed-runtime canary and host orchestration qualification path; generated patches and scripts remain untrusted and are never executed automatically.
+- Fixes Windows Node 24 npm launcher handling across deterministic release gates.
+
 ## 0.5.1-alpha.1
 
 - Fixes current Chat/Work pane switching by selecting the visible

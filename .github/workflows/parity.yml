@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     defaults:
       run:
         working-directory: packages/node
@@ -30,6 +30,7 @@ jobs:
       - run: npm run bundle
       - run: npm run bundle:live-smoke
       - run: npm run bundle:release-canary
+      - run: npm run bundle:pro-review-canary
       - run: npm run bundle:backend
       - run: npm run contract:validate
       - run: npm run docs:drift
@@ -44,7 +45,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     defaults:
       run:
         working-directory: packages/python
@@ -70,3 +71,22 @@ jobs:
       - run: python -m compileall -q examples
       - run: python -m pyright src tests
       - run: python scripts/live_smoke.py --mode ordinary-shell
+
+  plugin-package:
+    name: plugin package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: packages/node/package-lock.json
+      - run: npm --prefix packages/node ci
+      - run: npm run plugin:build
+      - run: npm run plugin:check
+      - run: npm run plugin:validate
