@@ -105,6 +105,16 @@ codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
+To move a pinned installation to a newer release tag, remove its installed
+snapshot and add the new ref explicitly before reinstalling:
+
+```bash
+codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
+codex plugin marketplace remove chatgpt-pro-review-bridge
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.2
+codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
+```
+
 Invoke `$chatgpt-pro-code-review` for full repository reviews. Each computer must separately sign in to ChatGPT and initialize its visible browser bridge; never copy browser credentials or profiles between machines.
 
 Manual skill-only install is still available as a fallback at [skills/codex-chatgpt-control/SKILL.md](skills/codex-chatgpt-control/SKILL.md):
