@@ -115,6 +115,41 @@ describe("deterministic review packet builder", () => {
     expect(packets).not.toContain("GENERATED_BUNDLE_MARKER");
     expect(packets).toContain("return 42");
   });
+
+  it("excludes untracked local Codex state while retaining tracked .codex changes", async () => {
+    const repo = await fixtureRepository();
+    const trackedCodexPath = join(repo, ".codex", "repository-policy.md");
+    const localArchivePath = join(repo, ".codex", "packet-size-check", "previous.md");
+    await mkdir(join(repo, ".codex", "packet-size-check"), { recursive: true });
+    await writeFile(trackedCodexPath, "tracked repository policy\n");
+    git(repo, "add", trackedCodexPath);
+    git(repo, "commit", "-m", "add tracked repository policy");
+    await writeFile(trackedCodexPath, "tracked repository policy changed\n");
+    await writeFile(localArchivePath, "LOCAL_CODEX_ARCHIVE_MARKER\n");
+
+    const prepared = await prepareReviewContext({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      headRef: "HEAD",
+      context: { includeWorkingTree: true }
+    });
+    const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
+
+    expect(prepared.manifest.dirty).toBe(true);
+    expect(prepared.manifest.files).toContainEqual(expect.objectContaining({
+      path: ".codex/repository-policy.md",
+      status: "included"
+    }));
+    expect(prepared.manifest.files).toContainEqual(expect.objectContaining({
+      path: ".codex/packet-size-check/previous.md",
+      status: "excluded",
+      reason: "untracked_local_codex_state"
+    }));
+    expect(packets).toContain("tracked repository policy changed");
+    expect(packets).toContain("Excluded untracked local Codex state paths: 1");
+    expect(packets).not.toContain("LOCAL_CODEX_ARCHIVE_MARKER");
+    expect(packets).not.toContain(".codex/packet-size-check/previous.md");
+  });
 });
 
 async function fixtureRepository(): Promise<string> {

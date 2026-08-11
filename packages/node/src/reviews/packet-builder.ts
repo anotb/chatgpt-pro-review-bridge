@@ -29,6 +29,7 @@ const SECRET_PATH_PATTERNS = [
 ];
 const GENERATED_DIRECTORY_PATTERN = /(^|\/)(?:node_modules|dist|build|coverage|vendor|target|\.next|\.cache)\//i;
 const GENERATED_PLUGIN_RUNTIME_PATTERN = /^plugins\/[^/]+\/runtime\/node\/[^/]+\.mjs$/i;
+const LOCAL_CODEX_STATE_PATTERN = /^\.codex\//i;
 const GENERATED_DIFF_EXCLUDES = [
   "**/node_modules/**",
   "**/dist/**",
@@ -85,10 +86,16 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
     const branch = (await runGit(repositoryRoot, ["branch", "--show-current"])).stdout.trim() || undefined;
     const status = await runGit(repositoryRoot, ["status", "--porcelain=v1", "--untracked-files=all"]);
     const dirty = status.stdout.trim().length > 0;
+    const packetStatus = filterPacketStatus(status.stdout);
     const includeWorkingTree = args.context?.includeWorkingTree ?? true;
     const changed = await changedFiles(repositoryRoot, mergeBaseSha, headSha, includeWorkingTree);
     let validation = await validationOutput(args, repositoryRoot);
-    const fileRecords: PacketFileRecord[] = [];
+    const fileRecords: PacketFileRecord[] = packetStatus.excludedLocalCodexState.map(path => ({
+      path,
+      category: "changed-file",
+      status: "excluded",
+      reason: "untracked_local_codex_state"
+    }));
     const secretFindings: SecretFinding[] = [];
     const sourceSections: Section[] = [];
     const dependencies = new Map<string, Set<string>>();
@@ -199,8 +206,9 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
           "",
           "git status --porcelain:",
           "```text",
-          status.stdout.trimEnd(),
-          "```"
+          packetStatus.visible.trimEnd(),
+          "```",
+          `Excluded untracked local Codex state paths: ${packetStatus.excludedLocalCodexState.length}`
         ].join("\n")
       },
       { title: "Changed paths and rename evidence", files: changed, body: `\`\`\`text\n${nameStatus.trimEnd()}\n\`\`\`` },
@@ -295,8 +303,24 @@ async function changedFiles(root: string, mergeBase: string, headSha: string, in
   const committed = parseNameStatus((await runGit(root, ["diff", "--name-status", "--find-renames", `${mergeBase}..${headSha}`])).stdout);
   if (!includeWorkingTree) return [...new Set(committed)].sort();
   const unstaged = parseNameStatus((await runGit(root, ["diff", "--name-status", "--find-renames", "HEAD"])).stdout);
-  const untracked = (await runGit(root, ["ls-files", "--others", "--exclude-standard"])).stdout.split(/\r?\n/).filter(Boolean);
+  const untracked = (await runGit(root, ["ls-files", "--others", "--exclude-standard"])).stdout
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map(normalizeRepoPath)
+    .filter(path => !LOCAL_CODEX_STATE_PATTERN.test(path));
   return [...new Set([...committed, ...unstaged, ...untracked].map(normalizeRepoPath))].sort();
+}
+
+function filterPacketStatus(value: string): { visible: string; excludedLocalCodexState: string[] } {
+  const excludedLocalCodexState: string[] = [];
+  const visible = value.split(/\r?\n/).filter(line => {
+    if (!line.startsWith("?? ")) return true;
+    const path = normalizeRepoPath(line.slice(3));
+    if (!LOCAL_CODEX_STATE_PATTERN.test(path)) return true;
+    excludedLocalCodexState.push(path);
+    return false;
+  }).join("\n");
+  return { visible, excludedLocalCodexState };
 }
 
 function parseNameStatus(value: string): string[] {
@@ -351,7 +375,13 @@ async function buildNameStatus(root: string, mergeBase: string, headSha: string,
   const committed = (await runGit(root, ["diff", "--name-status", "--find-renames", `${mergeBase}..${headSha}`])).stdout;
   if (!includeWorkingTree) return committed;
   const working = (await runGit(root, ["diff", "--name-status", "--find-renames", "HEAD"])).stdout;
-  const untracked = (await runGit(root, ["ls-files", "--others", "--exclude-standard"])).stdout.split(/\r?\n/).filter(Boolean).map(path => `?\t${path}`).join("\n");
+  const untracked = (await runGit(root, ["ls-files", "--others", "--exclude-standard"])).stdout
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map(normalizeRepoPath)
+    .filter(path => !LOCAL_CODEX_STATE_PATTERN.test(path))
+    .map(path => `?\t${path}`)
+    .join("\n");
   return [committed, working, untracked].filter(Boolean).join("\n");
 }
 
