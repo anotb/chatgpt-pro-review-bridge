@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0a9
+
+- Picks up canonical post-submit thread binding and resumable ambiguous-submit
+  handling from the bundled Node backend.
+
 ## 0.6.0a8
 
 - Picks up the simplified askPro packet policy and the cross-platform release

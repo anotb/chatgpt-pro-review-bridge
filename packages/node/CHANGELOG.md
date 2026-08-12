@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-alpha.9
+
+- Preserves the canonical post-submit Chat thread and makes ambiguous visible
+  submission evidence explicitly resumable without allowing a resend.
+
 ## 0.6.0-alpha.8
 
 - Fixes cross-platform npm launcher path resolution in the release gates.

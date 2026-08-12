@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0-alpha.9
+
+- Refreshes the canonical visible Chat conversation identity immediately after
+  the one submit attempt, before the durable receipt is written.
+- Returns an advanced-but-not-yet-proven submission as resumable `in_progress`
+  work on the same archive instead of a contradictory non-resumable blocker.
+
 ## 0.6.0-alpha.8
 
 - Makes the Windows npm launcher tests platform-independent so the release
