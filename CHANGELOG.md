@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0-alpha.11
+
+- Claims an already-visible canonical conversation when its latest user turn
+  contains the exact archived prompt, before falling back to visible history
+  search for an older provisional receipt.
+
 ## 0.6.0-alpha.10
 
 - Recovers older ambiguous receipts with provisional `WEB:` conversation IDs

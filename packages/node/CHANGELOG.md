@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-alpha.11
+
+- Resumes a prompt-identical currently visible Chat conversation before history
+  search, preserving the same-thread and no-resubmit guarantees.
+
 ## 0.6.0-alpha.10
 
 - Routes provisional ambiguous receipts through visible history recovery before
