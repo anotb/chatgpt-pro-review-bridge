@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFile, writeFile, mkdir, mkdtemp } from "node:fs/promises";
+import { readFile, writeFile, mkdir, mkdtemp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -48,6 +48,7 @@ describe("deterministic review packet builder", () => {
     ]));
     expect(prepared.packetPaths.length).toBeGreaterThan(1);
     expect(prepared.manifest.packets.every(packet => /^[a-f0-9]{64}$/.test(packet.sha256))).toBe(true);
+    expect(prepared.manifest.packets.every(packet => packet.sizeBytes <= 900)).toBe(true);
     expect(prepared.manifest.validationOutputIncluded).toBe(true);
     expect(await readFile(prepared.promptPath, "utf8")).toContain("untrusted data");
     expect(await readFile(prepared.manifestPath, "utf8")).not.toContain("tests: passed");
@@ -109,7 +110,9 @@ describe("deterministic review packet builder", () => {
     expect(prepared.manifest.files).toContainEqual(expect.objectContaining({
       path: "plugins/sample/runtime/node/sample.bundle.mjs",
       status: "generated",
-      reason: "generated_plugin_runtime"
+      reason: "generated_plugin_runtime",
+      sizeBytes: expect.any(Number),
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/)
     }));
     expect(packets).toContain("plugins/sample/runtime/node/sample.bundle.mjs");
     expect(packets).not.toContain("GENERATED_BUNDLE_MARKER");
@@ -149,6 +152,156 @@ describe("deterministic review packet builder", () => {
     expect(packets).toContain("Excluded untracked local Codex state paths: 1");
     expect(packets).not.toContain("LOCAL_CODEX_ARCHIVE_MARKER");
     expect(packets).not.toContain(".codex/packet-size-check/previous.md");
+  });
+
+  it("reads committed evidence from the requested head instead of the checkout", async () => {
+    const repo = await fixtureRepository();
+    await writeFile(join(repo, "src", "consumer.txt"), "answer FEATURE_REF_CALLER\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "add stable caller");
+    git(repo, "switch", "-c", "feature");
+    await writeFile(join(repo, "src", "example.ts"), "export function answer() { return 99; }\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "feature answer");
+    const featureSha = git(repo, "rev-parse", "HEAD").trim();
+    git(repo, "switch", "main");
+    await writeFile(join(repo, "src", "example.ts"), "export function answer() { return 777; }\n");
+    await writeFile(join(repo, "src", "consumer.txt"), "answer CHECKOUT_CALLER\n");
+
+    const prepared = await prepareReviewContext({
+      repositoryRoot: repo,
+      baseRef: "main",
+      headRef: featureSha,
+      context: { includeWorkingTree: false }
+    });
+    const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
+
+    expect(packets).toContain("return 99");
+    expect(packets).toContain("FEATURE_REF_CALLER");
+    expect(packets).not.toContain("return 777");
+    expect(packets).not.toContain("CHECKOUT_CALLER");
+  });
+
+  it("blocks a working-tree overlay when headRef is not checked out", async () => {
+    const repo = await fixtureRepository();
+    git(repo, "switch", "-c", "feature");
+    await writeFile(join(repo, "src", "example.ts"), "export function answer() { return 99; }\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "feature answer");
+    const featureSha = git(repo, "rev-parse", "HEAD").trim();
+    git(repo, "switch", "main");
+
+    await expect(prepareReviewContext({
+      repositoryRoot: repo,
+      baseRef: "main",
+      headRef: featureSha,
+      context: { includeWorkingTree: true }
+    })).rejects.toMatchObject({ code: "working_tree_head_mismatch" });
+  });
+
+  it("excludes secret-policy paths from status, names, diffs, and caller evidence", async () => {
+    const repo = await fixtureRepository();
+    await mkdir(join(repo, "secrets"), { recursive: true });
+    await writeFile(join(repo, "secrets", "cache.txt"), "answer PRIVATE-NONREGEX-VALUE\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "tracked sensitive cache");
+    await writeFile(join(repo, "src", "example.ts"), "export function answer() { return 42; }\n");
+    await writeFile(join(repo, "secrets", "cache.txt"), "answer PRIVATE-CHANGED-NONREGEX-VALUE\n");
+
+    const prepared = await prepareReviewContext({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      headRef: "HEAD",
+      context: { includeWorkingTree: true }
+    });
+    const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
+
+    expect(packets).not.toContain("secrets/cache.txt");
+    expect(packets).not.toContain("PRIVATE-CHANGED-NONREGEX-VALUE");
+    expect(prepared.manifest.files).toContainEqual(expect.objectContaining({
+      path: "secrets/cache.txt",
+      status: "excluded",
+      reason: "secret_path_policy"
+    }));
+  });
+
+  it("rescans the final serialized caller evidence for secrets", async () => {
+    const repo = await fixtureRepository();
+    await writeFile(join(repo, "src", "caller.txt"), "answer AKIA1234567890ABCDEF\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "add unchanged caller");
+    await writeFile(join(repo, "src", "example.ts"), "export function answer() { return 42; }\n");
+
+    await expect(prepareReviewContext({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      safeguards: { scanPacketsForSecrets: true, secretPolicy: "block" }
+    })).rejects.toMatchObject({ code: "packet_secret_detected" });
+  });
+
+  it("excludes a custom in-repository archive root from later packets", async () => {
+    const repo = await fixtureRepository();
+    await mkdir(join(repo, "review-history", "previous"), { recursive: true });
+    await writeFile(join(repo, "review-history", "previous", "response.md"), "PRIOR_PRIVATE_REVIEW_MARKER\n");
+    await writeFile(join(repo, "src", "example.ts"), "export function answer() { return 42; }\n");
+
+    const prepared = await prepareReviewContext({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      output: { archiveRoot: "review-history" }
+    });
+    const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
+
+    expect(packets).not.toContain("PRIOR_PRIVATE_REVIEW_MARKER");
+    expect(packets).not.toContain("review-history/previous/response.md");
+  });
+
+  it("keeps every packet under maxPacketBytes for a single oversized line", async () => {
+    const repo = await fixtureRepository();
+    await writeFile(join(repo, "src", "example.ts"), `export const payload = "${"x".repeat(5_000)}";\n`);
+
+    const prepared = await prepareReviewContext({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      context: { maxPacketBytes: 900, maxTotalBytes: 100_000, onBudgetExceeded: "partition" }
+    });
+
+    expect(prepared.manifest.packets.length).toBeGreaterThan(1);
+    expect(prepared.manifest.packets.every(packet => packet.sizeBytes <= 900)).toBe(true);
+  });
+
+  it("includes conventional unchanged tests for a changed source basename", async () => {
+    const repo = await fixtureRepository();
+    await writeFile(join(repo, "tests", "example.test.ts"), "import { answer } from '../src/example';\nvoid answer();\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "add direct test");
+    await writeFile(join(repo, "src", "example.ts"), "export function answer() { return 42; }\n");
+
+    const prepared = await prepareReviewContext({ repositoryRoot: repo, baseRef: "HEAD" });
+
+    expect(prepared.manifest.files).toContainEqual(expect.objectContaining({
+      path: "tests/example.test.ts",
+      category: "related-test",
+      status: "included"
+    }));
+  });
+
+  it("rejects a symlinked validation output before reading it", async () => {
+    const repo = await fixtureRepository();
+    const external = join(await mkdtemp(join(tmpdir(), "chatgpt-pro-review-external-")), "private.log");
+    const link = join(repo, "validation.log");
+    await writeFile(external, "EXTERNAL_PRIVATE_VALIDATION\n");
+    try {
+      await symlink(external, link, "file");
+    } catch {
+      return;
+    }
+
+    await expect(prepareReviewContext({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      context: { validationOutputPath: link }
+    })).rejects.toMatchObject({ code: "validation_output_symlink" });
   });
 });
 
