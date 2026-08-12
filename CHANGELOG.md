@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-alpha.10
+
+- Recovers older ambiguous receipts with provisional `WEB:` conversation IDs
+  before browser bootstrap, so resume never targets a synthetic thread URL.
+
 ## 0.6.0-alpha.9
 
 - Refreshes the canonical visible Chat conversation identity immediately after

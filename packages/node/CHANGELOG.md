@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-alpha.10
+
+- Routes provisional ambiguous receipts through visible history recovery before
+  browser bootstrap while retaining the no-resubmit guarantee.
+
 ## 0.6.0-alpha.9
 
 - Preserves the canonical post-submit Chat thread and makes ambiguous visible
