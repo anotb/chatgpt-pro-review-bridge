@@ -197,10 +197,13 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       submitted = true;
     }
 
-    requireOk(await runStep("PREFLIGHT_BROWSER", () => port.bootstrap(args.resume === undefined ? undefined : {
-      ...(threadUrl === undefined ? {} : { url: threadUrl }),
-      ...(threadId === undefined ? {} : { conversationId: threadId })
-    })), "PREFLIGHT_BROWSER");
+    const bootstrapTarget = args.resume === undefined || isProvisionalConversationId(threadId)
+      ? undefined
+      : {
+          ...(threadUrl === undefined ? {} : { url: threadUrl }),
+          ...(threadId === undefined ? {} : { conversationId: threadId })
+        };
+    requireOk(await runStep("PREFLIGHT_BROWSER", () => port.bootstrap(bootstrapTarget)), "PREFLIGHT_BROWSER");
     requireOk(await runStep("OPEN_CHAT", () => port.openChat()), "OPEN_CHAT");
     if (args.resume === undefined) {
       const opened = requireData(await runStep("OPEN_CHAT", () => port.newThread()), "OPEN_CHAT");
@@ -209,8 +212,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     } else {
       const unconfirmedNeedsRecovery = archivedSubmission !== undefined
         && archivedSubmission.state !== "confirmed"
-        && (threadId === undefined || isProvisionalConversationId(threadId))
-        && conversationIdFromUrl(threadUrl) === undefined;
+        && (threadId === undefined || isProvisionalConversationId(threadId));
       let openResult = unconfirmedNeedsRecovery
         ? await runStep("RECOVER_THREAD", () => port.recoverThread(recoveryQuery!, prepared!.prompt))
         : await runStep("OPEN_CHAT", () => port.openThread({

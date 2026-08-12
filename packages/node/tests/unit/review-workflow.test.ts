@@ -458,6 +458,52 @@ describe("Pro review state machine", () => {
     });
   });
 
+  it("recovers a provisional ambiguous receipt before targeting a browser thread", async () => {
+    const repo = await fixtureRepository();
+    let submittedPrompt = "";
+    const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([], {
+      newThread: async () => success({ url: "https://chatgpt.com/c/WEB:provisional", conversationId: "WEB:provisional" }),
+      submit: async (prompt: string) => {
+        submittedPrompt = prompt;
+        return success({ submitted: true, userTurnText: "render pending", turnCount: 2, submissionState: "submitted_generating" });
+      },
+      readLatestUser: async () => success({ role: "user", text: "render pending", format: "normalized_text" }),
+      pageState: async () => ({
+        url: "https://chatgpt.com/c/WEB:provisional",
+        conversationId: "WEB:provisional",
+        visibleText: "Stop generating",
+        signedIn: true
+      })
+    }));
+    expect(first.status).toBe("in_progress");
+
+    const calls: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls, {
+      bootstrap: async target => {
+        expect(target).toBeUndefined();
+        return success({});
+      },
+      recoverThread: async () => success({
+        url: "https://chatgpt.com/c/canonical-thread",
+        conversationId: "canonical-thread"
+      }),
+      readLatestUser: async () => success({
+        role: "user",
+        text: `manifest.json\nFile\npacket-001.md\nFile\n${submittedPrompt}\nShow more`,
+        format: "normalized_text"
+      })
+    }));
+
+    expect(resumed.status).toBe("completed");
+    expect(calls).toContain("recoverThread");
+    expect(calls).not.toContain("openThread");
+    expect(calls).not.toContain("submit");
+  });
+
   it("fails closed when a later user turn makes resume response ownership ambiguous", async () => {
     const repo = await fixtureRepository();
     const first = await runCodeReviewWithPort({
