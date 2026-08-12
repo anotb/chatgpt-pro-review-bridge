@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0a10
+
+- Keeps the Python package version aligned with the provisional-thread recovery
+  release; the browser workflow behavior is provided by the shared Node backend.
+
 ## 0.6.0a9
 
 - Picks up canonical post-submit thread binding and resumable ambiguous-submit
