@@ -18,6 +18,11 @@ export type ProCodeReviewArgs = {
     focus?: string[];
     additionalInstructions?: string;
   };
+  /** Submit a new question in this existing canonical Chat conversation. */
+  thread?: {
+    url?: string;
+    id?: string;
+  };
   target?: {
     experience?: "chat";
     intelligence?: "Pro";

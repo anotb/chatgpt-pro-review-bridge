@@ -54,6 +54,43 @@ describe("Pro review state machine", () => {
     expect(await readFile(join(result.archiveDirectory!, "prompt.md"), "utf8")).toBe(question);
   });
 
+  it("submits a follow-up once in an existing canonical Pro thread", async () => {
+    const archiveRoot = await mkdtemp(join(tmpdir(), "chatgpt-pro-follow-up-workflow-"));
+    const calls: string[] = [];
+    const conversationId = "existing-pro-thread";
+    let bootstrapTarget: { url?: string; conversationId?: string } | undefined;
+
+    const result = await runCodeReviewWithPort({
+      thread: { url: `https://chatgpt.com/c/${conversationId}`, id: conversationId },
+      request: { additionalInstructions: "Now express the same idea in exactly five words." },
+      output: { archiveRoot }
+    }, makePort(calls, {
+      bootstrap: async target => {
+        bootstrapTarget = target;
+        return success({});
+      },
+      pageState: async () => ({
+        url: `https://chatgpt.com/c/${conversationId}`,
+        conversationId,
+        title: "Existing Pro thread",
+        visibleText: "Chat with ChatGPT",
+        signedIn: true
+      }),
+      waitMetadata: async () => ({
+        ...success({ complete: true, assistantTurnCount: 1, elapsedMs: 20, responseChars: 400, responseSha256: "abc", responseContent: "metadata" }),
+        context: { ...context(), url: `https://chatgpt.com/c/${conversationId}`, conversationId }
+      })
+    }));
+
+    expect(result.status).toBe("completed");
+    expect(result.thread).toMatchObject({ id: conversationId, url: `https://chatgpt.com/c/${conversationId}` });
+    expect(bootstrapTarget).toEqual({ url: `https://chatgpt.com/c/${conversationId}`, conversationId });
+    expect(calls).toContain("openThread");
+    expect(calls).not.toContain("newThread");
+    expect(calls.filter(call => call === "submit")).toHaveLength(1);
+    expect(await readFile(join(result.archiveDirectory!, "prompt.md"), "utf8")).toBe("Now express the same idea in exactly five words.");
+  });
+
   it("does not interact with the Pro control when the configuration snapshot already verifies Pro", async () => {
     const repo = await fixtureRepository();
     const calls: string[] = [];

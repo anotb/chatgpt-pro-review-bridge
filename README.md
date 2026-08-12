@@ -90,6 +90,19 @@ const result = await chatgpt.reviews.askPro({
 
 With no repository refs, the visible Chat user turn is the question itself and there is no attachment step.
 
+Continue that conversation with another AskPro call:
+
+```js
+const followUp = await chatgpt.reviews.askPro({
+  thread: result.thread,
+  request: {
+    additionalInstructions: "Now express the same idea in exactly five words."
+  }
+});
+```
+
+The follow-up is submitted once in the same visible thread, archived separately, and resumed from its own archive if it runs long.
+
 Use `$chatgpt-pro-code-review` when repository evidence is useful:
 
 ```js

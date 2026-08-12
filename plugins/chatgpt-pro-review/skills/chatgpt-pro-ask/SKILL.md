@@ -74,6 +74,41 @@ const resumed = await chatgpt.reviews.askPro({
 
 Never reattach files or resend the prompt. The archive's immutable receipt, original context, and thread checkpoint are authoritative. Keep each browser-host call longer than `callTimeoutMs` (30 seconds is sufficient for the 20-second example) and continue bounded resume calls until completion or a structured blocker. Pro can take minutes or more than an hour; `totalTimeoutMs` limits one invocation, not the repeated same-archive resume loop.
 
+## Ask a follow-up in the same thread
+
+After a completed result, pass its canonical thread to a new AskPro call. The follow-up receives its own submit-once archive while continuing the visible conversation:
+
+```js
+const followUp = await chatgpt.reviews.askPro({
+  thread: result.thread,
+  request: {
+    additionalInstructions: "<caller-defined follow-up>"
+  },
+  target: { experience: "chat", intelligence: "Pro", strict: true },
+  output: {
+    mode: "full",
+    archive: true,
+    archiveRoot: ".codex/pro-reviews",
+    downloadArtifacts: "all",
+    returnFullMarkdown: true
+  },
+  safeguards: {
+    submitOnce: true,
+    verifyTargetBeforeSubmit: true,
+    verifyTargetAfterCompletion: true,
+    failOnFallback: true,
+    restorePreviousConfiguration: false
+  },
+  polling: {
+    callTimeoutMs: 20000,
+    totalTimeoutMs: 1800000,
+    maxPollCallsPerInvocation: 1
+  }
+});
+```
+
+Resume an in-progress follow-up from `followUp.archiveDirectory` exactly like any other AskPro request.
+
 ## Stop and replace an obsolete request
 
 Only do this when the caller or current session explicitly decides the running request is obsolete. Do not auto-stop merely because files changed.
