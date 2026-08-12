@@ -458,7 +458,7 @@ describe("Pro review state machine", () => {
     });
   });
 
-  it("recovers a provisional ambiguous receipt before targeting a browser thread", async () => {
+  it("claims the visible prompt-identical thread for a provisional ambiguous receipt", async () => {
     const repo = await fixtureRepository();
     let submittedPrompt = "";
     const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([], {
@@ -499,7 +499,8 @@ describe("Pro review state machine", () => {
     }));
 
     expect(resumed.status).toBe("completed");
-    expect(calls).toContain("recoverThread");
+    expect(calls).toContain("pageState");
+    expect(calls).not.toContain("recoverThread");
     expect(calls).not.toContain("openThread");
     expect(calls).not.toContain("submit");
   });

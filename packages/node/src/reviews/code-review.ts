@@ -213,8 +213,13 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       const unconfirmedNeedsRecovery = archivedSubmission !== undefined
         && archivedSubmission.state !== "confirmed"
         && (threadId === undefined || isProvisionalConversationId(threadId));
+      const visibleRecovery = unconfirmedNeedsRecovery
+        ? await recoverCurrentVisibleThread(port, prepared!.prompt)
+        : undefined;
       let openResult = unconfirmedNeedsRecovery
-        ? await runStep("RECOVER_THREAD", () => port.recoverThread(recoveryQuery!, prepared!.prompt))
+        ? await runStep("RECOVER_THREAD", () => visibleRecovery === undefined
+            ? port.recoverThread(recoveryQuery!, prepared!.prompt)
+            : Promise.resolve(visibleRecovery))
         : await runStep("OPEN_CHAT", () => port.openThread({
             ...(threadId === undefined ? {} : { conversationId: threadId }),
             ...(threadUrl === undefined ? {} : { url: threadUrl })
@@ -877,6 +882,33 @@ function conversationIdFromUrl(url: string | undefined): string | undefined {
 
 function isProvisionalConversationId(value: string | undefined): boolean {
   return value?.startsWith("WEB:") === true;
+}
+
+async function recoverCurrentVisibleThread(
+  port: ReviewWorkflowPort,
+  expectedPrompt: string
+): Promise<CommandResult<OpenThreadData> | undefined> {
+  const page = await port.pageState().catch(() => undefined);
+  const conversationId = page?.conversationId ?? conversationIdFromUrl(page?.url);
+  if (page === undefined || conversationId === undefined || isProvisionalConversationId(conversationId)) return undefined;
+  const latestUser = await port.readLatestUser().catch(() => undefined);
+  if (latestUser?.ok !== true || !visibleUserTurnContainsExactPrompt(latestUser.data?.text ?? "", expectedPrompt)) return undefined;
+  return {
+    ok: true,
+    status: "ok",
+    data: {
+      url: page.url,
+      conversationId,
+      ...(page.title === undefined ? {} : { title: page.title })
+    },
+    warnings: ["Recovered the archived review from the already-visible prompt-identical Chat conversation."],
+    context: {
+      timestamp: port.now().toISOString(),
+      url: page.url,
+      conversationId,
+      ...(page.title === undefined ? {} : { title: page.title })
+    }
+  };
 }
 
 function recoveryQueryFromPrepared(prepared: PreparedReviewContext): string {
