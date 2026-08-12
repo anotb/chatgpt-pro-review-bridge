@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0-beta.1
+
+- Promotes the context-free AskPro workflow after deterministic and live
+  alpha qualification.
+- Pins generated runtime line endings for Windows source-install parity.
+
 ## 0.6.0-alpha.14
 
 - Supports repository-free Pro questions with exact prompt submission, no packet

@@ -1,6 +1,6 @@
 {
   "name": "codex-chatgpt-control",
-  "version": "0.6.0-alpha.14",
+  "version": "0.6.0-beta.1",
   "description": "Unofficial SDK for controlling visible ChatGPT Chat and Work sessions.",
   "type": "module",
   "license": "MIT",

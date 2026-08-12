@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0-beta.1
+
+- Makes context-free AskPro the simple default and presents the fork as a
+  focused, shareable Codex plugin for humans and agents.
+- Keeps generated plugin runtimes byte-identical in clean Windows checkouts.
+
 ## 0.6.0-alpha.14
 
 - Adds a context-free AskPro path that sends the caller's question exactly,

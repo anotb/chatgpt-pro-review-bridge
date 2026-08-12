@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0b1
+
+- Aligns the Python parity package with the first focused AskPro beta.
+
 ## 0.6.0a14
 
 - Aligns the Python package with the context-free AskPro and stale-lease recovery
