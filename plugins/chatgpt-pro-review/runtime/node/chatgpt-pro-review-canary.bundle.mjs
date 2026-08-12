@@ -15146,9 +15146,12 @@ function normalizePrompt(value) {
   return value.replace(/\r\n/g, "\n").trim();
 }
 function visibleUserTurnContainsExactPrompt(actual, expected) {
-  const normalizedActual = normalizePrompt(actual);
-  const normalizedExpected = normalizePrompt(expected);
+  const normalizedActual = normalizeVisiblePrompt(actual);
+  const normalizedExpected = normalizeVisiblePrompt(expected);
   return normalizedActual === normalizedExpected || normalizedActual.includes(normalizedExpected);
+}
+function normalizeVisiblePrompt(value) {
+  return normalizePrompt(value).replace(/\s+/g, " ");
 }
 function promptMatches(actual, expected, query) {
   if (actual === expected) return true;
