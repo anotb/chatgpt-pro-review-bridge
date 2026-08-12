@@ -2,8 +2,9 @@
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 
-const NODE_PACKAGE = "codex-chatgpt-control";
-const PYTHON_PACKAGE = "codex-chatgpt-control";
+const NODE_PACKAGE = "chatgpt-pro-review-bridge";
+const PYTHON_PACKAGE = "chatgpt-pro-review-bridge";
+const GENERAL_PLUGIN = "codex-chatgpt-control";
 
 function parseArgs(argv) {
   const args = {};
@@ -105,13 +106,13 @@ async function main() {
   const pluginBaseVersion = typeof pluginPackage.version === "string"
     ? pluginPackage.version.split("+", 1)[0]
     : undefined;
-  if (pluginPackage.name !== NODE_PACKAGE) {
-    errors.push(`Plugin name ${pluginPackage.name} does not match ${NODE_PACKAGE}`);
+  if (pluginPackage.name !== GENERAL_PLUGIN) {
+    errors.push(`Plugin name ${pluginPackage.name} does not match ${GENERAL_PLUGIN}`);
   }
   if (pluginBaseVersion !== nodePackage.version) {
     errors.push(`Plugin base version ${pluginBaseVersion ?? "missing"} does not match Node package version ${nodePackage.version}`);
   }
-  if (typeof pluginPackage.version !== "string" || !/^\d+\.\d+\.\d+-(?:alpha|beta|rc)\.\d+\+codex\.[a-z0-9-]+$/.test(pluginPackage.version)) {
+  if (typeof pluginPackage.version !== "string" || !/^\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\.\d+)?\+codex\.[a-z0-9-]+$/.test(pluginPackage.version)) {
     errors.push(`Plugin version ${pluginPackage.version ?? "missing"} must include one +codex.<cachebuster> suffix`);
   }
   const reviewPluginBaseVersion = typeof reviewPluginPackage.version === "string"
@@ -123,7 +124,7 @@ async function main() {
   if (reviewPluginBaseVersion !== nodePackage.version) {
     errors.push(`Review plugin base version ${reviewPluginBaseVersion ?? "missing"} does not match Node package version ${nodePackage.version}`);
   }
-  if (typeof reviewPluginPackage.version !== "string" || !/^\d+\.\d+\.\d+-(?:alpha|beta|rc)\.\d+\+codex\.[a-z0-9-]+$/.test(reviewPluginPackage.version)) {
+  if (typeof reviewPluginPackage.version !== "string" || !/^\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\.\d+)?\+codex\.[a-z0-9-]+$/.test(reviewPluginPackage.version)) {
     errors.push(`Review plugin version ${reviewPluginPackage.version ?? "missing"} must include one +codex.<cachebuster> suffix`);
   }
   if (normalizedTag && normalizedTag !== nodePackage.version) {

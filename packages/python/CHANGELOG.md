@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0
+
+- Publishes the stable Python distribution as `chatgpt-pro-review-bridge` while
+  retaining the `codex_chatgpt_control` import namespace.
+- Aligns the parity client with the stable shared backend and wire contracts.
+
 ## 0.6.0b9
 
 - Aligns the Python parity package with the current Chat generation-control

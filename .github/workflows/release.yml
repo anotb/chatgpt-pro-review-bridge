@@ -72,7 +72,7 @@ jobs:
 
   publish-npm:
     name: publish npm
-    if: github.repository == 'adamallcock/codex-chatgpt-control'
+    if: github.repository == 'anotb/chatgpt-pro-review-bridge' && vars.PUBLISH_REGISTRIES == 'true'
     needs: [preflight, package-smoke-macos]
     runs-on: ubuntu-latest
     environment: release
@@ -92,11 +92,11 @@ jobs:
       - run: npm run release:check-node-pack
       - name: Publish Node package to npm
         working-directory: packages/node
-        run: npm publish --provenance --access public --tag next
+        run: npm publish --provenance --access public --tag latest
 
   publish-pypi:
     name: publish PyPI
-    if: github.repository == 'adamallcock/codex-chatgpt-control'
+    if: github.repository == 'anotb/chatgpt-pro-review-bridge' && vars.PUBLISH_REGISTRIES == 'true'
     needs: [preflight, package-smoke-macos]
     runs-on: ubuntu-latest
     environment: release
@@ -126,7 +126,7 @@ jobs:
 
   verify-published:
     name: verify published registry installs
-    if: github.repository == 'adamallcock/codex-chatgpt-control'
+    if: github.repository == 'anotb/chatgpt-pro-review-bridge' && vars.PUBLISH_REGISTRIES == 'true'
     needs: [publish-npm, publish-pypi]
     runs-on: ubuntu-latest
     steps:
@@ -140,27 +140,7 @@ jobs:
       - run: npm run release:verify-published
 
   github-release:
-    name: publish GitHub prerelease
-    if: github.repository == 'adamallcock/codex-chatgpt-control'
-    needs: verify-published
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-      - name: Publish release notes for the verified tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "${GITHUB_REF_NAME}"
-          --repo "${GITHUB_REPOSITORY}"
-          --verify-tag
-          --prerelease
-          --generate-notes
-          --title "ChatGPT Surface Control ${GITHUB_REF_NAME#v}"
-
-  fork-plugin-prerelease:
-    name: publish fork plugin prerelease
+    name: publish stable GitHub release
     if: github.repository == 'anotb/chatgpt-pro-review-bridge'
     needs: [preflight, package-smoke-macos]
     runs-on: ubuntu-latest
@@ -168,13 +148,12 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - name: Publish the verified plugin prerelease
+      - name: Publish the verified stable release
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
           gh release create "${GITHUB_REF_NAME}"
           --repo "${GITHUB_REPOSITORY}"
           --verify-tag
-          --prerelease
           --generate-notes
           --title "ChatGPT Pro Review Bridge ${GITHUB_REF_NAME#v}"

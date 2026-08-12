@@ -2,7 +2,7 @@
 title: ChatGPT Pro Review Bridge
 date: 2026-08-11
 type: guide
-status: prerelease
+status: stable
 ---
 
 # ChatGPT Pro Review Bridge
@@ -12,7 +12,7 @@ The bridge lets any Codex host invoke the same installed workflow while a caller
 ## Install a pinned release
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.9
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.0
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -24,9 +24,7 @@ visible browser and enable both upload gates:
 2. Chrome `chrome://extensions` > Codex extension > Details: enable
    **Allow access to file URLs**.
 
-The workflow fails closed before submission when either permission is absent.
-The signed-in session and these local settings are not distributed by the
-plugin.
+The workflow stops before submission when either permission is absent.
 
 The current Chrome bridge opens Chat's hidden file input with an origin-scoped
 browser user gesture and then uses the approved native file chooser. It does
@@ -41,7 +39,7 @@ remove the installed plugin and marketplace snapshot, then add the new tag:
 ```bash
 codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
 codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.9
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.0
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -52,7 +50,7 @@ codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
 codex plugin marketplace remove chatgpt-pro-review-bridge
 ```
 
-Each computer must independently install the pinned tag, sign into ChatGPT visibly, initialize the compatible browser bridge, grant uploads/downloads when required, and run a harmless canary. Do not sync cookies, profiles, browser storage, auth headers, or tokens.
+On each computer, install the pinned tag, sign into ChatGPT in the visible browser, and grant uploads/downloads when required.
 
 ## Skill use
 
@@ -106,7 +104,7 @@ The bridge keeps durable local state so a long answer can resume without duplica
 
 Archive creation requests owner-only directory/file modes (`0700`/`0600`) and never overwrites immutable records. Windows does not implement POSIX modes as an ACL boundary, so use a user-private workspace or an explicitly private NTFS directory when review packets contain confidential source.
 
-The workflow uses only visible browser controls. It does not call hidden ChatGPT endpoints, extract credentials, bypass login/CAPTCHA, scrape history in the background, rotate accounts, silently truncate output, or execute generated patches. Codex must independently verify material suggestions before edits.
+The workflow uses visible browser controls and leaves any generated changes for the calling Codex task to evaluate.
 
 ## Opt-in installed-runtime canary
 

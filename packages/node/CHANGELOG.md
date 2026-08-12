@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0
+
+- Publishes the stable SDK as `chatgpt-pro-review-bridge`.
+- Includes flexible AskPro questions, repository-backed review packets,
+  same-thread follow-ups, bounded resume, strict Pro verification, and complete
+  Markdown and artifact capture.
+
 ## 0.6.0-beta.9
 
 - Avoids false in-progress results from unrelated generic cancel controls in

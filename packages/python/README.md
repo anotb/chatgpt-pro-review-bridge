@@ -1,4 +1,4 @@
-# codex-chatgpt-control Python SDK
+# chatgpt-pro-review-bridge Python SDK
 
 Python parity client for controlling visible ChatGPT Chat and Work through the shared Node backend protocol.
 
@@ -13,13 +13,13 @@ The current browser-control runtime is Node/TypeScript. Python talks to it throu
 ## Install
 
 ```bash
-python -m pip install --pre codex-chatgpt-control
+python -m pip install chatgpt-pro-review-bridge==0.7.0
 ```
 
 The Python package needs a Node backend command for browser-control workflows. Install or build the Node package too:
 
 ```bash
-npm install codex-chatgpt-control@next
+npm install chatgpt-pro-review-bridge@0.7.0
 ```
 
 ## Development Install

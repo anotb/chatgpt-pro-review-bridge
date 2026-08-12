@@ -2,7 +2,7 @@
 
 Let a Codex task ask visible ChatGPT Pro, wait for the answer, and bring the complete result back—without copy/paste or duplicate submissions.
 
-[![Release](https://img.shields.io/github/v/release/anotb/chatgpt-pro-review-bridge?include_prereleases&label=release)](https://github.com/anotb/chatgpt-pro-review-bridge/releases)
+[![Release](https://img.shields.io/github/v/release/anotb/chatgpt-pro-review-bridge?label=release)](https://github.com/anotb/chatgpt-pro-review-bridge/releases)
 [![Release checks](https://img.shields.io/github/actions/workflow/status/anotb/chatgpt-pro-review-bridge/release.yml?label=release%20checks&logo=github)](https://github.com/anotb/chatgpt-pro-review-bridge/actions/workflows/release.yml)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
@@ -31,7 +31,7 @@ Any failure to verify Pro—including fallback, login, permission, or ambiguous-
 Install a pinned release from this repository:
 
 ```powershell
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.9
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.0
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -44,6 +44,13 @@ Requirements:
 - Node.js 20 or newer for source development. The installed plugin includes its runtime.
 
 No API key is required.
+
+The reusable SDKs are also released as `chatgpt-pro-review-bridge` on npm and PyPI:
+
+```powershell
+npm install chatgpt-pro-review-bridge@0.7.0
+python -m pip install chatgpt-pro-review-bridge==0.7.0
+```
 
 ### File-backed questions
 
@@ -152,7 +159,7 @@ Codex decides what to inspect, test, and apply; generated code is never applied 
 
 ## Visible-session boundary
 
-This project uses approved browser actions in the visible ChatGPT web product. It does not access hidden ChatGPT endpoints or credentials, bypass login or permissions, inspect unrelated history, or truncate completed answers.
+The bridge works through the ChatGPT page you can see and keeps each action inside that visible session. It does not run generated patches automatically.
 
 See [privacy](docs/plugin-review-privacy.md), [terms](docs/plugin-review-terms.md), and the detailed [bridge guide](docs/pro-review-bridge.md).
 

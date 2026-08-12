@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0
+
+- Ships the focused AskPro plugin as a stable, pinned Codex marketplace release.
+- Supports plain questions, repository-backed reviews, same-thread follow-ups,
+  and caller-directed prompts without a built-in review checklist.
+- Strictly verifies visible ChatGPT Pro, submits once, resumes long responses in
+  the same conversation, returns complete Markdown, and preserves new artifacts.
+- Publishes the reusable Node and Python distributions under the independent
+  `chatgpt-pro-review-bridge` package name.
+
 ## 0.6.0-beta.9
 
 - Stops treating a generic visible `Cancel` control as proof that ChatGPT is

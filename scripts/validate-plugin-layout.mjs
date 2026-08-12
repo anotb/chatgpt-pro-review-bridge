@@ -160,7 +160,7 @@ async function main() {
   assert(manifest.name === "codex-chatgpt-control", "Plugin manifest name mismatch");
   assert(typeof manifest.version === "string", "Plugin manifest version must be a string");
   assert(manifest.version.split("+", 1)[0] === releasePackage.version, "Plugin base version must match the release package version");
-  assert(/^\d+\.\d+\.\d+-(?:alpha|beta|rc)\.\d+\+codex\.[a-z0-9-]+$/.test(manifest.version), "Plugin version must contain exactly one +codex.<cachebuster> suffix");
+  assert(/^\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\.\d+)?\+codex\.[a-z0-9-]+$/.test(manifest.version), "Plugin version must contain exactly one +codex.<cachebuster> suffix");
   assert(manifest.skills === "./skills/", "Plugin manifest must point at ./skills/");
   assert(!manifest.mcpServers, "V1 plugin must not declare MCP servers");
   assert(!manifest.apps, "V1 plugin must not declare apps");
@@ -194,7 +194,7 @@ async function main() {
   const reviewBaseVersion = typeof reviewManifest.version === "string" ? reviewManifest.version.split("+", 1)[0] : undefined;
   assert(reviewManifest.name === "chatgpt-pro-review", "Review plugin manifest name mismatch");
   assert(reviewBaseVersion === releasePackage.version, "Review plugin base version must match the release package version");
-  assert(/^\d+\.\d+\.\d+-(?:alpha|beta|rc)\.\d+\+codex\.[a-z0-9-]+$/.test(reviewManifest.version), "Review plugin version must contain exactly one +codex.<cachebuster> suffix");
+  assert(/^\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\.\d+)?\+codex\.[a-z0-9-]+$/.test(reviewManifest.version), "Review plugin version must contain exactly one +codex.<cachebuster> suffix");
   assert(reviewManifest.skills === "./skills/", "Review plugin manifest must point at ./skills/");
   assert(!reviewManifest.mcpServers, "Review plugin must not declare MCP servers");
   assert(!reviewManifest.apps, "Review plugin must not declare apps");

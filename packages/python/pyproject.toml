@@ -1,7 +1,7 @@
 [project]
-name = "codex-chatgpt-control"
-version = "0.6.0b9"
-description = "Python SDK for controlling visible ChatGPT Chat and Work through a local backend."
+name = "chatgpt-pro-review-bridge"
+version = "0.7.0"
+description = "Python client for visible ChatGPT Pro questions and code reviews through the shared local backend."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -10,7 +10,7 @@ authors = [
 ]
 keywords = ["codex", "chatgpt", "browser-automation", "visible-ui", "agents", "sdk"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",

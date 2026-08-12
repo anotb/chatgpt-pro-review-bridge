@@ -2,7 +2,7 @@
 title: Pro Review Migration
 date: 2026-08-11
 type: guide
-status: prerelease
+status: stable
 ---
 
 # Pro Review Migration

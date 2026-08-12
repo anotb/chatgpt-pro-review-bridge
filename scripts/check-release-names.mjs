@@ -8,8 +8,8 @@ import { npmInvocation } from "./lib/npm-command.mjs";
 
 const execFileAsync = promisify(execFile);
 
-const npmPackage = "codex-chatgpt-control";
-const pypiPackage = "codex-chatgpt-control";
+const npmPackage = "chatgpt-pro-review-bridge";
+const pypiPackage = "chatgpt-pro-review-bridge";
 
 async function readNodeVersion() {
   const pkg = JSON.parse(await readFile(new URL("../packages/node/package.json", import.meta.url), "utf8"));

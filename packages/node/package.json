@@ -1,7 +1,7 @@
 {
-  "name": "codex-chatgpt-control",
-  "version": "0.6.0-beta.9",
-  "description": "Unofficial SDK for controlling visible ChatGPT Chat and Work sessions.",
+  "name": "chatgpt-pro-review-bridge",
+  "version": "0.7.0",
+  "description": "Visible ChatGPT Pro questions and code reviews for Codex, with resumable answers and artifact capture.",
   "type": "module",
   "license": "MIT",
   "repository": {

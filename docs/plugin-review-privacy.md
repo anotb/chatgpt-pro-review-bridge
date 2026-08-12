@@ -2,7 +2,7 @@
 title: ChatGPT Pro Review Plugin Privacy
 date: 2026-08-11
 type: reference
-status: prerelease
+status: stable
 ---
 
 # ChatGPT Pro Review Plugin Privacy

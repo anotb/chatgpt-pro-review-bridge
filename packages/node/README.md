@@ -1,4 +1,4 @@
-# codex-chatgpt-control
+# chatgpt-pro-review-bridge
 
 TypeScript runtime for controlling visible ChatGPT Chat and Work through a compatible browser bridge.
 
@@ -7,13 +7,13 @@ Unofficial project: not affiliated with, endorsed by, or sponsored by OpenAI. Th
 ## Install
 
 ```bash
-npm install codex-chatgpt-control@next
+npm install chatgpt-pro-review-bridge@0.7.0
 ```
 
 ## Usage
 
 ```ts
-import { createChatGPT } from "codex-chatgpt-control";
+import { createChatGPT } from "chatgpt-pro-review-bridge";
 
 const chatgpt = createChatGPT({ agent: globalThis.agent });
 const reviewer = chatgpt.agent({
