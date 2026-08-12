@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-beta.4
+
+- Makes the host-safe 20-second poll budget the runtime default as well as the
+  initial and resume examples, so normal skill use needs no caller workaround.
+
 ## 0.6.0-beta.3
 
 - Keeps each visible-browser poll inside its host-call budget and resumes long

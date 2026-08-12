@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0b4
+
+- Aligns the Python parity package with the host-safe default polling release.
+
 ## 0.6.0b3
 
 - Aligns the Python parity package with the bounded-poll lease recovery release.

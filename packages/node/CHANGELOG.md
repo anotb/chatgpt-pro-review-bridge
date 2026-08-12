@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-beta.4
+
+- Uses a 20-second default metadata wait so a bounded browser host can return
+  and release its archive lease before the next resume call.
+
 ## 0.6.0-beta.3
 
 - Recovers archive ownership when a bounded browser evaluator is still exiting
