@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0-beta.2
+
+- Handles platform path aliases before enforcing validation-output containment
+  without following a symbolic-link leaf.
+- Updates audited development-only transitive dependencies.
+
 ## 0.6.0-beta.1
 
 - Promotes the context-free AskPro workflow after deterministic and live

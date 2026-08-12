@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0-beta.2
+
+- Canonicalizes validation-output parent paths across macOS and Windows path
+  aliases while still rejecting symbolic-link leaves before reading them.
+- Refreshes development dependencies covered by the inherited CI audit gate.
+
 ## 0.6.0-beta.1
 
 - Makes context-free AskPro the simple default and presents the fork as a

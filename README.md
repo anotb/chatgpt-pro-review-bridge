@@ -33,7 +33,7 @@ If Pro cannot be verified, the session falls back, login or a permission is requ
 Install a pinned release from this repository:
 
 ```powershell
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.1
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.2
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 

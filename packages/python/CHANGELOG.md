@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0b2
+
+- Aligns the Python parity package with the cross-platform beta.2 release.
+
 ## 0.6.0b1
 
 - Aligns the Python parity package with the first focused AskPro beta.
