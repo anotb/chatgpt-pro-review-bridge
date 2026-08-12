@@ -359,6 +359,12 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       threadId = submitResult?.context.conversationId ?? threadId;
       const afterMessage = await port.messageStatus().catch(() => undefined);
       const latestUser = await port.readLatestUser().catch(() => undefined);
+      const visiblePage = await port.pageState().catch(() => undefined);
+      const visibleConversationId = visiblePage?.conversationId ?? conversationIdFromUrl(visiblePage?.url);
+      if (visiblePage !== undefined && visibleConversationId !== undefined && !isProvisionalConversationId(visibleConversationId)) {
+        threadUrl = visiblePage.url;
+        threadId = visibleConversationId;
+      }
       const latestUserText = latestUser?.ok === true ? latestUser.data?.text : undefined;
       const exactUserTurn = latestUserText !== undefined
         && visibleUserTurnContainsExactPrompt(latestUserText, prepared!.prompt);
@@ -389,12 +395,14 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         await persistThreadCheckpoint(archiveDirectory, prepared!, threadUrl, threadId, port.now());
       }
       if (submissionState !== "confirmed") {
+        if (submissionState === "ambiguous") {
+          warnings.push("Chat advanced after the single submit attempt, but the exact rendered user turn is not yet provable. Resume this archive to reconcile the visible prompt; do not resend it.");
+          throw new ReviewInProgress();
+        }
         throw workflowBlocker(
           "unknown",
-          submissionState === "ambiguous" ? "submission_ambiguous" : "submission_unconfirmed",
-          submissionState === "ambiguous"
-            ? "ChatGPT showed possible submission progress, but the exact visible user turn could not be proven. The prompt will not be resent."
-            : "The single allowed submit attempt did not produce a matching visible user turn. The prompt will not be resent automatically.",
+          "submission_unconfirmed",
+          "The single allowed submit attempt did not produce a matching visible user turn. The prompt will not be resent automatically.",
           "SUBMIT_ONCE"
         );
       }

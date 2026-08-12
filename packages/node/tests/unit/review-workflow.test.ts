@@ -357,7 +357,9 @@ describe("Pro review state machine", () => {
     const repo = await fixtureRepository();
     const calls: string[] = [];
     let statusCalls = 0;
+    let pageStateCalls = 0;
     const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort(calls, {
+      newThread: async () => success({ url: "https://chatgpt.com/c/WEB:provisional", conversationId: "WEB:provisional" }),
       submit: async () => {
         throw new Error("transport ended after click");
       },
@@ -367,20 +369,29 @@ describe("Pro review state machine", () => {
           ? { turnCount: 0, assistantTurnCount: 0, completionState: "unknown", generationActive: false, generationSignals: [] }
           : { turnCount: 1, assistantTurnCount: 0, completionState: "generating", generationActive: true, generationSignals: ["stop-answering"] });
       },
-      readLatestUser: async () => success({ role: "user", text: "unverified rendered text", format: "normalized_text" })
+      readLatestUser: async () => success({ role: "user", text: "unverified rendered text", format: "normalized_text" }),
+      pageState: async () => {
+        pageStateCalls += 1;
+        return pageStateCalls < 4
+          ? { url: "https://chatgpt.com/c/WEB:provisional", conversationId: "WEB:provisional", visibleText: "New chat Search chats", signedIn: true }
+          : { url: "https://chatgpt.com/c/canonical-thread", conversationId: "canonical-thread", visibleText: "Stop generating", signedIn: true };
+      }
     }));
 
     expect(result).toMatchObject({
-      status: "blocked",
+      status: "in_progress",
       submitted: true,
       resubmitAllowed: false,
-      blocker: { code: "submission_ambiguous" }
+      nextAction: "poll_same_thread"
     });
+    expect(result.blocker).toBeUndefined();
+    expect(result.warnings).toEqual(expect.arrayContaining([expect.stringContaining("Resume this archive")]));
     expect(calls).not.toContain("waitMetadata");
     expect(JSON.parse(await readFile(join(result.archiveDirectory!, "submission.json"), "utf8"))).toMatchObject({
       state: "ambiguous",
       submitted: true,
-      resubmitAllowed: false
+      resubmitAllowed: false,
+      thread: { url: "https://chatgpt.com/c/canonical-thread", id: "canonical-thread" }
     });
   });
 
@@ -420,7 +431,8 @@ describe("Pro review state machine", () => {
       },
       readLatestUser: async () => success({ role: "user", text: "render pending", format: "normalized_text" })
     }));
-    expect(first.blocker?.code).toBe("submission_ambiguous");
+    expect(first.status).toBe("in_progress");
+    expect(first.nextAction).toBe("poll_same_thread");
     const calls: string[] = [];
     const resumed = await runCodeReviewWithPort({
       repositoryRoot: repo,
