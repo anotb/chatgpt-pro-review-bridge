@@ -33,7 +33,7 @@
     "privacyPolicyURL": "https://github.com/anotb/chatgpt-pro-review-bridge/blob/main/docs/plugin-review-privacy.md",
     "termsOfServiceURL": "https://github.com/anotb/chatgpt-pro-review-bridge/blob/main/docs/plugin-review-terms.md",
     "defaultPrompt": [
-      "Use $chatgpt-pro-ask to ask visible ChatGPT Pro this repository-grounded question and return its complete response.",
+      "Use $chatgpt-pro-ask to ask visible ChatGPT Pro this question and return its complete response.",
       "Use $chatgpt-pro-code-review to review this branch against main and return the complete verified Pro response.",
       "Use $chatgpt-pro-code-review to resume the submitted review in its existing ChatGPT thread without resubmitting."
     ],

@@ -9,8 +9,8 @@ Use the bundled bridge to send the caller's actual question to visible ChatGPT C
 
 ## Before invoking
 
-- Do not attach unexpectedly sensitive material without the caller's approval. Conventional credential and browser-profile paths are excluded from repository packets.
 - Use the installed `browser:control-in-app-browser` skill to initialize the compatible visible browser runtime when `globalThis.agent` is absent.
+- A context-free question uploads nothing. When the caller intentionally adds repository packets, do not attach unexpectedly sensitive material without approval; conventional credential and browser-profile paths are excluded.
 - A first file-backed run on each computer requires a visibly signed-in ChatGPT session, Codex Chrome uploads allowed for `chatgpt.com`, and Chrome's Codex extension allowed to access file URLs. Never change those settings for the user.
 
 ## Invoke
@@ -27,23 +27,10 @@ const { createChatGPT } = await importChatGPTControl();
 const chatgpt = createChatGPT({ agent: globalThis.agent });
 
 const result = await chatgpt.reviews.askPro({
-  repositoryRoot: "/absolute/repository/root",
-  baseRef: "origin/main",
-  headRef: "HEAD",
   request: {
     additionalInstructions: "<faithful caller-defined question or task>"
   },
   target: { experience: "chat", intelligence: "Pro", strict: true },
-  context: {
-    mode: "review-packets",
-    includeWorkingTree: true,
-    includeInstructions: false,
-    includeChangedFiles: true,
-    includeRelevantCallers: false,
-    includeRelatedTests: false,
-    includeValidationOutput: false,
-    onBudgetExceeded: "partition"
-  },
   output: {
     mode: "full",
     archive: true,
@@ -57,15 +44,22 @@ const result = await chatgpt.reviews.askPro({
     verifyTargetAfterCompletion: true,
     failOnFallback: true,
     restorePreviousConfiguration: false
+  },
+  polling: {
+    callTimeoutMs: 30000,
+    totalTimeoutMs: 1800000,
+    maxPollCallsPerInvocation: 1
   }
 });
 ```
 
-Pass the user's question faithfully. Do not add review categories, a findings schema, output restrictions, or patch prohibitions unless the caller asked for them. Tune packet contents to the question: callers, tests, validation output, and broad source context are opt-in when useful, not a default checklist.
+This context-free form sends the question itself as the visible user turn and performs no Git commands or uploads. Pass the caller's question faithfully. Add context, focus, or output instructions only when the caller or current session wants them.
+
+When repository material is useful, use the sibling `chatgpt-pro-code-review` skill or add `repositoryRoot`, `baseRef`, `headRef`, and `context: { mode: "review-packets", ... }` deliberately.
 
 ## Resume without duplication
 
-If the result is `in_progress`, or an attempted submission was durably recorded but completion was not captured, call `reviews.askPro` again with only the original repository refs and `resume: { archiveDirectory: result.archiveDirectory }`. Never reattach files or resend the prompt. The archive's immutable receipt and thread checkpoint are authoritative.
+If the result is `in_progress`, or an attempted submission was durably recorded but completion was not captured, call `reviews.askPro({ resume: { archiveDirectory: result.archiveDirectory } })`. Never reattach files or resend the prompt. The archive's immutable receipt, original context, and thread checkpoint are authoritative. Continue bounded resume calls until completion or a structured blocker; Pro answers can take minutes.
 
 ## Stop and replace an obsolete request
 
@@ -74,7 +68,7 @@ Only do this when the caller or current session explicitly decides the running r
 1. Open the exact archived thread from its receipt/checkpoint and verify the latest visible user turn contains the archived prompt exactly.
 2. Inspect `chatgpt.messages.status()`. If generation is active, call `chatgpt.messages.stop({ confirmStop: true })` once and require `data.stopped === true`. If it is already inactive, do not click anything.
 3. Preserve the old archive and any partial answer; never edit or delete the original prompt or receipt.
-4. Build fresh context from the revised Git state and invoke a new `reviews.askPro(...)` request in a fresh thread. Its exactly-once rule starts anew because this is an explicitly superseding question, not a retry.
+4. Build a fresh request with only the context the current session wants and invoke `reviews.askPro(...)` in a fresh thread. Its exactly-once rule starts anew because this is an explicitly superseding question, not a retry.
 5. Include `diagnosticMetadata: { supersedesArchiveDirectory: "<old archive>" }` so the relationship remains recoverable without burdening the normal answer.
 
 ## Return

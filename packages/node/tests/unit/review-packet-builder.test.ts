@@ -7,6 +7,23 @@ import { describe, expect, it } from "vitest";
 import { prepareReviewContext, ReviewPreparationError } from "../../src/reviews/packet-builder.js";
 
 describe("deterministic review packet builder", () => {
+  it("prepares a context-free question without a Git repository or upload packets", async () => {
+    const archiveRoot = await mkdtemp(join(tmpdir(), "chatgpt-pro-question-"));
+    const question = "Explain briefly why stable job IDs matter.";
+
+    const prepared = await prepareReviewContext({
+      request: { additionalInstructions: question },
+      output: { archiveRoot }
+    }, new Date("2026-08-11T12:00:00.000Z"));
+
+    expect(prepared.mode).toBe("none");
+    expect(prepared.packetPaths).toEqual([]);
+    expect(prepared.manifest.mode).toBe("none");
+    expect(prepared.manifest.packets).toEqual([]);
+    expect(await readFile(prepared.promptPath, "utf8")).toBe(question);
+    expect(await readFile(prepared.requestPath, "utf8")).toBe(question);
+  });
+
   it("fails closed when durable provenance archiving is explicitly disabled", async () => {
     await expect(prepareReviewContext({
       repositoryRoot: ".",

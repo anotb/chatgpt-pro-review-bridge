@@ -9,8 +9,10 @@ import type {
 export type ReviewOutputMode = "full" | "indexed";
 
 export type ProCodeReviewArgs = {
-  repositoryRoot: string;
-  baseRef: string;
+  /** Omit repositoryRoot and baseRef for a context-free Pro question. */
+  repositoryRoot?: string;
+  /** Omit repositoryRoot and baseRef for a context-free Pro question. */
+  baseRef?: string;
   headRef?: string;
   request?: {
     focus?: string[];
@@ -22,7 +24,8 @@ export type ProCodeReviewArgs = {
     strict?: boolean;
   };
   context?: {
-    mode?: "review-packets";
+    /** Defaults to none without repository refs and review-packets with them. */
+    mode?: "none" | "review-packets";
     includeWorkingTree?: boolean;
     includeInstructions?: boolean;
     includeChangedFiles?: boolean;
@@ -126,6 +129,8 @@ export type PacketFileRecord = {
 
 export type ReviewPacketManifest = {
   schemaVersion: 1;
+  /** Older packet archives omitted this field and are read as review-packets. */
+  mode?: "none" | "review-packets";
   generatedAt: string;
   repositoryRoot: string;
   baseRef: string;
@@ -145,6 +150,7 @@ export type ReviewPacketManifest = {
 };
 
 export type PreparedReviewContext = {
+  mode: "none" | "review-packets";
   archiveDirectory: string;
   requestPath: string;
   promptPath: string;
@@ -176,9 +182,10 @@ export type ProCodeReviewResult = {
     restorationVerified: boolean;
   };
   provenance: {
-    repositoryRoot: string;
-    baseRef: string;
-    headRef: string;
+    contextMode: "none" | "review-packets";
+    repositoryRoot?: string;
+    baseRef?: string;
+    headRef?: string;
     baseSha?: string;
     headSha?: string;
     mergeBaseSha?: string;

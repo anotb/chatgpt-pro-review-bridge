@@ -13744,6 +13744,13 @@ async function prepareReviewContext(args, now = /* @__PURE__ */ new Date()) {
       "archive_required"
     );
   }
+  if (usesContextFreeMode(args)) return prepareContextFreeQuestion(args, now);
+  if (args.repositoryRoot === void 0 || args.baseRef === void 0) {
+    throw new ReviewPreparationError(
+      "repositoryRoot and baseRef are both required when repository context is requested.",
+      "repository_context_incomplete"
+    );
+  }
   const repositoryRoot = await resolveRepositoryRoot(args.repositoryRoot);
   const baseRef = requireNonEmpty(args.baseRef, "baseRef");
   const headRef = requireNonEmpty(args.headRef ?? "HEAD", "headRef");
@@ -13924,6 +13931,7 @@ ${validation}
     }
     const manifest = {
       schemaVersion: 1,
+      mode: "review-packets",
       generatedAt: now.toISOString(),
       repositoryRoot,
       baseRef,
@@ -13950,12 +13958,74 @@ ${validation}
     const promptPath = join5(archiveDirectory, "prompt.md");
     await writeImmutableFile(requestPath, request);
     await writeImmutableFile(promptPath, prompt);
-    return { archiveDirectory, requestPath, promptPath, packetPaths, manifestPath, manifest, manifestSha256, prompt };
+    return { mode: "review-packets", archiveDirectory, requestPath, promptPath, packetPaths, manifestPath, manifest, manifestSha256, prompt };
   } catch (error) {
     if (error instanceof ReviewPreparationError) throw error;
     throw new ReviewPreparationError(
       error instanceof Error ? error.message : String(error),
       "packet_preparation_failed",
+      void 0,
+      archiveDirectory
+    );
+  }
+}
+function usesContextFreeMode(args) {
+  if (args.context?.mode === "none") return true;
+  if (args.context?.mode === "review-packets") return false;
+  const hasPacketOptions = args.context !== void 0 && Object.keys(args.context).some((key) => key !== "mode");
+  return !hasPacketOptions && args.repositoryRoot === void 0 && args.baseRef === void 0 && args.headRef === void 0;
+}
+async function prepareContextFreeQuestion(args, now) {
+  const question = args.request?.additionalInstructions?.trim() ?? "";
+  if (question.length === 0) {
+    throw new ReviewPreparationError("A context-free AskPro call requires request.additionalInstructions.", "question_required");
+  }
+  const focus = args.request?.focus?.map((item) => item.trim()).filter(Boolean) ?? [];
+  const prompt = focus.length === 0 ? question : `${question}
+
+Requested emphasis: ${focus.join(", ")}.`;
+  const archiveRoot = args.output?.archiveRoot ?? ".codex/pro-reviews";
+  const archiveDirectory = await createReviewArchive(process.cwd(), archiveRoot, void 0, now);
+  try {
+    const manifest = {
+      schemaVersion: 1,
+      mode: "none",
+      generatedAt: now.toISOString(),
+      repositoryRoot: "",
+      baseRef: "",
+      headRef: "",
+      dirty: false,
+      includeWorkingTree: false,
+      packets: [],
+      files: [],
+      exclusions: [],
+      partitions: [],
+      crossPacketDependencies: [],
+      validationOutputIncluded: false
+    };
+    const manifestPath = join5(archiveDirectory, "context", "manifest.json");
+    await writeImmutableJson(manifestPath, manifest);
+    const manifestSha256 = await sha256File2(manifestPath);
+    const requestPath = join5(archiveDirectory, "request.md");
+    const promptPath = join5(archiveDirectory, "prompt.md");
+    await writeImmutableFile(requestPath, prompt);
+    await writeImmutableFile(promptPath, prompt);
+    return {
+      mode: "none",
+      archiveDirectory,
+      requestPath,
+      promptPath,
+      packetPaths: [],
+      manifestPath,
+      manifest,
+      manifestSha256,
+      prompt
+    };
+  } catch (error) {
+    if (error instanceof ReviewPreparationError) throw error;
+    throw new ReviewPreparationError(
+      error instanceof Error ? error.message : String(error),
+      "question_preparation_failed",
       void 0,
       archiveDirectory
     );
@@ -14344,7 +14414,6 @@ async function codeReview(env, args) {
   return runCodeReviewWithPort(args, defaultReviewWorkflowPort(env));
 }
 async function runCodeReviewWithPort(args, port) {
-  const headRef = args.headRef ?? "HEAD";
   const requested = { experience: "chat", intelligence: "Pro" };
   const steps = [];
   const warnings = [];
@@ -14560,8 +14629,10 @@ async function runCodeReviewWithPort(args, port) {
     }
     let baselineAssistantCount = 0;
     if (args.resume === void 0) {
-      const attachments = [prepared.manifestPath, ...prepared.packetPaths];
-      requireOk(await runStep("ATTACH_PACKETS", () => port.attach(attachments)), "ATTACH_PACKETS");
+      if (prepared.mode === "review-packets") {
+        const attachments = [prepared.manifestPath, ...prepared.packetPaths];
+        requireOk(await runStep("ATTACH_PACKETS", () => port.attach(attachments)), "ATTACH_PACKETS");
+      }
       const beforeMessage = requireData(await port.messageStatus(), "SUBMIT_ONCE");
       baselineAssistantCount = beforeMessage.data.assistantTurnCount;
       requireOk(await port.compose(prepared.prompt), "SUBMIT_ONCE");
@@ -14792,15 +14863,20 @@ async function runCodeReviewWithPort(args, port) {
       }
     }
   }
-  const provenance = {
-    repositoryRoot: prepared?.manifest.repositoryRoot ?? args.repositoryRoot,
-    baseRef: prepared?.manifest.baseRef ?? args.baseRef,
-    headRef: prepared?.manifest.headRef ?? headRef
-  };
-  if (prepared?.manifest.baseSha !== void 0) provenance.baseSha = prepared.manifest.baseSha;
-  if (prepared?.manifest.headSha !== void 0) provenance.headSha = prepared.manifest.headSha;
-  if (prepared?.manifest.mergeBaseSha !== void 0) provenance.mergeBaseSha = prepared.manifest.mergeBaseSha;
-  if (prepared !== void 0) {
+  const contextMode = prepared?.mode ?? (args.context?.mode === "none" || args.repositoryRoot === void 0 && args.baseRef === void 0 ? "none" : "review-packets");
+  const provenance = { contextMode };
+  if (contextMode === "review-packets") {
+    const repositoryRoot = prepared?.manifest.repositoryRoot ?? args.repositoryRoot;
+    const baseRef = prepared?.manifest.baseRef ?? args.baseRef;
+    const headRef = prepared?.manifest.headRef ?? args.headRef ?? "HEAD";
+    if (repositoryRoot !== void 0) provenance.repositoryRoot = repositoryRoot;
+    if (baseRef !== void 0) provenance.baseRef = baseRef;
+    provenance.headRef = headRef;
+  }
+  if (contextMode === "review-packets" && prepared?.manifest.baseSha !== void 0) provenance.baseSha = prepared.manifest.baseSha;
+  if (contextMode === "review-packets" && prepared?.manifest.headSha !== void 0) provenance.headSha = prepared.manifest.headSha;
+  if (contextMode === "review-packets" && prepared?.manifest.mergeBaseSha !== void 0) provenance.mergeBaseSha = prepared.manifest.mergeBaseSha;
+  if (prepared?.mode === "review-packets") {
     provenance.packetManifestPath = prepared.manifestPath;
     provenance.packetManifestSha256 = prepared.manifestSha256;
   }
@@ -14982,6 +15058,7 @@ async function readArchivedPreparedContext(archiveDirectory) {
   if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.packets)) throw new Error("Archived review packet manifest is invalid.");
   const promptPath = join6(archiveDirectory, "prompt.md");
   return {
+    mode: manifest.mode === "none" ? "none" : "review-packets",
     archiveDirectory,
     requestPath: join6(archiveDirectory, "request.md"),
     promptPath,
@@ -15065,6 +15142,7 @@ async function recoverCurrentVisibleThread(port, expectedPrompt) {
 }
 function recoveryQueryFromPrepared(prepared) {
   const firstLine = prepared.prompt.split(/\r?\n/, 1)[0]?.trim();
+  if (prepared.mode === "none" && firstLine !== void 0 && firstLine.length > 0) return firstLine.slice(0, 200);
   if (firstLine?.startsWith("Codex Pro request - ") === true || firstLine?.startsWith("Codex Pro review - ") === true) return firstLine;
   const legacyCanary = prepared.prompt.match(/CANARY_OK:[a-z0-9]+/i)?.[0];
   return legacyCanary ?? prepared.manifest.headSha?.slice(0, 12) ?? prepared.manifest.headRef;
@@ -15224,19 +15302,26 @@ function isRecord6(value) {
 async function acquireReviewLease(archiveDirectory, now) {
   const leasePath = join6(archiveDirectory, ".workflow.lock");
   let handle;
-  try {
-    handle = await open(leasePath, "wx", 384);
-  } catch (error) {
-    if (error.code === "EEXIST") {
-      throw new ReviewPreparationError(
-        "Another process or task already holds the exclusive lease for this review archive.",
-        "review_archive_locked",
-        void 0,
-        archiveDirectory
-      );
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      handle = await open(leasePath, "wx", 384);
+      break;
+    } catch (error) {
+      if (error.code === "EEXIST" && attempt === 0 && await removeLeaseIfOwnerExited(leasePath)) {
+        continue;
+      }
+      if (error.code === "EEXIST") {
+        throw new ReviewPreparationError(
+          "Another process or task already holds the exclusive lease for this review archive.",
+          "review_archive_locked",
+          void 0,
+          archiveDirectory
+        );
+      }
+      throw error;
     }
-    throw error;
   }
+  if (handle === void 0) throw new Error("Unable to acquire the review archive lease.");
   await handle.writeFile(`${JSON.stringify({ schemaVersion: 1, pid: process.pid, acquiredAt: now.toISOString() })}
 `);
   let released = false;
@@ -15246,6 +15331,24 @@ async function acquireReviewLease(archiveDirectory, now) {
     await handle.close().catch(() => void 0);
     await rm2(leasePath, { force: true });
   };
+}
+async function removeLeaseIfOwnerExited(leasePath) {
+  let value;
+  try {
+    value = JSON.parse(await readFile5(leasePath, "utf8"));
+  } catch {
+    return false;
+  }
+  if (!isRecord6(value) || value.schemaVersion !== 1 || !Number.isInteger(value.pid) || value.pid <= 0) return false;
+  try {
+    process.kill(value.pid, 0);
+    return false;
+  } catch (error) {
+    const code = error.code;
+    if (code !== "ESRCH" && code !== "EINVAL") return false;
+  }
+  await rm2(leasePath, { force: true });
+  return true;
 }
 async function writeJsonReplacing(path3, value) {
   const temporary = `${path3}.next-${process.pid}-${randomUUID2()}`;

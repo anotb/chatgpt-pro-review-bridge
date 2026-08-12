@@ -36,6 +36,24 @@ const snapshot: ConfigurationSnapshotData = {
 const baseline: ArtifactInventoryData = { capturedAt: "before", items: [] };
 
 describe("Pro review state machine", () => {
+  it("sends an ordinary question exactly as written without repository preparation or attachments", async () => {
+    const archiveRoot = await mkdtemp(join(tmpdir(), "chatgpt-pro-question-workflow-"));
+    const calls: string[] = [];
+    const question = "Explain in two short paragraphs why idempotency matters when polling a long-running job.";
+
+    const result = await runCodeReviewWithPort({
+      request: { additionalInstructions: question },
+      output: { archiveRoot }
+    }, makePort(calls));
+
+    expect(result.status).toBe("completed");
+    expect(result.provenance).toMatchObject({ contextMode: "none" });
+    expect(result.provenance).not.toHaveProperty("repositoryRoot");
+    expect(calls).not.toContain("attach");
+    expect(result.rawSteps.some(step => step.state === "ATTACH_PACKETS")).toBe(false);
+    expect(await readFile(join(result.archiveDirectory!, "prompt.md"), "utf8")).toBe(question);
+  });
+
   it("does not interact with the Pro control when the configuration snapshot already verifies Pro", async () => {
     const repo = await fixtureRepository();
     const calls: string[] = [];
@@ -690,6 +708,31 @@ describe("Pro review state machine", () => {
     releaseWait();
     const first = await firstPromise;
     expect(first.status).toBe("in_progress");
+    await expect(readFile(join(archiveDirectory, ".workflow.lock"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("reclaims a dead process lease before resuming the same submitted thread", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([]));
+    const archiveDirectory = first.archiveDirectory!;
+    const prompt = await readFile(join(archiveDirectory, "prompt.md"), "utf8");
+    await writeFile(join(archiveDirectory, ".workflow.lock"), JSON.stringify({
+      schemaVersion: 1,
+      pid: 2_147_483_647,
+      acquiredAt: "2026-08-11T12:00:00.000Z"
+    }));
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory }
+    }, makePort(calls, {
+      readLatestUser: async () => success({ role: "user", text: prompt, format: "normalized_text" })
+    }));
+
+    expect(resumed.status).toBe("completed");
+    expect(calls).toContain("bootstrap");
     await expect(readFile(join(archiveDirectory, ".workflow.lock"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

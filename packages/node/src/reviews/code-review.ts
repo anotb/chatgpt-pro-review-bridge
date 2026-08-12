@@ -93,7 +93,6 @@ export async function codeReview(env: RuntimeEnv, args: ProCodeReviewArgs): Prom
 }
 
 export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: ReviewWorkflowPort): Promise<ProCodeReviewResult> {
-  const headRef = args.headRef ?? "HEAD";
   const requested = { experience: "chat" as const, intelligence: "Pro" as const };
   const steps: ReviewStepEvidence[] = [];
   const warnings: string[] = [];
@@ -336,8 +335,10 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
 
     let baselineAssistantCount = 0;
     if (args.resume === undefined) {
-      const attachments = [prepared!.manifestPath, ...prepared!.packetPaths];
-      requireOk(await runStep("ATTACH_PACKETS", () => port.attach(attachments)), "ATTACH_PACKETS");
+      if (prepared!.mode === "review-packets") {
+        const attachments = [prepared!.manifestPath, ...prepared!.packetPaths];
+        requireOk(await runStep("ATTACH_PACKETS", () => port.attach(attachments)), "ATTACH_PACKETS");
+      }
       const beforeMessage = requireData(await port.messageStatus(), "SUBMIT_ONCE");
       baselineAssistantCount = beforeMessage.data.assistantTurnCount;
       requireOk(await port.compose(prepared!.prompt), "SUBMIT_ONCE");
@@ -591,15 +592,21 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     }
   }
 
-  const provenance: ProCodeReviewResult["provenance"] = {
-    repositoryRoot: prepared?.manifest.repositoryRoot ?? args.repositoryRoot,
-    baseRef: prepared?.manifest.baseRef ?? args.baseRef,
-    headRef: prepared?.manifest.headRef ?? headRef
-  };
-  if (prepared?.manifest.baseSha !== undefined) provenance.baseSha = prepared.manifest.baseSha;
-  if (prepared?.manifest.headSha !== undefined) provenance.headSha = prepared.manifest.headSha;
-  if (prepared?.manifest.mergeBaseSha !== undefined) provenance.mergeBaseSha = prepared.manifest.mergeBaseSha;
-  if (prepared !== undefined) {
+  const contextMode = prepared?.mode
+    ?? (args.context?.mode === "none" || (args.repositoryRoot === undefined && args.baseRef === undefined) ? "none" : "review-packets");
+  const provenance: ProCodeReviewResult["provenance"] = { contextMode };
+  if (contextMode === "review-packets") {
+    const repositoryRoot = prepared?.manifest.repositoryRoot ?? args.repositoryRoot;
+    const baseRef = prepared?.manifest.baseRef ?? args.baseRef;
+    const headRef = prepared?.manifest.headRef ?? args.headRef ?? "HEAD";
+    if (repositoryRoot !== undefined) provenance.repositoryRoot = repositoryRoot;
+    if (baseRef !== undefined) provenance.baseRef = baseRef;
+    provenance.headRef = headRef;
+  }
+  if (contextMode === "review-packets" && prepared?.manifest.baseSha !== undefined) provenance.baseSha = prepared.manifest.baseSha;
+  if (contextMode === "review-packets" && prepared?.manifest.headSha !== undefined) provenance.headSha = prepared.manifest.headSha;
+  if (contextMode === "review-packets" && prepared?.manifest.mergeBaseSha !== undefined) provenance.mergeBaseSha = prepared.manifest.mergeBaseSha;
+  if (prepared?.mode === "review-packets") {
     provenance.packetManifestPath = prepared.manifestPath;
     provenance.packetManifestSha256 = prepared.manifestSha256;
   }
@@ -798,6 +805,7 @@ async function readArchivedPreparedContext(archiveDirectory: string): Promise<Pr
   if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.packets)) throw new Error("Archived review packet manifest is invalid.");
   const promptPath = join(archiveDirectory, "prompt.md");
   return {
+    mode: manifest.mode === "none" ? "none" : "review-packets",
     archiveDirectory,
     requestPath: join(archiveDirectory, "request.md"),
     promptPath,
@@ -914,6 +922,7 @@ async function recoverCurrentVisibleThread(
 
 function recoveryQueryFromPrepared(prepared: PreparedReviewContext): string {
   const firstLine = prepared.prompt.split(/\r?\n/, 1)[0]?.trim();
+  if (prepared.mode === "none" && firstLine !== undefined && firstLine.length > 0) return firstLine.slice(0, 200);
   if (firstLine?.startsWith("Codex Pro request - ") === true || firstLine?.startsWith("Codex Pro review - ") === true) return firstLine;
   const legacyCanary = prepared.prompt.match(/CANARY_OK:[a-z0-9]+/i)?.[0];
   return legacyCanary ?? prepared.manifest.headSha?.slice(0, 12) ?? prepared.manifest.headRef;
@@ -1120,20 +1129,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 async function acquireReviewLease(archiveDirectory: string, now: Date): Promise<() => Promise<void>> {
   const leasePath = join(archiveDirectory, ".workflow.lock");
-  let handle;
-  try {
-    handle = await open(leasePath, "wx", 0o600);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw new ReviewPreparationError(
-        "Another process or task already holds the exclusive lease for this review archive.",
-        "review_archive_locked",
-        undefined,
-        archiveDirectory
-      );
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      handle = await open(leasePath, "wx", 0o600);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST" && attempt === 0 && await removeLeaseIfOwnerExited(leasePath)) {
+        continue;
+      }
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new ReviewPreparationError(
+          "Another process or task already holds the exclusive lease for this review archive.",
+          "review_archive_locked",
+          undefined,
+          archiveDirectory
+        );
+      }
+      throw error;
     }
-    throw error;
   }
+  if (handle === undefined) throw new Error("Unable to acquire the review archive lease.");
   await handle.writeFile(`${JSON.stringify({ schemaVersion: 1, pid: process.pid, acquiredAt: now.toISOString() })}\n`);
   let released = false;
   return async () => {
@@ -1142,6 +1158,25 @@ async function acquireReviewLease(archiveDirectory: string, now: Date): Promise<
     await handle.close().catch(() => undefined);
     await rm(leasePath, { force: true });
   };
+}
+
+async function removeLeaseIfOwnerExited(leasePath: string): Promise<boolean> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(leasePath, "utf8"));
+  } catch {
+    return false;
+  }
+  if (!isRecord(value) || value.schemaVersion !== 1 || !Number.isInteger(value.pid) || (value.pid as number) <= 0) return false;
+  try {
+    process.kill(value.pid as number, 0);
+    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ESRCH" && code !== "EINVAL") return false;
+  }
+  await rm(leasePath, { force: true });
+  return true;
 }
 
 async function writeJsonReplacing(path: string, value: unknown): Promise<void> {

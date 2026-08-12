@@ -7,7 +7,7 @@ status: prerelease
 
 # ChatGPT Pro Review Bridge
 
-The bridge lets any Codex host invoke the same installed workflow while a caller-defined repository question runs through the user's visible ChatGPT Chat session with the Pro setting strictly verified. The question may request a review, explanation, ideas, a design comparison, concrete code, or another grounded answer. Host model identity is never passed into target selection.
+The bridge lets any Codex host invoke the same installed workflow while a caller-defined question runs through the user's visible ChatGPT Chat session with the Pro setting strictly verified. Questions can be context-free or intentionally backed by repository packets. Host model identity is never passed into target selection.
 
 ## Install a pinned release
 
@@ -62,29 +62,16 @@ Ask:
 Use $chatgpt-pro-code-review to review this branch against main and return the complete Pro review and every artifact.
 ```
 
-For a broader question, use `$chatgpt-pro-ask` and state the task normally. The bridge does not add exhaustive review dimensions or a required findings format unless the calling session requests them.
+For a broader question, use `$chatgpt-pro-ask` and state the task normally. The calling session decides what to ask and what context to include.
 
 The skill calls:
 
 ```js
 const result = await chatgpt.reviews.askPro({
-  repositoryRoot: process.cwd(),
-  baseRef: "origin/main",
-  headRef: "HEAD",
   request: {
     additionalInstructions: "<faithful caller-defined question or task>"
   },
   target: { experience: "chat", intelligence: "Pro", strict: true },
-  context: {
-    mode: "review-packets",
-    includeWorkingTree: true,
-    includeInstructions: false,
-    includeChangedFiles: true,
-    includeRelevantCallers: false,
-    includeRelatedTests: false,
-    includeValidationOutput: true,
-    onBudgetExceeded: "partition"
-  },
   output: {
     mode: "full",
     archive: true,
@@ -98,9 +85,16 @@ const result = await chatgpt.reviews.askPro({
     verifyTargetAfterCompletion: true,
     failOnFallback: true,
     restorePreviousConfiguration: false
+  },
+  polling: {
+    callTimeoutMs: 30000,
+    totalTimeoutMs: 1800000,
+    maxPollCallsPerInvocation: 1
   }
 });
 ```
+
+That form sends the caller's question as the visible user turn, performs no Git commands, and uploads nothing. Add `repositoryRoot`, `baseRef`, `headRef`, and `context: { mode: "review-packets", ... }` only when the question needs repository evidence.
 
 One invocation performs one bounded poll by default. If it returns `in_progress`, call the workflow again with `resume: { archiveDirectory }`; never resend the prompt. The immutable submission receipt holds the canonical `/c/<conversation-id>` URL and conversation ID. Optional caller-supplied `threadUrl` or `conversationId` values are treated only as mismatch-detecting cross-checks.
 

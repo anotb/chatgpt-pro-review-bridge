@@ -63,7 +63,7 @@ const review = await chatgpt.reviews.askPro({
 });
 ```
 
-Pass the user's actual question faithfully. Do not silently add exhaustive review dimensions, a required findings schema, patch prohibitions, or other constraints the user did not request. Use `focus` only when the caller or session agent intentionally wants named areas of emphasis. `reviews.codeReview(...)` remains a compatibility alias for `reviews.askPro(...)`.
+Pass the user's actual question faithfully. Use `focus` when the caller or session agent wants named areas of emphasis. `reviews.codeReview(...)` remains a compatibility alias for `reviews.askPro(...)`.
 
 Do not branch on the selected Codex host model. Do not replace this call with a model-written repository summary.
 

@@ -63,6 +63,13 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
       "archive_required"
     );
   }
+  if (usesContextFreeMode(args)) return prepareContextFreeQuestion(args, now);
+  if (args.repositoryRoot === undefined || args.baseRef === undefined) {
+    throw new ReviewPreparationError(
+      "repositoryRoot and baseRef are both required when repository context is requested.",
+      "repository_context_incomplete"
+    );
+  }
   const repositoryRoot = await resolveRepositoryRoot(args.repositoryRoot);
   const baseRef = requireNonEmpty(args.baseRef, "baseRef");
   const headRef = requireNonEmpty(args.headRef ?? "HEAD", "headRef");
@@ -242,6 +249,7 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
 
     const manifest: ReviewPacketManifest = {
       schemaVersion: 1,
+      mode: "review-packets",
       generatedAt: now.toISOString(),
       repositoryRoot,
       baseRef,
@@ -270,12 +278,76 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
     const promptPath = join(archiveDirectory, "prompt.md");
     await writeImmutableFile(requestPath, request);
     await writeImmutableFile(promptPath, prompt);
-    return { archiveDirectory, requestPath, promptPath, packetPaths, manifestPath, manifest, manifestSha256, prompt };
+    return { mode: "review-packets", archiveDirectory, requestPath, promptPath, packetPaths, manifestPath, manifest, manifestSha256, prompt };
   } catch (error) {
     if (error instanceof ReviewPreparationError) throw error;
     throw new ReviewPreparationError(
       error instanceof Error ? error.message : String(error),
       "packet_preparation_failed",
+      undefined,
+      archiveDirectory
+    );
+  }
+}
+
+function usesContextFreeMode(args: ProCodeReviewArgs): boolean {
+  if (args.context?.mode === "none") return true;
+  if (args.context?.mode === "review-packets") return false;
+  const hasPacketOptions = args.context !== undefined && Object.keys(args.context).some(key => key !== "mode");
+  return !hasPacketOptions && args.repositoryRoot === undefined && args.baseRef === undefined && args.headRef === undefined;
+}
+
+async function prepareContextFreeQuestion(args: ProCodeReviewArgs, now: Date): Promise<PreparedReviewContext> {
+  const question = args.request?.additionalInstructions?.trim() ?? "";
+  if (question.length === 0) {
+    throw new ReviewPreparationError("A context-free AskPro call requires request.additionalInstructions.", "question_required");
+  }
+  const focus = args.request?.focus?.map(item => item.trim()).filter(Boolean) ?? [];
+  const prompt = focus.length === 0
+    ? question
+    : `${question}\n\nRequested emphasis: ${focus.join(", ")}.`;
+  const archiveRoot = args.output?.archiveRoot ?? ".codex/pro-reviews";
+  const archiveDirectory = await createReviewArchive(process.cwd(), archiveRoot, undefined, now);
+  try {
+    const manifest: ReviewPacketManifest = {
+      schemaVersion: 1,
+      mode: "none",
+      generatedAt: now.toISOString(),
+      repositoryRoot: "",
+      baseRef: "",
+      headRef: "",
+      dirty: false,
+      includeWorkingTree: false,
+      packets: [],
+      files: [],
+      exclusions: [],
+      partitions: [],
+      crossPacketDependencies: [],
+      validationOutputIncluded: false
+    };
+    const manifestPath = join(archiveDirectory, "context", "manifest.json");
+    await writeImmutableJson(manifestPath, manifest);
+    const manifestSha256 = await sha256File(manifestPath);
+    const requestPath = join(archiveDirectory, "request.md");
+    const promptPath = join(archiveDirectory, "prompt.md");
+    await writeImmutableFile(requestPath, prompt);
+    await writeImmutableFile(promptPath, prompt);
+    return {
+      mode: "none",
+      archiveDirectory,
+      requestPath,
+      promptPath,
+      packetPaths: [],
+      manifestPath,
+      manifest,
+      manifestSha256,
+      prompt
+    };
+  } catch (error) {
+    if (error instanceof ReviewPreparationError) throw error;
+    throw new ReviewPreparationError(
+      error instanceof Error ? error.message : String(error),
+      "question_preparation_failed",
       undefined,
       archiveDirectory
     );
