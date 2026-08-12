@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0a7
+
+- Exposes the explicitly confirmed `messages.stop` backend primitive and picks
+  up the flexible visible-Pro workflow and duplicate-safe resume fixes.
+
 ## 0.6.0a6
 
 - Picks up the hardened upload, packet, exactly-once resume, artifact, and

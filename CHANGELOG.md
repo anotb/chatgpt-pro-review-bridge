@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0-alpha.7
+
+- Adds caller-directed `$chatgpt-pro-ask` delegation without imposed review
+  categories, output schemas, patch restrictions, or repository-warning prose.
+- Reconciles prompts rendered with visible attachment labels and resumes an
+  ambiguous submitted receipt without attaching, composing, or submitting again.
+- Leaves Chat on Pro by default and avoids touching its control when Pro is
+  already strictly verified; restoration remains an explicit opt-in.
+- Adds an explicitly confirmed `messages.stop` primitive for safely replacing
+  a genuinely obsolete visible response while preserving the original run.
+
 ## 0.6.0-alpha.6
 
 - Fails closed around file transfer: no page-script byte injection, immediate

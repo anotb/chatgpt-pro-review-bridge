@@ -207,7 +207,7 @@ async function main() {
     .filter(entry => entry.isDirectory())
     .map(entry => entry.name)
     .sort();
-  assert(JSON.stringify(reviewSkills) === JSON.stringify(["chatgpt-pro-code-review"]), `Review plugin skill inventory mismatch: ${reviewSkills.join(", ")}`);
+  assert(JSON.stringify(reviewSkills) === JSON.stringify(["chatgpt-pro-ask", "chatgpt-pro-code-review"]), `Review plugin skill inventory mismatch: ${reviewSkills.join(", ")}`);
   const reviewSkill = await readFile(path.join(reviewSkillRoot, "chatgpt-pro-code-review/SKILL.md"), "utf8");
   validateSkillFrontmatter(reviewSkill, "chatgpt-pro-code-review");
   assert(reviewSkill.includes("../../runtime/import-chatgpt-control.mjs"), "Review skill must use its plugin runtime loader");

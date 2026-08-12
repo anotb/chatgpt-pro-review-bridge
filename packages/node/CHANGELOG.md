@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0-alpha.7
+
+- Adds flexible `reviews.askPro`, rendered-prompt reconciliation, ambiguous
+  receipt recovery without resubmission, Pro no-op selection, opt-in setting
+  restoration, and explicitly confirmed `messages.stop` support.
+
 ## 0.6.0-alpha.6
 
 - Hardens visible uploads, origin checks, packet provenance and secret
