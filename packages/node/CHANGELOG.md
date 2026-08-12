@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-beta.3
+
+- Recovers archive ownership when a bounded browser evaluator is still exiting
+  at the start of the next resume call.
+
 ## 0.6.0-beta.2
 
 - Handles platform path aliases before enforcing validation-output containment

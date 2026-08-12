@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0-beta.3
+
+- Keeps each visible-browser poll inside its host-call budget and resumes long
+  Pro work through repeated bounded calls.
+- Waits briefly for a timed-out browser evaluator to release its archive lease
+  while retaining immediate rejection of same-process concurrent owners.
+
 ## 0.6.0-beta.2
 
 - Canonicalizes validation-output parent paths across macOS and Windows path
