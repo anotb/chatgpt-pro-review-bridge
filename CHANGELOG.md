@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1
+
+- Reuses a completed review's finalized artifact manifest on resume instead of
+  scanning the current page for unrelated artifacts.
+- Keeps completed response and artifact provenance stable across later resumes.
+
 ## 0.7.0
 
 - Ships the focused AskPro plugin as a stable, pinned Codex marketplace release.

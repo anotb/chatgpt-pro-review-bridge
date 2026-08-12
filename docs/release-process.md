@@ -8,7 +8,8 @@ status: stable
 # Release Process
 
 ChatGPT Pro Review Bridge ships as a tagged Codex marketplace plugin, an npm
-package, a Python distribution, and a GitHub release. All four use one version.
+package, and a GitHub release containing the Python wheel and source archive.
+All distributions use one version.
 
 ## Prepare
 
@@ -55,46 +56,46 @@ Use a fast Chat setting for repetitive artifact and interruption checks when
 the behavior does not depend on Pro. Record the exact installed plugin version
 and archive used by the live qualification.
 
-## Registries
+## Distribution
 
-The public distribution name is `chatgpt-pro-review-bridge` on npm and PyPI.
-The Python import remains `codex_chatgpt_control` for compatibility.
+The Node SDK is published as `chatgpt-pro-review-bridge` on npm. The Python
+wheel and source archive are attached to the GitHub release; the Python import
+remains `codex_chatgpt_control` for compatibility.
 
-Registry publishing is enabled by setting the repository variable
-`PUBLISH_REGISTRIES=true` after npm and PyPI trusted publishers are configured
-for:
+npm publishing is enabled by setting the repository variable
+`PUBLISH_NPM=true` after its trusted publisher is configured for:
 
 - repository: `anotb/chatgpt-pro-review-bridge`
 - workflow: `.github/workflows/release.yml`
 - environment: `release`
-- package/project: `chatgpt-pro-review-bridge`
+- package: `chatgpt-pro-review-bridge`
 
-The tag workflow builds and checks both distributions before publishing. It
-then installs the exact registry versions and exercises the Node/Python bridge.
+The tag workflow builds and checks both SDKs, attaches the Python distributions
+and npm tarball to the GitHub release, publishes npm, and verifies the npm
+package together with the release-equivalent Python wheel.
 
 ## Tag and verify
 
 Create a tag that exactly matches the package version:
 
 ```bash
-git tag v0.7.0
-git push origin v0.7.0
+git tag v0.7.1
+git push origin v0.7.1
 ```
 
 The release workflow reruns the complete preflight and clean-package smoke on
-macOS, then creates the stable GitHub release. When registry publishing is
-enabled, verify the published packages too:
+macOS, then creates the stable GitHub release. When npm publishing is enabled,
+verify the published package too:
 
 ```bash
 npm view chatgpt-pro-review-bridge version dist-tags --json
-python -m pip index versions chatgpt-pro-review-bridge
 npm run release:verify-published
 ```
 
 Finally, install the tag as a user would:
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.0
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.1
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 

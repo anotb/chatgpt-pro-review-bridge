@@ -13,10 +13,9 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const NODE_ROOT = join(REPO_ROOT, "packages", "node");
 const PYTHON_ROOT = join(REPO_ROOT, "packages", "python");
 const NPM_PACKAGE = "chatgpt-pro-review-bridge";
-const PYPI_PACKAGE = "chatgpt-pro-review-bridge";
+const PYTHON_PACKAGE = "chatgpt-pro-review-bridge";
 const PYTHON_IMPORT = "codex_chatgpt_control";
 const NPM_REGISTRY = "https://registry.npmjs.org";
-const PYPI_INDEX = "https://pypi.org/simple";
 const REQUEST_SCHEMA = "chatgpt.browser_control.backend_request.v1";
 const RESPONSE_SCHEMA = "chatgpt.browser_control.backend_response.v1";
 const DEFAULT_TIMEOUT_MS = 180_000;
@@ -26,19 +25,19 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--source") options.mode = "source";
-    else if (arg === "--registry") options.mode = "registry";
+    else if (arg === "--npm-registry") options.mode = "npm-registry";
     else if (arg === "--timeout-ms") {
       const value = Number.parseInt(argv[++index] ?? "", 10);
       if (!Number.isFinite(value) || value <= 0) throw new Error("--timeout-ms must be a positive integer");
       options.timeoutMs = value;
     } else if (arg === "--help" || arg === "-h") {
-      console.log("Usage: node scripts/verify-release-install.mjs (--source|--registry) [--timeout-ms <ms>]");
+      console.log("Usage: node scripts/verify-release-install.mjs (--source|--npm-registry) [--timeout-ms <ms>]");
       process.exit(0);
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
-  if (options.mode === undefined) throw new Error("Choose exactly one mode: --source or --registry");
+  if (options.mode === undefined) throw new Error("Choose exactly one mode: --source or --npm-registry");
   return options;
 }
 
@@ -65,63 +64,48 @@ async function metadata() {
   const pythonText = await readFile(join(PYTHON_ROOT, "pyproject.toml"), "utf8");
   const pythonName = /^name\s*=\s*"([^"]+)"/m.exec(pythonText)?.[1];
   const pythonVersion = /^version\s*=\s*"([^"]+)"/m.exec(pythonText)?.[1];
-  if (node.name !== NPM_PACKAGE || pythonName !== PYPI_PACKAGE || !node.version || !pythonVersion) {
+  if (node.name !== NPM_PACKAGE || pythonName !== PYTHON_PACKAGE || !node.version || !pythonVersion) {
     throw new Error("Release package names or versions are inconsistent");
   }
   return { nodeVersion: node.version, pythonVersion };
 }
 
-async function waitForRegistryVersions(versions, timeoutMs) {
+async function waitForNpmVersion(version, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let last = "registry metadata not checked";
   while (Date.now() <= deadline) {
     try {
       const npm = npmInvocation([
         "view",
-        `${NPM_PACKAGE}@${versions.nodeVersion}`,
+        `${NPM_PACKAGE}@${version}`,
         "version",
         "--json",
         `--registry=${NPM_REGISTRY}`
       ]);
       const npmVersion = JSON.parse(run(npm.program, npm.args, { capture: true }));
-      const response = await fetch(`https://pypi.org/pypi/${PYPI_PACKAGE}/${versions.pythonVersion}/json`, {
-        headers: { "User-Agent": "codex-chatgpt-control-release-verifier" }
-      });
-      const pypi = response.ok ? await response.json() : undefined;
-      const pypiVersion = pypi?.info?.version;
-      const simpleResponse = await fetch(`${PYPI_INDEX}/${PYPI_PACKAGE}/`, {
-        headers: {
-          Accept: "application/vnd.pypi.simple.v1+json",
-          "User-Agent": "codex-chatgpt-control-release-verifier"
-        }
-      });
-      const simple = simpleResponse.ok ? await simpleResponse.json() : undefined;
-      const simpleHasVersion = Array.isArray(simple?.files) && simple.files.some(file =>
-        typeof file?.filename === "string" && (
-          file.filename.includes(`-${versions.pythonVersion}-`) ||
-          file.filename.includes(`-${versions.pythonVersion}.`)
-        )
-      );
-      if (npmVersion === versions.nodeVersion && pypiVersion === versions.pythonVersion && simpleHasVersion) return;
-      last = [
-        `npm=${String(npmVersion)}`,
-        `pypi=${String(pypiVersion)}`,
-        `pypiJsonStatus=${response.status}`,
-        `pypiSimple=${String(simpleHasVersion)}`,
-        `pypiSimpleStatus=${simpleResponse.status}`
-      ].join(" ");
+      if (npmVersion === version) return;
+      last = `npm=${String(npmVersion)}`;
     } catch (error) {
       last = error instanceof Error ? error.message : String(error);
     }
     await new Promise(resolveDelay => setTimeout(resolveDelay, 5_000));
   }
-  throw new Error(`Timed out waiting for published registry versions: ${last}`);
+  throw new Error(`Timed out waiting for npm ${NPM_PACKAGE}@${version}: ${last}`);
+}
+
+async function buildPythonWheel(root) {
+  const pythonDist = join(root, "python-dist");
+  await mkdir(pythonDist, { recursive: true });
+  const python = process.env.PYTHON ?? (process.platform === "win32" ? "python.exe" : "python3");
+  run(python, ["-m", "build", "--sdist", "--wheel", "--outdir", pythonDist, PYTHON_ROOT]);
+  const wheel = (await readdir(pythonDist)).find(file => file.endsWith(".whl"));
+  if (wheel === undefined) throw new Error("Python build did not produce a wheel");
+  return join(pythonDist, wheel);
 }
 
 async function sourceSpecs(root) {
   const nodeDist = join(root, "node-dist");
-  const pythonDist = join(root, "python-dist");
-  await Promise.all([mkdir(nodeDist, { recursive: true }), mkdir(pythonDist, { recursive: true })]);
+  await mkdir(nodeDist, { recursive: true });
   const npm = npmInvocation(["pack", "--json", "--pack-destination", nodeDist]);
   const packed = JSON.parse(run(npm.program, npm.args, {
     cwd: NODE_ROOT,
@@ -129,19 +113,15 @@ async function sourceSpecs(root) {
   }));
   const filename = packed[0]?.filename;
   if (typeof filename !== "string") throw new Error("npm pack did not return a tarball filename");
-  const python = process.env.PYTHON ?? (process.platform === "win32" ? "python.exe" : "python3");
-  run(python, ["-m", "build", "--sdist", "--wheel", "--outdir", pythonDist, PYTHON_ROOT]);
-  const wheel = (await readdir(pythonDist)).find(file => file.endsWith(".whl"));
-  if (wheel === undefined) throw new Error("Python build did not produce a wheel");
-  return { nodeSpec: join(nodeDist, basename(filename)), pythonSpec: join(pythonDist, wheel), registry: false };
+  return { nodeSpec: join(nodeDist, basename(filename)), pythonSpec: await buildPythonWheel(root), nodeRegistry: false };
 }
 
-async function registrySpecs(versions, timeoutMs) {
-  await waitForRegistryVersions(versions, timeoutMs);
+async function npmRegistrySpecs(root, versions, timeoutMs) {
+  await waitForNpmVersion(versions.nodeVersion, timeoutMs);
   return {
     nodeSpec: `${NPM_PACKAGE}@${versions.nodeVersion}`,
-    pythonSpec: `${PYPI_PACKAGE}==${versions.pythonVersion}`,
-    registry: true
+    pythonSpec: await buildPythonWheel(root),
+    nodeRegistry: true
   };
 }
 
@@ -151,7 +131,7 @@ async function installAndVerify(root, specs, versions) {
   await mkdir(nodeEnv, { recursive: true });
   await writeFile(join(nodeEnv, "package.json"), '{"private":true,"type":"module"}\n', "utf8");
   const npmInstallArgs = ["install", "--ignore-scripts", "--no-audit", "--no-fund"];
-  if (specs.registry) npmInstallArgs.push(`--registry=${NPM_REGISTRY}`);
+  if (specs.nodeRegistry) npmInstallArgs.push(`--registry=${NPM_REGISTRY}`);
   npmInstallArgs.push(specs.nodeSpec);
   const npm = npmInvocation(npmInstallArgs);
   run(npm.program, npm.args, { cwd: nodeEnv });
@@ -183,14 +163,13 @@ async function installAndVerify(root, specs, versions) {
     ? join(pythonEnv, "Scripts", "chatgpt-thread.exe")
     : join(pythonEnv, "bin", "chatgpt-thread");
   const pipInstallArgs = ["-m", "pip", "install", "--disable-pip-version-check"];
-  if (specs.registry) pipInstallArgs.push("--index-url", PYPI_INDEX, "--no-cache-dir");
   pipInstallArgs.push(specs.pythonSpec);
   run(venvPython, pipInstallArgs);
   const backendLiteral = backendPath.replaceAll("\\", "\\\\").replaceAll("'", "\\'");
   const pythonCheck = [
     "from importlib.metadata import version",
     `import ${PYTHON_IMPORT}`,
-    `assert version('${PYPI_PACKAGE}') == '${versions.pythonVersion}'`,
+    `assert version('${PYTHON_PACKAGE}') == '${versions.pythonVersion}'`,
     `from ${PYTHON_IMPORT} import BackendClient, ChatGPT, StdioBackendTransport`,
     `transport = StdioBackendTransport(command=['node', r'${backendLiteral}'], timeout_seconds=30)`,
     "client = BackendClient(transport)",
@@ -254,7 +233,7 @@ function backendRequest(backendPath, commandName) {
       schemaVersion: REQUEST_SCHEMA,
       command: commandName,
       payload: {},
-      requestId: `registry_install_smoke_${commandName.replaceAll(".", "_")}`
+      requestId: `package_install_smoke_${commandName.replaceAll(".", "_")}`
     })}\n`);
   });
 }
@@ -266,7 +245,7 @@ async function main() {
   try {
     const specs = options.mode === "source"
       ? await sourceSpecs(root)
-      : await registrySpecs(versions, options.timeoutMs);
+      : await npmRegistrySpecs(root, versions, options.timeoutMs);
     const verified = await installAndVerify(root, specs, versions);
     console.log(JSON.stringify({ ok: true, mode: options.mode, ...verified }, null, 2));
   } finally {

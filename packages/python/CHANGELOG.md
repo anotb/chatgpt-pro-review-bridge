@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1
+
+- Aligns the parity client with stable completed-archive artifact recovery in
+  the shared backend.
+
 ## 0.7.0
 
 - Publishes the stable Python distribution as `chatgpt-pro-review-bridge` while

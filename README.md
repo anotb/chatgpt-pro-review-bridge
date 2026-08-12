@@ -31,7 +31,7 @@ Any failure to verify Pro—including fallback, login, permission, or ambiguous-
 Install a pinned release from this repository:
 
 ```powershell
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.0
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.1
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -45,11 +45,12 @@ Requirements:
 
 No API key is required.
 
-The reusable SDKs are also released as `chatgpt-pro-review-bridge` on npm and PyPI:
+The reusable Node SDK is released as `chatgpt-pro-review-bridge` on npm. The
+Python wheel is attached to each GitHub release:
 
 ```powershell
-npm install chatgpt-pro-review-bridge@0.7.0
-python -m pip install chatgpt-pro-review-bridge==0.7.0
+npm install chatgpt-pro-review-bridge@0.7.1
+python -m pip install https://github.com/anotb/chatgpt-pro-review-bridge/releases/download/v0.7.1/chatgpt_pro_review_bridge-0.7.1-py3-none-any.whl
 ```
 
 ### File-backed questions

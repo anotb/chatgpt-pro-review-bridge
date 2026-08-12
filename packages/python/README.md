@@ -13,13 +13,13 @@ The current browser-control runtime is Node/TypeScript. Python talks to it throu
 ## Install
 
 ```bash
-python -m pip install chatgpt-pro-review-bridge==0.7.0
+python -m pip install https://github.com/anotb/chatgpt-pro-review-bridge/releases/download/v0.7.1/chatgpt_pro_review_bridge-0.7.1-py3-none-any.whl
 ```
 
 The Python package needs a Node backend command for browser-control workflows. Install or build the Node package too:
 
 ```bash
-npm install chatgpt-pro-review-bridge@0.7.0
+npm install chatgpt-pro-review-bridge@0.7.1
 ```
 
 ## Development Install

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1
+
+- Treats a completed archive's final artifact manifest as authoritative on
+  resume, preventing unrelated current-page artifacts from changing the result.
+
 ## 0.7.0
 
 - Publishes the stable SDK as `chatgpt-pro-review-bridge`.

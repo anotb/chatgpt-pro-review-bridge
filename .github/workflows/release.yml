@@ -47,6 +47,20 @@ jobs:
           rm -rf packages/python/.venv dist/python
           npm run release:build-python
           npm run release:check-python
+      - name: Assemble GitHub release assets
+        run: |
+          mkdir -p dist/node
+          npm pack ./packages/node --pack-destination dist/node
+          cd dist
+          sha256sum node/*.tgz python/* > "SHA256SUMS-${GITHUB_REF_NAME#v}.txt"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-assets-${{ github.ref_name }}
+          path: |
+            dist/node/*.tgz
+            dist/python/*
+            dist/SHA256SUMS-*.txt
+          if-no-files-found: error
 
   package-smoke-macos:
     name: release package smoke (macos-latest)
@@ -72,7 +86,7 @@ jobs:
 
   publish-npm:
     name: publish npm
-    if: github.repository == 'anotb/chatgpt-pro-review-bridge' && vars.PUBLISH_REGISTRIES == 'true'
+    if: github.repository == 'anotb/chatgpt-pro-review-bridge' && vars.PUBLISH_NPM == 'true'
     needs: [preflight, package-smoke-macos]
     runs-on: ubuntu-latest
     environment: release
@@ -94,40 +108,10 @@ jobs:
         working-directory: packages/node
         run: npm publish --provenance --access public --tag latest
 
-  publish-pypi:
-    name: publish PyPI
-    if: github.repository == 'anotb/chatgpt-pro-review-bridge' && vars.PUBLISH_REGISTRIES == 'true'
-    needs: [preflight, package-smoke-macos]
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-      - run: python -m pip install --upgrade build twine
-      - run: npm run release:check-version
-      - name: Build and check Python distributions
-        run: |
-          rm -rf dist/python
-          npm run release:build-python
-          npm run release:check-python
-      - name: Publish Python package to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist/python
-
   verify-published:
-    name: verify published registry installs
-    if: github.repository == 'anotb/chatgpt-pro-review-bridge' && vars.PUBLISH_REGISTRIES == 'true'
-    needs: [publish-npm, publish-pypi]
+    name: verify published npm install
+    if: github.repository == 'anotb/chatgpt-pro-review-bridge' && vars.PUBLISH_NPM == 'true'
+    needs: publish-npm
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -147,7 +131,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-assets-${{ github.ref_name }}
+          path: dist
       - name: Publish the verified stable release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -157,3 +144,6 @@ jobs:
           --verify-tag
           --generate-notes
           --title "ChatGPT Pro Review Bridge ${GITHUB_REF_NAME#v}"
+          dist/node/*.tgz
+          dist/python/*
+          dist/SHA256SUMS-*.txt
