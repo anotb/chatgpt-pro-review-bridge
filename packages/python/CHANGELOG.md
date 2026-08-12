@@ -2,8 +2,8 @@
 
 ## 0.6.0a8
 
-- Repackages the alpha.7 backend after the cross-platform release preflight
-  correction.
+- Picks up the simplified askPro packet policy and the cross-platform release
+  preflight correction from the bundled Node backend.
 
 ## 0.6.0a7
 

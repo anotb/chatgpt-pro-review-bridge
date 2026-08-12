@@ -17,7 +17,6 @@ Archive layout:
 ├── context/manifest.json
 ├── context/packet-*.md
 ├── response.md
-├── findings.json
 ├── artifacts/manifest.json
 ├── configuration.json
 ├── receipt.json

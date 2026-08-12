@@ -7,7 +7,6 @@ import type {
 } from "../types.js";
 
 export type ReviewOutputMode = "full" | "indexed";
-export type SecretPolicy = "block" | "redact";
 
 export type ProCodeReviewArgs = {
   repositoryRoot: string;
@@ -51,8 +50,6 @@ export type ProCodeReviewArgs = {
     verifyTargetAfterCompletion?: boolean;
     failOnFallback?: boolean;
     restorePreviousConfiguration?: boolean;
-    scanPacketsForSecrets?: boolean;
-    secretPolicy?: SecretPolicy;
   };
   polling?: {
     callTimeoutMs?: number;
@@ -127,13 +124,6 @@ export type PacketFileRecord = {
   packet?: string;
 };
 
-export type SecretFinding = {
-  path: string;
-  line: number;
-  kind: string;
-  action: "blocked" | "redacted";
-};
-
 export type ReviewPacketManifest = {
   schemaVersion: 1;
   generatedAt: string;
@@ -148,7 +138,6 @@ export type ReviewPacketManifest = {
   includeWorkingTree: boolean;
   packets: Array<{ path: string; sizeBytes: number; sha256: string; sections: string[] }>;
   files: PacketFileRecord[];
-  secretFindings: SecretFinding[];
   exclusions: string[];
   partitions: Array<{ packet: string; files: string[] }>;
   crossPacketDependencies: Array<{ symbol: string; paths: string[] }>;
@@ -164,20 +153,6 @@ export type PreparedReviewContext = {
   manifest: ReviewPacketManifest;
   manifestSha256: string;
   prompt: string;
-};
-
-export type ParsedFinding = {
-  severity: "critical" | "high" | "medium" | "low";
-  confidence: number;
-  file: string;
-  startLine: number;
-  endLine: number;
-  category: string;
-  title: string;
-  evidence: string;
-  failureScenario: string;
-  recommendedFix: string;
-  regressionTest: string;
 };
 
 export type ProCodeReviewResult = {

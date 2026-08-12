@@ -39,7 +39,6 @@ import {
   writeImmutableFile,
   writeImmutableJson
 } from "./archive.js";
-import { parseFindingsAppendix } from "./findings.js";
 import { prepareReviewContext, ReviewPreparationError } from "./packet-builder.js";
 import type {
   PreparedReviewContext,
@@ -520,10 +519,8 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       const completedArchiveDirectory = archiveDirectory;
       const archivedResponse = responseMarkdown;
       await runStep("ARCHIVE_RUN", async () => {
-        const findings = parseFindingsAppendix(archivedResponse);
-        if (findings !== undefined) await writeImmutableJson(join(completedArchiveDirectory, "findings.json"), findings);
         await writeImmutableJson(join(completedArchiveDirectory, "artifacts", "manifest.json"), artifacts);
-        return { responseSha256, findingsParsed: findings !== undefined, artifacts: artifacts.length };
+        return { responseSha256, responseBytes: Buffer.byteLength(archivedResponse), artifacts: artifacts.length };
       });
     }
     terminalStatus = warnings.length > 0 ? "completed_with_warnings" : "completed";
@@ -535,11 +532,9 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       archiveDirectory = error.archiveDirectory ?? archiveDirectory;
       terminalStatus = "blocked";
       blocker = {
-        kind: error.code.includes("secret")
-          ? "confirmation"
-          : error.code.includes("configuration_snapshot")
-            ? "configuration_restore_failed"
-            : "unknown",
+        kind: error.code.includes("configuration_snapshot")
+          ? "configuration_restore_failed"
+          : "unknown",
         code: error.code,
         message: error.message,
         resumable: error.code === "review_archive_locked"

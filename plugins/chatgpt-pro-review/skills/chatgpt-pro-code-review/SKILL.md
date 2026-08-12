@@ -11,7 +11,7 @@ Use the bundled first-class workflow. Keep Codex responsible for repository evid
 
 - Read [review-contract.md](references/review-contract.md) and [packet-policy.md](references/packet-policy.md).
 - Infer base/head only when repository state makes them unambiguous; otherwise ask.
-- Request approval before sending unexpectedly sensitive material. Never override a secret blocker without explicit approval.
+- Do not attach unexpectedly sensitive material without the caller's approval. Conventional credential and browser-profile paths are excluded from repository packets.
 - Use the installed `browser:control-in-app-browser` skill to initialize the compatible visible browser runtime when `globalThis.agent` is absent. Do not inspect cookies, storage, tokens, or private endpoints.
 - Before the first file-backed review on each computer, tell the user to sign into ChatGPT visibly and enable both upload gates: Codex Settings > Computer Use > Google Chrome > Permissions > Uploads must allow `chatgpt.com` (or be set to Always allow), and Chrome `chrome://extensions` > Codex extension > Details must enable Allow access to file URLs. Never change these settings on the user's behalf. The workflow must fail closed before submission when either gate is missing.
 
@@ -39,7 +39,7 @@ const review = await chatgpt.reviews.askPro({
   context: {
     mode: "review-packets",
     includeWorkingTree: true,
-    includeInstructions: true,
+    includeInstructions: false,
     includeChangedFiles: true,
     includeRelevantCallers: false,
     includeRelatedTests: false,
@@ -58,9 +58,7 @@ const review = await chatgpt.reviews.askPro({
     verifyTargetBeforeSubmit: true,
     verifyTargetAfterCompletion: true,
     failOnFallback: true,
-    restorePreviousConfiguration: false,
-    scanPacketsForSecrets: true,
-    secretPolicy: "block"
+    restorePreviousConfiguration: false
   }
 });
 ```

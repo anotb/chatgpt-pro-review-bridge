@@ -3,8 +3,8 @@
 ## 0.6.0-alpha.8
 
 - Fixes cross-platform npm launcher path resolution in the release gates.
-- Builds synthetic credential fixtures at runtime so repository review packets
-  do not mistake the test source itself for leaked credentials.
+- Removes heuristic packet-content scanning and structured-findings parsing,
+  while making instruction, caller, and related-test expansion opt-in.
 
 ## 0.6.0-alpha.7
 

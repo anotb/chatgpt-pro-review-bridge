@@ -4,8 +4,9 @@
 
 - Makes the Windows npm launcher tests platform-independent so the release
   preflight uses Windows path semantics even when running on Linux CI.
-- Keeps synthetic credential fixtures effective at runtime without storing
-  credential-shaped literals that block the bridge's own review packets.
+- Simplifies askPro packet policy: conventional credential paths remain
+  excluded, while heuristic content scanning, forced findings parsing, and
+  default caller/test/instruction expansion are removed.
 
 ## 0.6.0-alpha.7
 

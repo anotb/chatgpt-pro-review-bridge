@@ -30,13 +30,13 @@ describe("deterministic review packet builder", () => {
       headRef: "HEAD",
       context: {
         includeWorkingTree: true,
+        includeInstructions: true,
         validationOutput: "tests: passed",
         maxPacketBytes: 900,
         maxTotalBytes: 200_000,
         onBudgetExceeded: "partition"
       },
-      output: { archiveRoot: ".codex/pro-reviews" },
-      safeguards: { scanPacketsForSecrets: true }
+      output: { archiveRoot: ".codex/pro-reviews" }
     }, new Date("2026-08-11T12:00:00.000Z"));
 
     expect(prepared.manifest.dirty).toBe(true);
@@ -57,39 +57,6 @@ describe("deterministic review packet builder", () => {
     expect(prompt).not.toContain("fenced JSON appendix");
     expect(prompt).not.toContain("Do not create or modify code");
     expect(await readFile(prepared.manifestPath, "utf8")).not.toContain("tests: passed");
-  });
-
-  it("fails before submission evidence when a secret appears only in the diff", async () => {
-    const repo = await fixtureRepository();
-    await writeFile(join(repo, "src", "example.ts"), "export const leaked = 'AKIA1234567890ABCDEF';\n");
-
-    await expect(prepareReviewContext({
-      repositoryRoot: repo,
-      baseRef: "HEAD",
-      context: { includeWorkingTree: true },
-      safeguards: { scanPacketsForSecrets: true, secretPolicy: "block" }
-    })).rejects.toMatchObject({
-      name: "ReviewPreparationError",
-      code: "packet_secret_detected",
-      archiveDirectory: expect.any(String)
-    });
-  });
-
-  it("redacts configured secret matches without preserving the value in packets", async () => {
-    const repo = await fixtureRepository();
-    const secret = "AKIA1234567890ABCDEF";
-    await writeFile(join(repo, "src", "example.ts"), `export const value = '${secret}';\n`);
-
-    const prepared = await prepareReviewContext({
-      repositoryRoot: repo,
-      baseRef: "HEAD",
-      safeguards: { scanPacketsForSecrets: true, secretPolicy: "redact" }
-    });
-    const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
-
-    expect(packets).not.toContain(secret);
-    expect(packets).toContain("[REDACTED:aws_access_key]");
-    expect(prepared.manifest.secretFindings).toContainEqual(expect.objectContaining({ action: "redacted", kind: "aws_access_key" }));
   });
 
   it("lists generated plugin runtimes but excludes their content from review packets", async () => {
@@ -177,7 +144,7 @@ describe("deterministic review packet builder", () => {
       repositoryRoot: repo,
       baseRef: "main",
       headRef: featureSha,
-      context: { includeWorkingTree: false }
+      context: { includeWorkingTree: false, includeRelevantCallers: true }
     });
     const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
 
@@ -230,20 +197,6 @@ describe("deterministic review packet builder", () => {
     }));
   });
 
-  it("rescans the final serialized caller evidence for secrets", async () => {
-    const repo = await fixtureRepository();
-    await writeFile(join(repo, "src", "caller.txt"), "answer AKIA1234567890ABCDEF\n");
-    git(repo, "add", ".");
-    git(repo, "commit", "-m", "add unchanged caller");
-    await writeFile(join(repo, "src", "example.ts"), "export function answer() { return 42; }\n");
-
-    await expect(prepareReviewContext({
-      repositoryRoot: repo,
-      baseRef: "HEAD",
-      safeguards: { scanPacketsForSecrets: true, secretPolicy: "block" }
-    })).rejects.toMatchObject({ code: "packet_secret_detected" });
-  });
-
   it("excludes a custom in-repository archive root from later packets", async () => {
     const repo = await fixtureRepository();
     await mkdir(join(repo, "review-history", "previous"), { recursive: true });
@@ -282,7 +235,11 @@ describe("deterministic review packet builder", () => {
     git(repo, "commit", "-m", "add direct test");
     await writeFile(join(repo, "src", "example.ts"), "export function answer() { return 42; }\n");
 
-    const prepared = await prepareReviewContext({ repositoryRoot: repo, baseRef: "HEAD" });
+    const prepared = await prepareReviewContext({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      context: { includeRelatedTests: true }
+    });
 
     expect(prepared.manifest.files).toContainEqual(expect.objectContaining({
       path: "tests/example.test.ts",

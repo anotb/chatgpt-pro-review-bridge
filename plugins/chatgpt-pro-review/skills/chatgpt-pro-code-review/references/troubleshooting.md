@@ -12,7 +12,6 @@ Do not transfer profiles, cookies, localStorage, sessionStorage, auth headers, t
 - `login_required`: sign in visibly and retry.
 - `model_unavailable` or `model_fallback`: stop. Do not accept or relabel the answer.
 - `configuration_restore_failed`: leave the browser visible, report candidates/evidence, and restore manually if needed.
-- `confirmation` with `packet_secret_detected`: inspect exclusions and obtain explicit approval before any redaction override.
 - upload permission: enable Codex Chrome uploads and Chrome extension file-URL access, then resume before submission.
 - `in_progress`: use the archived thread URL and archive directory; never create a replacement prompt.
 - artifact download failure: preserve the response and thread, report the missing delta item, and do not claim the artifact contract passed.

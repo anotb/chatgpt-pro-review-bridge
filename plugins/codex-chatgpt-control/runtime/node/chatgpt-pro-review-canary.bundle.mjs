@@ -13691,52 +13691,6 @@ function markdownSectionIndex(markdown) {
   return entries;
 }
 
-// src/reviews/findings.ts
-function parseFindingsAppendix(markdown) {
-  const fences = Array.from(markdown.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)).reverse();
-  for (const fence of fences) {
-    const body = fence[1]?.trim();
-    if (body === void 0 || body.length === 0) continue;
-    let value;
-    try {
-      value = JSON.parse(body);
-    } catch {
-      continue;
-    }
-    const candidates = Array.isArray(value) ? value : typeof value === "object" && value !== null && Array.isArray(value.findings) ? value.findings : void 0;
-    if (candidates === void 0) continue;
-    const findings = candidates.map(parseFinding).filter((item) => item !== void 0);
-    if (findings.length === candidates.length) return findings;
-  }
-  return void 0;
-}
-function parseFinding(value) {
-  if (typeof value !== "object" || value === null) return void 0;
-  const item = value;
-  const severity = item.severity;
-  if (!isSeverity(severity)) return void 0;
-  const required = ["file", "category", "title", "evidence", "failureScenario", "recommendedFix", "regressionTest"];
-  if (!required.every((key) => typeof item[key] === "string")) return void 0;
-  if (typeof item.confidence !== "number" || item.confidence < 0 || item.confidence > 1) return void 0;
-  if (!Number.isInteger(item.startLine) || !Number.isInteger(item.endLine)) return void 0;
-  return {
-    severity,
-    confidence: item.confidence,
-    file: item.file,
-    startLine: item.startLine,
-    endLine: item.endLine,
-    category: item.category,
-    title: item.title,
-    evidence: item.evidence,
-    failureScenario: item.failureScenario,
-    recommendedFix: item.recommendedFix,
-    regressionTest: item.regressionTest
-  };
-}
-function isSeverity(value) {
-  return value === "critical" || value === "high" || value === "medium" || value === "low";
-}
-
 // src/reviews/packet-builder.ts
 import { spawn } from "node:child_process";
 import { createHash as createHash6 } from "node:crypto";
@@ -13772,13 +13726,6 @@ var GENERATED_DIFF_EXCLUDES = [
 ].map((pattern) => `:(exclude,glob)${pattern}`);
 var MANIFEST_PATTERN = /(^|\/)(?:package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|pyproject\.toml|poetry\.lock|requirements[^/]*\.txt|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|Gemfile(?:\.lock)?|composer\.json|Dockerfile|docker-compose[^/]*\.ya?ml|.*\.config\.[cm]?[jt]s|.*\.schema\.json)$/i;
 var TEST_PATTERN = /(?:^|\/)(?:test|tests|__tests__)\/|(?:\.|_)(?:test|spec)\.[^.\/]+$/i;
-var SECRET_PATTERNS = [
-  { kind: "private_key", pattern: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g },
-  { kind: "aws_access_key", pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g },
-  { kind: "github_token", pattern: /\bgh(?:p|o|u|s|r)_[A-Za-z0-9]{36,255}\b/g },
-  { kind: "openai_api_key", pattern: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g },
-  { kind: "generic_secret_assignment", pattern: /\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{20,}/gi }
-];
 var ReviewPreparationError = class extends Error {
   constructor(message, code, details, archiveDirectory) {
     super(message);
@@ -13837,12 +13784,9 @@ async function prepareReviewContext(args, now = /* @__PURE__ */ new Date()) {
       status: "excluded",
       reason: excludedPathReason(path3, archivePathPrefix)
     })));
-    const secretFindings = [];
     const sourceSections = [];
     const dependencies = /* @__PURE__ */ new Map();
     const maxSourceBytes = positiveInteger(args.context?.maxSourceFileBytes, DEFAULT_SOURCE_BYTES);
-    const secretPolicy = args.safeguards?.secretPolicy ?? "block";
-    const scanSecrets = args.safeguards?.scanPacketsForSecrets ?? true;
     const candidates = await collectCandidateFiles(repositoryRoot, headSha, changed, args);
     for (const candidate of candidates) {
       const normalized = normalizeRepoPath(candidate.path);
@@ -13877,14 +13821,7 @@ async function prepareReviewContext(args, now = /* @__PURE__ */ new Date()) {
         fileRecords.push({ path: normalized, category: candidate.category, status: "binary", sizeBytes: bytes.length, sha256: hash(bytes) });
         continue;
       }
-      let text = bytes.toString("utf8");
-      const findings = scanSecrets ? findSecrets(normalized, text, secretPolicy) : { text, records: [], blocked: false };
-      secretFindings.push(...findings.records);
-      if (findings.blocked) {
-        fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "high_confidence_secret", sizeBytes: bytes.length, sha256: hash(bytes) });
-        continue;
-      }
-      text = findings.text;
+      const text = bytes.toString("utf8");
       const numbered = lineNumber(text);
       sourceSections.push({
         title: `Source snapshot: ${normalized}`,
@@ -13904,41 +13841,9 @@ ${numbered}
         dependencies.set(symbol, paths);
       }
     }
-    let diff = await buildDiff(repositoryRoot, mergeBaseSha, headSha, includeWorkingTree, excludedChanged, archivePathPrefix);
-    const diffSecrets = scanSecrets ? findSecrets("<git-diff>", diff, secretPolicy) : { text: diff, records: [], blocked: false };
-    diff = diffSecrets.text;
-    secretFindings.push(...diffSecrets.records);
-    if (validation !== void 0 && scanSecrets) {
-      const validationSecrets = findSecrets("<validation-output>", validation, secretPolicy);
-      validation = validationSecrets.text;
-      secretFindings.push(...validationSecrets.records);
-    }
-    if (secretFindings.some((item) => item.action === "blocked")) {
-      const manifest2 = emptyManifest({
-        generatedAt: now.toISOString(),
-        repositoryRoot,
-        baseRef,
-        headRef,
-        baseSha,
-        headSha,
-        mergeBaseSha,
-        ...branch === void 0 ? {} : { branch },
-        dirty,
-        includeWorkingTree,
-        files: fileRecords,
-        secretFindings
-      });
-      const manifestPath2 = join5(archiveDirectory, "context", "manifest.json");
-      await writeImmutableJson(manifestPath2, manifest2);
-      throw new ReviewPreparationError(
-        "Review packets contain high-confidence secret patterns. Nothing was submitted; inspect the exclusion manifest and explicitly choose redaction only if appropriate.",
-        "packet_secret_detected",
-        { findings: secretFindings.map(({ path: path3, line, kind, action }) => ({ path: path3, line, kind, action })) },
-        archiveDirectory
-      );
-    }
+    const diff = await buildDiff(repositoryRoot, mergeBaseSha, headSha, includeWorkingTree, excludedChanged, archivePathPrefix);
     const nameStatus = await buildNameStatus(repositoryRoot, mergeBaseSha, headSha, includeWorkingTree, excludedChanged, archivePathPrefix);
-    const callers = args.context?.includeRelevantCallers === false ? "Caller/reference search disabled by configuration." : await callerEvidence(repositoryRoot, headSha, includeWorkingTree, dependencies, changed, archivePathPrefix);
+    const callers = args.context?.includeRelevantCallers === true ? await callerEvidence(repositoryRoot, headSha, includeWorkingTree, dependencies, changed, archivePathPrefix) : "Caller/reference search not requested.";
     const instructions = candidates.filter((item) => item.category === "instructions").map((item) => item.path);
     const sections = [
       {
@@ -13981,36 +13886,10 @@ ${validation}
       throw new ReviewPreparationError("maxPacketBytes is too small for packet framing.", "packet_budget_invalid", { maxPacketBytes }, archiveDirectory);
     }
     const partitioned = partitionSections(sections, maxPacketBytes - headerReserve);
-    const serializedPackets = partitioned.map((packet, index) => {
-      const raw = `${packetHeader(index + 1, partitioned.length)}${packet.body}`;
-      const scanned = scanSecrets ? findSecrets(`<packet-${String(index + 1).padStart(3, "0")}>`, raw, secretPolicy) : { text: raw, records: [], blocked: false };
-      secretFindings.push(...scanned.records);
-      return { ...packet, body: scanned.text, blocked: scanned.blocked };
-    });
-    if (serializedPackets.some((packet) => packet.blocked)) {
-      const manifest2 = emptyManifest({
-        generatedAt: now.toISOString(),
-        repositoryRoot,
-        baseRef,
-        headRef,
-        baseSha,
-        headSha,
-        mergeBaseSha,
-        ...branch === void 0 ? {} : { branch },
-        dirty,
-        includeWorkingTree,
-        files: fileRecords,
-        secretFindings
-      });
-      const manifestPath2 = join5(archiveDirectory, "context", "manifest.json");
-      await writeImmutableJson(manifestPath2, manifest2);
-      throw new ReviewPreparationError(
-        "Final serialized review packets contain high-confidence secret patterns. Nothing was submitted.",
-        "packet_secret_detected",
-        { findings: secretFindings.map(({ path: path3, line, kind, action }) => ({ path: path3, line, kind, action })) },
-        archiveDirectory
-      );
-    }
+    const serializedPackets = partitioned.map((packet, index) => ({
+      ...packet,
+      body: `${packetHeader(index + 1, partitioned.length)}${packet.body}`
+    }));
     const totalBytes = serializedPackets.reduce((sum, packet) => sum + Buffer.byteLength(packet.body), 0);
     const oversizedPacket = serializedPackets.find((packet) => Buffer.byteLength(packet.body) > maxPacketBytes);
     if (oversizedPacket !== void 0) {
@@ -14058,7 +13937,6 @@ ${validation}
       includeWorkingTree,
       packets: packetRecords,
       files: fileRecords,
-      secretFindings,
       exclusions: fileRecords.filter((item) => item.status !== "included").map((item) => `${item.path}: ${item.reason ?? item.status}`),
       partitions,
       crossPacketDependencies: [...dependencies.entries()].filter(([, paths]) => paths.size > 1).map(([symbol, paths]) => ({ symbol, paths: [...paths].sort() })),
@@ -14169,13 +14047,13 @@ async function collectCandidateFiles(root, headSha, changed, args) {
   const records = /* @__PURE__ */ new Map();
   if (args.context?.includeChangedFiles !== false) for (const path3 of changed) records.set(path3, TEST_PATTERN.test(path3) ? "changed-test" : "changed-file");
   const tracked = (await gitChecked(root, ["ls-tree", "-r", "--name-only", headSha], "git_head_tree_failed")).stdout.split(/\r?\n/).filter(Boolean).map(normalizeRepoPath);
-  if (args.context?.includeInstructions !== false) {
+  if (args.context?.includeInstructions === true) {
     for (const path3 of governingInstructions(tracked, changed)) records.set(path3, "instructions");
   }
   for (const path3 of tracked.filter((path4) => MANIFEST_PATTERN.test(path4))) {
     if (changed.includes(path3) || affectsChangedPath(path3, changed)) records.set(path3, "manifest-interface");
   }
-  if (args.context?.includeRelatedTests !== false) {
+  if (args.context?.includeRelatedTests === true) {
     const stems = new Set(changed.map((path3) => relatedFileStem(path3)));
     for (const path3 of tracked.filter((path4) => TEST_PATTERN.test(path4))) {
       if (changed.includes(path3) || [...stems].some((stem) => stem.length > 2 && relatedFileStem(path3) === stem)) records.set(path3, "related-test");
@@ -14241,22 +14119,6 @@ function exportedSymbols(text) {
     while ((match = pattern.exec(text)) !== null) if (match[1] !== void 0) symbols.add(match[1]);
   }
   return [...symbols];
-}
-function findSecrets(path3, text, policy) {
-  let output = text;
-  const records = [];
-  let blocked2 = false;
-  for (const { kind, pattern } of SECRET_PATTERNS) {
-    pattern.lastIndex = 0;
-    const matches = Array.from(text.matchAll(pattern));
-    for (const match of matches) {
-      const line = text.slice(0, match.index ?? 0).split("\n").length;
-      records.push({ path: path3, line, kind, action: policy === "block" ? "blocked" : "redacted" });
-      if (policy === "block") blocked2 = true;
-    }
-    if (policy === "redact") output = output.replace(pattern, `[REDACTED:${kind}]`);
-  }
-  return { text: output, records, blocked: blocked2 };
 }
 function partitionSections(sections, maxBytes) {
   const chunks = sections.flatMap((section) => splitSection(section, maxBytes));
@@ -14371,17 +14233,6 @@ async function validationOutput(args, root) {
   if (!info.isFile()) throw new ReviewPreparationError("validationOutputPath must be a regular file.", "validation_output_not_regular");
   if (info.size > DEFAULT_SOURCE_BYTES) throw new ReviewPreparationError("Validation output exceeds the portable safety limit.", "validation_output_oversized");
   return await readFile4(resolved, "utf8");
-}
-function emptyManifest(input) {
-  return {
-    schemaVersion: 1,
-    ...input,
-    packets: [],
-    exclusions: input.files.filter((item) => item.status !== "included").map((item) => `${item.path}: ${item.reason ?? item.status}`),
-    partitions: [],
-    crossPacketDependencies: [],
-    validationOutputIncluded: false
-  };
 }
 async function gitRequired(root, args, code) {
   const result = await gitChecked(root, args, code);
@@ -14877,10 +14728,8 @@ async function runCodeReviewWithPort(args, port) {
       const completedArchiveDirectory = archiveDirectory;
       const archivedResponse2 = responseMarkdown;
       await runStep("ARCHIVE_RUN", async () => {
-        const findings = parseFindingsAppendix(archivedResponse2);
-        if (findings !== void 0) await writeImmutableJson(join6(completedArchiveDirectory, "findings.json"), findings);
         await writeImmutableJson(join6(completedArchiveDirectory, "artifacts", "manifest.json"), artifacts);
-        return { responseSha256, findingsParsed: findings !== void 0, artifacts: artifacts.length };
+        return { responseSha256, responseBytes: Buffer.byteLength(archivedResponse2), artifacts: artifacts.length };
       });
     }
     terminalStatus = warnings.length > 0 ? "completed_with_warnings" : "completed";
@@ -14892,7 +14741,7 @@ async function runCodeReviewWithPort(args, port) {
       archiveDirectory = error.archiveDirectory ?? archiveDirectory;
       terminalStatus = "blocked";
       blocker = {
-        kind: error.code.includes("secret") ? "confirmation" : error.code.includes("configuration_snapshot") ? "configuration_restore_failed" : "unknown",
+        kind: error.code.includes("configuration_snapshot") ? "configuration_restore_failed" : "unknown",
         code: error.code,
         message: error.message,
         resumable: error.code === "review_archive_locked"

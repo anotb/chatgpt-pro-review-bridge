@@ -78,10 +78,10 @@ const result = await chatgpt.reviews.askPro({
   context: {
     mode: "review-packets",
     includeWorkingTree: true,
-    includeInstructions: true,
+    includeInstructions: false,
     includeChangedFiles: true,
-    includeRelevantCallers: true,
-    includeRelatedTests: true,
+    includeRelevantCallers: false,
+    includeRelatedTests: false,
     includeValidationOutput: true,
     onBudgetExceeded: "partition"
   },
@@ -97,8 +97,7 @@ const result = await chatgpt.reviews.askPro({
     verifyTargetBeforeSubmit: true,
     verifyTargetAfterCompletion: true,
     failOnFallback: true,
-    restorePreviousConfiguration: false,
-    scanPacketsForSecrets: true
+    restorePreviousConfiguration: false
   }
 });
 ```
@@ -113,7 +112,7 @@ The bridge keeps durable local state so a long answer can resume without duplica
 
 Archive creation requests owner-only directory/file modes (`0700`/`0600`) and never overwrites immutable records. Windows does not implement POSIX modes as an ACL boundary, so use a user-private workspace or an explicitly private NTFS directory when review packets contain confidential source.
 
-The workflow uses only visible browser controls. It does not call hidden ChatGPT endpoints, extract credentials, bypass login/CAPTCHA, scrape history in the background, rotate accounts, silently truncate output, or execute generated patches. Secret scanning is a guardrail, not proof of safety. Codex must independently verify findings before edits.
+The workflow uses only visible browser controls. It does not call hidden ChatGPT endpoints, extract credentials, bypass login/CAPTCHA, scrape history in the background, rotate accounts, silently truncate output, or execute generated patches. Codex must independently verify material suggestions before edits.
 
 ## Opt-in installed-runtime canary
 

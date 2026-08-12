@@ -8,9 +8,7 @@ import type {
   PacketFileRecord,
   PreparedReviewContext,
   ProCodeReviewArgs,
-  ReviewPacketManifest,
-  SecretFinding,
-  SecretPolicy
+  ReviewPacketManifest
 } from "./types.js";
 
 const DEFAULT_PACKET_BYTES = 1_500_000;
@@ -43,14 +41,6 @@ const GENERATED_DIFF_EXCLUDES = [
 ].map(pattern => `:(exclude,glob)${pattern}`);
 const MANIFEST_PATTERN = /(^|\/)(?:package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|pyproject\.toml|poetry\.lock|requirements[^/]*\.txt|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|Gemfile(?:\.lock)?|composer\.json|Dockerfile|docker-compose[^/]*\.ya?ml|.*\.config\.[cm]?[jt]s|.*\.schema\.json)$/i;
 const TEST_PATTERN = /(?:^|\/)(?:test|tests|__tests__)\/|(?:\.|_)(?:test|spec)\.[^.\/]+$/i;
-const SECRET_PATTERNS: Array<{ kind: string; pattern: RegExp }> = [
-  { kind: "private_key", pattern: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g },
-  { kind: "aws_access_key", pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g },
-  { kind: "github_token", pattern: /\bgh(?:p|o|u|s|r)_[A-Za-z0-9]{36,255}\b/g },
-  { kind: "openai_api_key", pattern: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g },
-  { kind: "generic_secret_assignment", pattern: /\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{20,}/gi }
-];
-
 export class ReviewPreparationError extends Error {
   constructor(
     message: string,
@@ -115,12 +105,9 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
       status: "excluded" as const,
       reason: excludedPathReason(path, archivePathPrefix)
     })));
-    const secretFindings: SecretFinding[] = [];
     const sourceSections: Section[] = [];
     const dependencies = new Map<string, Set<string>>();
     const maxSourceBytes = positiveInteger(args.context?.maxSourceFileBytes, DEFAULT_SOURCE_BYTES);
-    const secretPolicy = args.safeguards?.secretPolicy ?? "block";
-    const scanSecrets = args.safeguards?.scanPacketsForSecrets ?? true;
 
     const candidates = await collectCandidateFiles(repositoryRoot, headSha, changed, args);
     for (const candidate of candidates) {
@@ -156,16 +143,7 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
         fileRecords.push({ path: normalized, category: candidate.category, status: "binary", sizeBytes: bytes.length, sha256: hash(bytes) });
         continue;
       }
-      let text = bytes.toString("utf8");
-      const findings = scanSecrets
-        ? findSecrets(normalized, text, secretPolicy)
-        : { text, records: [] as SecretFinding[], blocked: false };
-      secretFindings.push(...findings.records);
-      if (findings.blocked) {
-        fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "high_confidence_secret", sizeBytes: bytes.length, sha256: hash(bytes) });
-        continue;
-      }
-      text = findings.text;
+      const text = bytes.toString("utf8");
       const numbered = lineNumber(text);
       sourceSections.push({
         title: `Source snapshot: ${normalized}`,
@@ -180,35 +158,12 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
       }
     }
 
-    let diff = await buildDiff(repositoryRoot, mergeBaseSha, headSha, includeWorkingTree, excludedChanged, archivePathPrefix);
-    const diffSecrets = scanSecrets ? findSecrets("<git-diff>", diff, secretPolicy) : { text: diff, records: [] as SecretFinding[], blocked: false };
-    diff = diffSecrets.text;
-    secretFindings.push(...diffSecrets.records);
-    if (validation !== undefined && scanSecrets) {
-      const validationSecrets = findSecrets("<validation-output>", validation, secretPolicy);
-      validation = validationSecrets.text;
-      secretFindings.push(...validationSecrets.records);
-    }
-
-    if (secretFindings.some(item => item.action === "blocked")) {
-      const manifest = emptyManifest({
-        generatedAt: now.toISOString(), repositoryRoot, baseRef, headRef, baseSha, headSha,
-        mergeBaseSha, ...(branch === undefined ? {} : { branch }), dirty, includeWorkingTree, files: fileRecords, secretFindings
-      });
-      const manifestPath = join(archiveDirectory, "context", "manifest.json");
-      await writeImmutableJson(manifestPath, manifest);
-      throw new ReviewPreparationError(
-        "Review packets contain high-confidence secret patterns. Nothing was submitted; inspect the exclusion manifest and explicitly choose redaction only if appropriate.",
-        "packet_secret_detected",
-        { findings: secretFindings.map(({ path, line, kind, action }) => ({ path, line, kind, action })) },
-        archiveDirectory
-      );
-    }
+    const diff = await buildDiff(repositoryRoot, mergeBaseSha, headSha, includeWorkingTree, excludedChanged, archivePathPrefix);
 
     const nameStatus = await buildNameStatus(repositoryRoot, mergeBaseSha, headSha, includeWorkingTree, excludedChanged, archivePathPrefix);
-    const callers = args.context?.includeRelevantCallers === false
-      ? "Caller/reference search disabled by configuration."
-      : await callerEvidence(repositoryRoot, headSha, includeWorkingTree, dependencies, changed, archivePathPrefix);
+    const callers = args.context?.includeRelevantCallers === true
+      ? await callerEvidence(repositoryRoot, headSha, includeWorkingTree, dependencies, changed, archivePathPrefix)
+      : "Caller/reference search not requested.";
     const instructions = candidates.filter(item => item.category === "instructions").map(item => item.path);
     const sections: Section[] = [
       {
@@ -246,26 +201,10 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
       throw new ReviewPreparationError("maxPacketBytes is too small for packet framing.", "packet_budget_invalid", { maxPacketBytes }, archiveDirectory);
     }
     const partitioned = partitionSections(sections, maxPacketBytes - headerReserve);
-    const serializedPackets = partitioned.map((packet, index) => {
-      const raw = `${packetHeader(index + 1, partitioned.length)}${packet.body}`;
-      const scanned = scanSecrets ? findSecrets(`<packet-${String(index + 1).padStart(3, "0")}>`, raw, secretPolicy) : { text: raw, records: [] as SecretFinding[], blocked: false };
-      secretFindings.push(...scanned.records);
-      return { ...packet, body: scanned.text, blocked: scanned.blocked };
-    });
-    if (serializedPackets.some(packet => packet.blocked)) {
-      const manifest = emptyManifest({
-        generatedAt: now.toISOString(), repositoryRoot, baseRef, headRef, baseSha, headSha,
-        mergeBaseSha, ...(branch === undefined ? {} : { branch }), dirty, includeWorkingTree, files: fileRecords, secretFindings
-      });
-      const manifestPath = join(archiveDirectory, "context", "manifest.json");
-      await writeImmutableJson(manifestPath, manifest);
-      throw new ReviewPreparationError(
-        "Final serialized review packets contain high-confidence secret patterns. Nothing was submitted.",
-        "packet_secret_detected",
-        { findings: secretFindings.map(({ path, line, kind, action }) => ({ path, line, kind, action })) },
-        archiveDirectory
-      );
-    }
+    const serializedPackets = partitioned.map((packet, index) => ({
+      ...packet,
+      body: `${packetHeader(index + 1, partitioned.length)}${packet.body}`
+    }));
     const totalBytes = serializedPackets.reduce((sum, packet) => sum + Buffer.byteLength(packet.body), 0);
     const oversizedPacket = serializedPackets.find(packet => Buffer.byteLength(packet.body) > maxPacketBytes);
     if (oversizedPacket !== undefined) {
@@ -315,7 +254,6 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
       includeWorkingTree,
       packets: packetRecords,
       files: fileRecords,
-      secretFindings,
       exclusions: fileRecords.filter(item => item.status !== "included").map(item => `${item.path}: ${item.reason ?? item.status}`),
       partitions,
       crossPacketDependencies: [...dependencies.entries()]
@@ -465,13 +403,13 @@ async function collectCandidateFiles(root: string, headSha: string, changed: str
   const records = new Map<string, string>();
   if (args.context?.includeChangedFiles !== false) for (const path of changed) records.set(path, TEST_PATTERN.test(path) ? "changed-test" : "changed-file");
   const tracked = (await gitChecked(root, ["ls-tree", "-r", "--name-only", headSha], "git_head_tree_failed")).stdout.split(/\r?\n/).filter(Boolean).map(normalizeRepoPath);
-  if (args.context?.includeInstructions !== false) {
+  if (args.context?.includeInstructions === true) {
     for (const path of governingInstructions(tracked, changed)) records.set(path, "instructions");
   }
   for (const path of tracked.filter(path => MANIFEST_PATTERN.test(path))) {
     if (changed.includes(path) || affectsChangedPath(path, changed)) records.set(path, "manifest-interface");
   }
-  if (args.context?.includeRelatedTests !== false) {
+  if (args.context?.includeRelatedTests === true) {
     const stems = new Set(changed.map(path => relatedFileStem(path)));
     for (const path of tracked.filter(path => TEST_PATTERN.test(path))) {
       if (changed.includes(path) || [...stems].some(stem => stem.length > 2 && relatedFileStem(path) === stem)) records.set(path, "related-test");
@@ -565,23 +503,6 @@ function exportedSymbols(text: string): string[] {
     while ((match = pattern.exec(text)) !== null) if (match[1] !== undefined) symbols.add(match[1]);
   }
   return [...symbols];
-}
-
-function findSecrets(path: string, text: string, policy: SecretPolicy): { text: string; records: SecretFinding[]; blocked: boolean } {
-  let output = text;
-  const records: SecretFinding[] = [];
-  let blocked = false;
-  for (const { kind, pattern } of SECRET_PATTERNS) {
-    pattern.lastIndex = 0;
-    const matches = Array.from(text.matchAll(pattern));
-    for (const match of matches) {
-      const line = text.slice(0, match.index ?? 0).split("\n").length;
-      records.push({ path, line, kind, action: policy === "block" ? "blocked" : "redacted" });
-      if (policy === "block") blocked = true;
-    }
-    if (policy === "redact") output = output.replace(pattern, `[REDACTED:${kind}]`);
-  }
-  return { text: output, records, blocked };
 }
 
 function partitionSections(sections: Section[], maxBytes: number): Array<{ body: string; titles: string[]; files: string[] }> {

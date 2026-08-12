@@ -9,7 +9,7 @@ Use the bundled bridge to send the caller's actual question to visible ChatGPT C
 
 ## Before invoking
 
-- Request approval before sending unexpectedly sensitive material. Never override a secret blocker without explicit approval.
+- Do not attach unexpectedly sensitive material without the caller's approval. Conventional credential and browser-profile paths are excluded from repository packets.
 - Use the installed `browser:control-in-app-browser` skill to initialize the compatible visible browser runtime when `globalThis.agent` is absent.
 - A first file-backed run on each computer requires a visibly signed-in ChatGPT session, Codex Chrome uploads allowed for `chatgpt.com`, and Chrome's Codex extension allowed to access file URLs. Never change those settings for the user.
 
@@ -37,7 +37,7 @@ const result = await chatgpt.reviews.askPro({
   context: {
     mode: "review-packets",
     includeWorkingTree: true,
-    includeInstructions: true,
+    includeInstructions: false,
     includeChangedFiles: true,
     includeRelevantCallers: false,
     includeRelatedTests: false,
@@ -56,14 +56,12 @@ const result = await chatgpt.reviews.askPro({
     verifyTargetBeforeSubmit: true,
     verifyTargetAfterCompletion: true,
     failOnFallback: true,
-    restorePreviousConfiguration: false,
-    scanPacketsForSecrets: true,
-    secretPolicy: "block"
+    restorePreviousConfiguration: false
   }
 });
 ```
 
-Pass the user's question faithfully. Do not add review categories, a findings schema, output restrictions, or patch prohibitions unless the caller asked for them. Tune packet contents to the question: callers, tests, validation output, and broad source context are opt-in when useful, not a default checklist. Keep secret scanning enabled.
+Pass the user's question faithfully. Do not add review categories, a findings schema, output restrictions, or patch prohibitions unless the caller asked for them. Tune packet contents to the question: callers, tests, validation output, and broad source context are opt-in when useful, not a default checklist.
 
 ## Resume without duplication
 
