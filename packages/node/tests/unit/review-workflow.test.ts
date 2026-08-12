@@ -36,6 +36,25 @@ const snapshot: ConfigurationSnapshotData = {
 const baseline: ArtifactInventoryData = { capturedAt: "before", items: [] };
 
 describe("Pro review state machine", () => {
+  it("does not interact with the Pro control when the configuration snapshot already verifies Pro", async () => {
+    const repo = await fixtureRepository();
+    const calls: string[] = [];
+    const proSnapshot: ConfigurationSnapshotData = {
+      ...snapshot,
+      selection: { intelligence: "Pro" },
+      inspection: proInspection
+    };
+    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort(calls, {
+      snapshotConfiguration: async () => success(proSnapshot)
+    }));
+
+    expect(result.status).toBe("completed");
+    expect(calls).not.toContain("applyPro");
+    expect(result.rawSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ state: "APPLY_PRO", status: "already_verified", data: expect.objectContaining({ selected: [] }) })
+    ]));
+  });
+
   it("submits once, polls metadata, reads full Markdown once, downloads all delta artifacts, and restores", async () => {
     const repo = await fixtureRepository();
     const calls: string[] = [];
@@ -65,6 +84,7 @@ describe("Pro review state machine", () => {
       repositoryRoot: repo,
       baseRef: "HEAD",
       output: { mode: "full", archiveRoot: ".codex/pro-reviews", downloadArtifacts: "all" },
+      safeguards: { restorePreviousConfiguration: true },
       polling: { callTimeoutMs: 10, totalTimeoutMs: 30, maxPollCallsPerInvocation: 2, stableMs: 1, pollMs: 1 }
     }, port);
 
@@ -197,7 +217,11 @@ describe("Pro review state machine", () => {
       inspectConfiguration: async () => success(beforeInspection)
     });
 
-    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, port);
+    const result = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      safeguards: { restorePreviousConfiguration: true }
+    }, port);
 
     expect(result.status).toBe("blocked");
     expect(result.blocker).toMatchObject({ kind: "model_fallback", code: "pro_postcondition_unverified" });
@@ -288,7 +312,11 @@ describe("Pro review state machine", () => {
       blocker: { kind: "configuration_restore_failed", code: "restore_failed", message: "Visible prior setting is unavailable.", resumable: false },
       context: context()
     };
-    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([], {
+    const result = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      safeguards: { restorePreviousConfiguration: true }
+    }, makePort([], {
       restoreConfiguration: async () => restoreFailure as CommandResult<never>
     }));
 
@@ -353,6 +381,68 @@ describe("Pro review state machine", () => {
       state: "ambiguous",
       submitted: true,
       resubmitAllowed: false
+    });
+  });
+
+  it("confirms a submitted prompt rendered with attachment labels and controls", async () => {
+    const repo = await fixtureRepository();
+    const calls: string[] = [];
+    let submittedPrompt = "";
+    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort(calls, {
+      submit: async (prompt: string) => {
+        submittedPrompt = prompt;
+        return success({ submitted: true, userTurnText: `manifest.json\nFile\npacket-001.md\nFile\n${prompt}\nShow more`, turnCount: 2, submissionState: "submitted_generating" });
+      },
+      readLatestUser: async () => success({
+        role: "user",
+        text: `manifest.json\nFile\npacket-001.md\nFile\n${submittedPrompt}\nShow more`,
+        format: "normalized_text"
+      })
+    }));
+
+    expect(result.status).toBe("completed");
+    expect(calls.filter(call => call === "submit")).toHaveLength(1);
+    expect(calls).not.toContain("restoreConfiguration");
+    expect(JSON.parse(await readFile(join(result.archiveDirectory!, "submission.json"), "utf8"))).toMatchObject({
+      state: "confirmed",
+      submitted: true,
+      resubmitAllowed: false
+    });
+  });
+
+  it("reconciles an ambiguous receipt from an exact embedded visible prompt without resubmitting", async () => {
+    const repo = await fixtureRepository();
+    let submittedPrompt = "";
+    const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([], {
+      submit: async (prompt: string) => {
+        submittedPrompt = prompt;
+        return success({ submitted: true, userTurnText: "render pending", turnCount: 2, submissionState: "submitted_generating" });
+      },
+      readLatestUser: async () => success({ role: "user", text: "render pending", format: "normalized_text" })
+    }));
+    expect(first.blocker?.code).toBe("submission_ambiguous");
+    const calls: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls, {
+      readLatestUser: async () => success({
+        role: "user",
+        text: `manifest.json\nFile\npacket-001.md\nFile\n${submittedPrompt}\nShow more`,
+        format: "normalized_text"
+      })
+    }));
+
+    expect(resumed.status).toBe("completed");
+    expect(calls).not.toContain("attach");
+    expect(calls).not.toContain("compose");
+    expect(calls).not.toContain("submit");
+    expect(JSON.parse(await readFile(join(first.archiveDirectory!, "submission-confirmation.json"), "utf8"))).toMatchObject({
+      state: "confirmed",
+      submitted: true,
+      resubmitAllowed: false,
+      reconciliation: "visible_prompt_match"
     });
   });
 

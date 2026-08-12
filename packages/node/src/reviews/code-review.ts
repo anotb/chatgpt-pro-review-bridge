@@ -176,7 +176,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       const checkpoint = await readOptionalThreadCheckpoint(args.resume.archiveDirectory);
       validateThreadCheckpoint(checkpoint, archivedSubmission, prepared);
       const archivedTarget = checkpoint !== undefined
-        && (archivedSubmission.state === "intent" || isProvisionalConversationId(archivedSubmission.thread.id))
+        && (archivedSubmission.state !== "confirmed" || isProvisionalConversationId(archivedSubmission.thread.id))
         ? checkpoint.current
         : archivedSubmission.thread;
       const archivedThreadId = archivedTarget.id ?? conversationIdFromUrl(archivedTarget.url);
@@ -208,10 +208,11 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       threadUrl = opened.data.url || opened.context.url;
       threadId = opened.data.conversationId ?? opened.context.conversationId;
     } else {
-      const intentNeedsRecovery = archivedSubmission?.state === "intent"
+      const unconfirmedNeedsRecovery = archivedSubmission !== undefined
+        && archivedSubmission.state !== "confirmed"
         && (threadId === undefined || isProvisionalConversationId(threadId))
         && conversationIdFromUrl(threadUrl) === undefined;
-      let openResult = intentNeedsRecovery
+      let openResult = unconfirmedNeedsRecovery
         ? await runStep("RECOVER_THREAD", () => port.recoverThread(recoveryQuery!, prepared!.prompt))
         : await runStep("OPEN_CHAT", () => port.openThread({
             ...(threadId === undefined ? {} : { conversationId: threadId }),
@@ -234,14 +235,16 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       await persistThreadCheckpoint(archiveDirectory!, prepared!, threadUrl, threadId, port.now());
       const latestUser = requireData(await port.readLatestUser(), "POLL_METADATA");
       const observedUserSha256 = sha256Text(normalizePrompt(latestUser.data.text));
-      const expectedUserSha256 = archivedSubmission?.userTurnSha256 ?? sha256Text(normalizePrompt(prepared!.prompt));
-      if (observedUserSha256 !== expectedUserSha256) {
+      const visiblePromptProven = archivedSubmission?.userTurnSha256 !== undefined
+        ? observedUserSha256 === archivedSubmission.userTurnSha256
+        : visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared!.prompt);
+      if (!visiblePromptProven) {
         throw new ReviewPreparationError(
           "The latest visible user turn is not the archived submitted review prompt. Resume refused to capture a later or ambiguous response.",
           "resume_user_turn_mismatch"
         );
       }
-      if (archivedSubmission?.state === "intent" && archiveDirectory !== undefined) {
+      if (archivedSubmission !== undefined && archivedSubmission.state !== "confirmed" && archiveDirectory !== undefined) {
         await writeImmutableJson(join(archiveDirectory, "submission-confirmation.json"), {
           schemaVersion: 2,
           state: "confirmed",
@@ -293,13 +296,26 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       await writeImmutableJson(join(archiveDirectory, "configuration.before.json"), configurationBefore);
     }
 
-    const appliedResult = requireData(await runStep("APPLY_PRO", () => port.applyPro()), "APPLY_PRO");
-    applied = appliedResult.data.after;
-    verifiedBeforeSubmit = appliedResult.data.verified && configurationMatchesSelection(appliedResult.data.after, { intelligence: "Pro" });
+    let appliedData: ApplyConfigurationData;
+    if (configurationMatchesSelection(configurationBefore.inspection, { intelligence: "Pro" })) {
+      const now = port.now().toISOString();
+      appliedData = {
+        requested: { intelligence: "Pro" },
+        selected: [],
+        before: configurationBefore.inspection,
+        after: configurationBefore.inspection,
+        verified: true
+      };
+      steps.push({ state: "APPLY_PRO", startedAt: now, endedAt: now, ok: true, status: "already_verified", data: appliedData });
+    } else {
+      appliedData = requireData(await runStep("APPLY_PRO", () => port.applyPro()), "APPLY_PRO").data;
+    }
+    applied = appliedData.after;
+    verifiedBeforeSubmit = appliedData.verified && configurationMatchesSelection(appliedData.after, { intelligence: "Pro" });
     if (!verifiedBeforeSubmit) throw workflowBlocker("model_fallback", "pro_precondition_unverified", "The visible Chat setting did not strictly verify Pro before submission.", "VERIFY_PRO_BEFORE_SUBMIT");
     await runStep("VERIFY_PRO_BEFORE_SUBMIT", async () => {
       await assertPageSafe(port, "VERIFY_PRO_BEFORE_SUBMIT");
-      return { verified: true, active: appliedResult.data.after.active };
+      return { verified: true, active: appliedData.after.active };
     });
 
     if (artifactBaseline === undefined) {
@@ -346,7 +362,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       const latestUser = await port.readLatestUser().catch(() => undefined);
       const latestUserText = latestUser?.ok === true ? latestUser.data?.text : undefined;
       const exactUserTurn = latestUserText !== undefined
-        && sha256Text(normalizePrompt(latestUserText)) === sha256Text(normalizePrompt(prepared!.prompt));
+        && visibleUserTurnContainsExactPrompt(latestUserText, prepared!.prompt);
       const pageAdvanced = afterMessage?.ok === true && (
         (beforeMessage.data.turnCount !== undefined
           && afterMessage.data?.turnCount !== undefined
@@ -537,7 +553,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       warnings.push(error instanceof Error ? error.message : String(error));
     }
   } finally {
-    if (terminalStatus !== "in_progress" && configurationBefore !== undefined && (args.safeguards?.restorePreviousConfiguration ?? true)) {
+    if (terminalStatus !== "in_progress" && configurationBefore !== undefined && args.safeguards?.restorePreviousConfiguration === true) {
       try {
         const restore = await runStep("RESTORE_PREVIOUS_CONFIGURATION", () => port.restoreConfiguration(configurationBefore!));
         restored = restore.data?.restored === true;
@@ -792,7 +808,7 @@ type ArchivedSubmission = {
   submitted: boolean;
   resubmitAllowed: false;
   schemaVersion?: 1 | 2;
-  state: "confirmed" | "intent";
+  state: "confirmed" | "intent" | "ambiguous";
   promptSha256?: string;
   userTurnSha256?: string;
   baselineTurnCount?: number;
@@ -819,8 +835,8 @@ async function readArchivedSubmission(archiveDirectory: string, expectedPromptSh
   }
   const state = intentOnly ? "intent" : (value.state ?? "confirmed");
   if (value.resubmitAllowed !== false
-    || (state === "confirmed" && value.submitted !== true)
-    || (state !== "confirmed" && state !== "intent")) {
+    || ((state === "confirmed" || state === "ambiguous") && value.submitted !== true)
+    || (state !== "confirmed" && state !== "intent" && state !== "ambiguous")) {
     throw new ReviewPreparationError("The archived submission receipt does not prove a submit-once, non-resubmittable review.", "resume_submission_unverified");
   }
   if (value.promptSha256 !== undefined && value.promptSha256 !== expectedPromptSha256) {
@@ -832,7 +848,7 @@ async function readArchivedSubmission(archiveDirectory: string, expectedPromptSh
   if (value.artifactBaseline === undefined || !Array.isArray(value.artifactBaseline.items)) {
     throw new ReviewPreparationError("The archived submission receipt has no valid artifact baseline.", "resume_artifact_baseline_invalid");
   }
-  return { ...value, state, submitted: state === "confirmed" } as ArchivedSubmission;
+  return { ...value, state, submitted: state !== "intent" } as ArchivedSubmission;
 }
 
 async function readOptionalJson(path: string): Promise<Record<string, unknown> | undefined> {
@@ -860,7 +876,7 @@ function isProvisionalConversationId(value: string | undefined): boolean {
 
 function recoveryQueryFromPrepared(prepared: PreparedReviewContext): string {
   const firstLine = prepared.prompt.split(/\r?\n/, 1)[0]?.trim();
-  if (firstLine?.startsWith("Codex Pro review - ") === true) return firstLine;
+  if (firstLine?.startsWith("Codex Pro request - ") === true || firstLine?.startsWith("Codex Pro review - ") === true) return firstLine;
   const legacyCanary = prepared.prompt.match(/CANARY_OK:[a-z0-9]+/i)?.[0];
   return legacyCanary ?? prepared.manifest.headSha?.slice(0, 12) ?? prepared.manifest.headRef;
 }
@@ -954,6 +970,12 @@ async function recoverReviewThread(env: RuntimeEnv, query: string, expectedPromp
 
 function normalizePrompt(value: string): string {
   return value.replace(/\r\n/g, "\n").trim();
+}
+
+function visibleUserTurnContainsExactPrompt(actual: string, expected: string): boolean {
+  const normalizedActual = normalizePrompt(actual);
+  const normalizedExpected = normalizePrompt(expected);
+  return normalizedActual === normalizedExpected || normalizedActual.includes(normalizedExpected);
 }
 
 function promptMatches(actual: string, expected: string, query: string): boolean {
