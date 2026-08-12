@@ -14983,7 +14983,7 @@ async function runCodeReviewWithPort(args, port) {
       const current = requireData(await port.messageStatus(), "POLL_METADATA");
       baselineAssistantCount = archivedSubmission?.baselineAssistantCount ?? Math.max(0, current.data.assistantTurnCount - (current.data.assistantTurnCount > 0 ? 1 : 0));
     }
-    const callTimeoutMs = positive(args.polling?.callTimeoutMs, 45e3);
+    const callTimeoutMs = positive(args.polling?.callTimeoutMs, 2e4);
     const totalTimeoutMs = positive(args.polling?.totalTimeoutMs, 18e5);
     const stableMs = positive(args.polling?.stableMs, 3e3);
     const pollMs = positive(args.polling?.pollMs, 1e3);

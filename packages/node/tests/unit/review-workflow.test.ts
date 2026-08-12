@@ -287,7 +287,11 @@ describe("Pro review state machine", () => {
         archiveDirectory: first.archiveDirectory!
       }
     }, makePort(resumeCalls, {
-      readLatestUser: async () => success({ role: "user", text: archivedPrompt, format: "normalized_text" })
+      readLatestUser: async () => success({ role: "user", text: archivedPrompt, format: "normalized_text" }),
+      waitMetadata: async (_baselineAssistantCount, timeoutMs) => {
+        expect(timeoutMs).toBe(20_000);
+        return success({ complete: true, assistantTurnCount: 1, elapsedMs: 5, responseContent: "metadata" });
+      }
     }));
 
     expect(resumed.status).toBe("completed");

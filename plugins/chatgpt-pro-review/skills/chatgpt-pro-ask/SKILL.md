@@ -59,7 +59,20 @@ When repository material is useful, use the sibling `chatgpt-pro-code-review` sk
 
 ## Resume without duplication
 
-If the result is `in_progress`, or an attempted submission was durably recorded but completion was not captured, call `reviews.askPro({ resume: { archiveDirectory: result.archiveDirectory } })`. Never reattach files or resend the prompt. The archive's immutable receipt, original context, and thread checkpoint are authoritative. Keep each browser-host call longer than `callTimeoutMs` (30 seconds is sufficient for the 20-second example) and continue bounded resume calls until completion or a structured blocker; Pro answers can take minutes.
+If the result is `in_progress`, or an attempted submission was durably recorded but completion was not captured, resume it with:
+
+```js
+const resumed = await chatgpt.reviews.askPro({
+  resume: { archiveDirectory: result.archiveDirectory },
+  polling: {
+    callTimeoutMs: 20000,
+    totalTimeoutMs: 1800000,
+    maxPollCallsPerInvocation: 1
+  }
+});
+```
+
+Never reattach files or resend the prompt. The archive's immutable receipt, original context, and thread checkpoint are authoritative. Keep each browser-host call longer than `callTimeoutMs` (30 seconds is sufficient for the 20-second example) and continue bounded resume calls until completion or a structured blocker; Pro answers can take minutes.
 
 ## Stop and replace an obsolete request
 

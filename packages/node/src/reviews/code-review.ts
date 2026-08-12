@@ -430,7 +430,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         ?? Math.max(0, current.data.assistantTurnCount - (current.data.assistantTurnCount > 0 ? 1 : 0));
     }
 
-    const callTimeoutMs = positive(args.polling?.callTimeoutMs, 45_000);
+    const callTimeoutMs = positive(args.polling?.callTimeoutMs, 20_000);
     const totalTimeoutMs = positive(args.polling?.totalTimeoutMs, 1_800_000);
     const stableMs = positive(args.polling?.stableMs, 3_000);
     const pollMs = positive(args.polling?.pollMs, 1_000);

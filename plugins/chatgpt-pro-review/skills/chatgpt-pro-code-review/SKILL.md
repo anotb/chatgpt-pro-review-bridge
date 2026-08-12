@@ -83,6 +83,11 @@ const resumed = await chatgpt.reviews.codeReview({
   headRef: "HEAD",
   resume: {
     archiveDirectory: review.archiveDirectory
+  },
+  polling: {
+    callTimeoutMs: 20000,
+    totalTimeoutMs: 1800000,
+    maxPollCallsPerInvocation: 1
   }
 });
 ```
