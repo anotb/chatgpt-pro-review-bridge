@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-beta.5
+
+- Documents the distinction between one bounded poll invocation and the
+  unbounded same-archive resume loop used for long Pro work.
+
 ## 0.6.0-beta.4
 
 - Uses a 20-second default metadata wait so a bounded browser host can return

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-beta.5
+
+- Clarifies that bounded calls may resume the same Pro request for more than an
+  hour; the per-invocation timeout is not a total job deadline.
+
 ## 0.6.0-beta.4
 
 - Makes the host-safe 20-second poll budget the runtime default as well as the

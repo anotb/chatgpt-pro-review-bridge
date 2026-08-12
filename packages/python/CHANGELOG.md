@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0b5
+
+- Aligns the Python parity package with the long-running resume documentation.
+
 ## 0.6.0b4
 
 - Aligns the Python parity package with the host-safe default polling release.
