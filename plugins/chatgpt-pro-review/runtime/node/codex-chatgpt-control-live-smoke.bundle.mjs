@@ -14660,8 +14660,8 @@ async function runCodeReviewWithPort(args, port) {
   let restored = false;
   let restorationVerified = false;
   let submitted = false;
-  let threadUrl = args.resume?.threadUrl;
-  let threadId = args.resume?.conversationId;
+  let threadUrl = args.resume?.threadUrl ?? args.thread?.url;
+  let threadId = args.resume?.conversationId ?? args.thread?.id;
   let responseMarkdown;
   let responseSha256;
   let blocker;
@@ -14706,6 +14706,7 @@ async function runCodeReviewWithPort(args, port) {
     }
   };
   try {
+    validateRequestedThread(args);
     if (args.resume === void 0) {
       prepared = await runStep("PREPARE_CONTEXT", () => prepareReviewContext(args, port.now()));
       archiveDirectory = prepared.archiveDirectory;
@@ -14743,14 +14744,17 @@ async function runCodeReviewWithPort(args, port) {
       recoveryQuery = checkpoint?.recoveryQuery ?? recoveryQueryFromPrepared(prepared);
       submitted = true;
     }
-    const bootstrapTarget = args.resume === void 0 || isProvisionalConversationId(threadId) ? void 0 : {
+    const bootstrapTarget = args.resume === void 0 && args.thread === void 0 || isProvisionalConversationId(threadId) ? void 0 : {
       ...threadUrl === void 0 ? {} : { url: threadUrl },
       ...threadId === void 0 ? {} : { conversationId: threadId }
     };
     requireOk(await runStep("PREFLIGHT_BROWSER", () => port.bootstrap(bootstrapTarget)), "PREFLIGHT_BROWSER");
     requireOk(await runStep("OPEN_CHAT", () => port.openChat()), "OPEN_CHAT");
     if (args.resume === void 0) {
-      const opened = requireData(await runStep("OPEN_CHAT", () => port.newThread()), "OPEN_CHAT");
+      const opened = requireData(await runStep("OPEN_CHAT", () => args.thread === void 0 ? port.newThread() : port.openThread({
+        ...threadUrl === void 0 ? {} : { url: threadUrl },
+        ...threadId === void 0 ? {} : { conversationId: threadId }
+      })), "OPEN_CHAT");
       threadUrl = opened.data.url || opened.context.url;
       threadId = opened.data.conversationId ?? opened.context.conversationId;
     } else {
@@ -15557,6 +15561,23 @@ function sameResolvedPath(left, right) {
 }
 function isRecord6(value) {
   return typeof value === "object" && value !== null;
+}
+function validateRequestedThread(args) {
+  if (args.resume !== void 0 && args.thread !== void 0) {
+    throw new ReviewPreparationError("thread and resume cannot be used together.", "thread_resume_conflict");
+  }
+  if (args.thread === void 0) return;
+  const urlId = conversationIdFromUrl(args.thread.url);
+  if (args.thread.url === void 0 && args.thread.id === void 0) {
+    throw new ReviewPreparationError("thread requires a canonical Chat conversation URL or id.", "thread_target_missing");
+  }
+  if (args.thread.id !== void 0 && urlId !== void 0 && args.thread.id !== urlId) {
+    throw new ReviewPreparationError("thread.url and thread.id refer to different Chat conversations.", "thread_target_mismatch");
+  }
+  const requestedId = args.thread.id ?? urlId;
+  if (requestedId === void 0 || isProvisionalConversationId(requestedId)) {
+    throw new ReviewPreparationError("thread requires a canonical Chat conversation target.", "thread_target_provisional");
+  }
 }
 var REVIEW_LEASE_MAX_AGE_MS = 5 * 6e4;
 async function acquireReviewLease(archiveDirectory) {

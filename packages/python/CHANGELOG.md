@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0b7
+
+- Aligns the Python parity package with existing-thread AskPro follow-ups in the
+  shared backend.
+
 ## 0.6.0b6
 
 - Aligns the Python parity package with visible-history recovery, resilient

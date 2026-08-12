@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-beta.7
+
+- Adds submit-once AskPro follow-ups in an existing canonical visible Chat
+  thread, with a separate resumable archive for each follow-up.
+
 ## 0.6.0-beta.6
 
 - Recovers provisional submissions from prompt-identical conversations in the

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-beta.7
+
+- Adds `thread` targeting for new AskPro questions so follow-ups retain strict
+  Pro verification, exactly-once submission, and bounded resume behavior.
+
 ## 0.6.0-beta.6
 
 - Adds visible-history recovery for provisional Chat conversation IDs.
