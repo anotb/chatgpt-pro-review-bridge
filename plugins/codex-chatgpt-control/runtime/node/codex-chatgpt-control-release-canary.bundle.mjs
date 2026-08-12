@@ -15009,7 +15009,8 @@ async function runCodeReviewWithPort(args, port) {
       threadId = opened.data.conversationId ?? opened.context.conversationId;
     } else {
       const unconfirmedNeedsRecovery = archivedSubmission !== void 0 && archivedSubmission.state !== "confirmed" && (threadId === void 0 || isProvisionalConversationId(threadId));
-      let openResult = unconfirmedNeedsRecovery ? await runStep("RECOVER_THREAD", () => port.recoverThread(recoveryQuery, prepared.prompt)) : await runStep("OPEN_CHAT", () => port.openThread({
+      const visibleRecovery = unconfirmedNeedsRecovery ? await recoverCurrentVisibleThread(port, prepared.prompt) : void 0;
+      let openResult = unconfirmedNeedsRecovery ? await runStep("RECOVER_THREAD", () => visibleRecovery === void 0 ? port.recoverThread(recoveryQuery, prepared.prompt) : Promise.resolve(visibleRecovery)) : await runStep("OPEN_CHAT", () => port.openThread({
         ...threadId === void 0 ? {} : { conversationId: threadId },
         ...threadUrl === void 0 ? {} : { url: threadUrl }
       }));
@@ -15594,6 +15595,29 @@ function conversationIdFromUrl(url) {
 }
 function isProvisionalConversationId(value) {
   return value?.startsWith("WEB:") === true;
+}
+async function recoverCurrentVisibleThread(port, expectedPrompt) {
+  const page = await port.pageState().catch(() => void 0);
+  const conversationId = page?.conversationId ?? conversationIdFromUrl(page?.url);
+  if (page === void 0 || conversationId === void 0 || isProvisionalConversationId(conversationId)) return void 0;
+  const latestUser = await port.readLatestUser().catch(() => void 0);
+  if (latestUser?.ok !== true || !visibleUserTurnContainsExactPrompt(latestUser.data?.text ?? "", expectedPrompt)) return void 0;
+  return {
+    ok: true,
+    status: "ok",
+    data: {
+      url: page.url,
+      conversationId,
+      ...page.title === void 0 ? {} : { title: page.title }
+    },
+    warnings: ["Recovered the archived review from the already-visible prompt-identical Chat conversation."],
+    context: {
+      timestamp: port.now().toISOString(),
+      url: page.url,
+      conversationId,
+      ...page.title === void 0 ? {} : { title: page.title }
+    }
+  };
 }
 function recoveryQueryFromPrepared(prepared) {
   const firstLine = prepared.prompt.split(/\r?\n/, 1)[0]?.trim();
