@@ -10,10 +10,8 @@ This fork packages the visible-session browser controller from [adamallcock/code
 
 It supports two useful modes:
 
-- **AskPro:** send an ordinary question exactly as written, with no Git work and no file upload.
+- **AskPro:** send an ordinary question exactly as written.
 - **Pro code review:** build repository context, attach it visibly, and ask whatever review, design, explanation, brainstorming, or code question the current Codex task chooses.
-
-The plugin is unofficial and is not affiliated with or endorsed by OpenAI.
 
 ## What happens
 
@@ -26,7 +24,7 @@ For each request, the bridge:
 5. Returns the complete Markdown once, downloads every new visible artifact, and keeps a local recovery archive.
 6. Leaves Chat on Pro for the next request.
 
-If Pro cannot be verified, the session falls back, login or a permission is required, or the visible page becomes ambiguous, the workflow stops with a structured blocker. It does not silently continue under a different setting.
+Any failure to verify Pro—including fallback, login, permission, or ambiguous-page states—returns a structured blocker before the workflow continues.
 
 ## Install
 
@@ -43,9 +41,9 @@ Requirements:
 
 - Codex Desktop with its compatible visible Chrome/browser bridge.
 - A ChatGPT session signed in visibly on each computer.
-- Node.js 20 or newer only for source development; normal plugin users use the bundled runtime.
+- Node.js 20 or newer for source development. The installed plugin includes its runtime.
 
-No API key is required. Browser sign-in state, cookies, and profiles are never bundled or copied between computers.
+No API key is required.
 
 ### File-backed questions
 
@@ -53,8 +51,6 @@ Plain AskPro questions upload nothing. Repository reviews or other file-backed r
 
 1. In Codex: **Settings → Computer Use → Google Chrome → Permissions → Uploads**, allow `chatgpt.com` (or choose **Always allow**).
 2. In Chrome: `chrome://extensions` → Codex extension → **Details** → enable **Allow access to file URLs**.
-
-The plugin never changes those settings for you.
 
 ## Use it
 
@@ -78,7 +74,7 @@ For repository work:
 Use $chatgpt-pro-code-review to review this branch against main. Ask the question you think is most useful, then verify any material findings before changing code.
 ```
 
-The current Codex task controls the actual question. The skill does not force an audit checklist, findings schema, patch ban, or a particular depth.
+The current Codex task chooses the question, scope, depth, and desired output.
 
 ### From an agent
 
@@ -125,7 +121,7 @@ await chatgpt.reviews.askPro({
 
 The archived submission receipt is authoritative. Resume reopens the same visible conversation, proves the prompt identity, and polls without reattaching files or resending the question. An interrupted caller can resume later; a live concurrent owner is still rejected.
 
-If a running request has genuinely become obsolete, the current Codex session may explicitly stop that exact visible response and start a new request. The bridge never auto-stops merely because files changed.
+The current Codex session can explicitly stop an obsolete visible response and start a revised request.
 
 ## Output and local archive
 
@@ -139,18 +135,11 @@ By default the caller gets:
 
 Archives live under `.codex/pro-reviews/` by default and are gitignored in this repository. Context-free asks archive only the request/workflow evidence and result. Repository-backed asks also archive the packet manifest and packet files.
 
-Generated patches, scripts, and code remain suggestions. Codex decides what to inspect, test, and apply.
+Codex decides what to inspect, test, and apply; generated code is never applied automatically.
 
 ## Visible-session boundary
 
-This project controls the visible ChatGPT web product through approved browser actions. It does not:
-
-- call hidden ChatGPT endpoints;
-- extract credentials, cookies, tokens, or browser storage;
-- bypass login, CAPTCHA, confirmations, or file permissions;
-- scrape private history in the background;
-- silently truncate a completed answer;
-- automatically execute generated patches.
+This project uses approved browser actions in the visible ChatGPT web product. It does not access hidden ChatGPT endpoints or credentials, bypass login or permissions, inspect unrelated history, or truncate completed answers.
 
 See [privacy](docs/plugin-review-privacy.md), [terms](docs/plugin-review-terms.md), and the detailed [bridge guide](docs/pro-review-bridge.md).
 
