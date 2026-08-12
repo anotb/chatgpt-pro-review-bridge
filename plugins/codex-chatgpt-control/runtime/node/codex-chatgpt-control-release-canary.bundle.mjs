@@ -15340,8 +15340,22 @@ async function runCodeReviewWithPort(args, port) {
     await assertPageSafe(port, "VERIFY_PRO_AFTER_COMPLETION");
     verifiedAfterCompletion = after.data.verified && configurationMatchesSelection(after.data, { intelligence: "Pro" });
     if (!verifiedAfterCompletion) throw workflowBlocker("model_fallback", "pro_postcondition_unverified", "The visible Chat setting no longer strictly verifies Pro after completion; the response is archived but is not accepted as a verified Pro review.", "VERIFY_PRO_AFTER_COMPLETION");
-    const delta = requireData(await runStep("ENUMERATE_NEW_ARTIFACTS", () => port.artifactDelta(artifactBaseline)), "ENUMERATE_NEW_ARTIFACTS").data;
-    if ((args.output?.downloadArtifacts ?? "all") === "all" && archiveDirectory !== void 0) {
+    const finalizedArtifacts = archiveDirectory === void 0 ? void 0 : await readFinalizedArtifactManifest(archiveDirectory);
+    const delta = finalizedArtifacts === void 0 ? requireData(await runStep("ENUMERATE_NEW_ARTIFACTS", () => port.artifactDelta(artifactBaseline)), "ENUMERATE_NEW_ARTIFACTS").data : await runStep("ENUMERATE_NEW_ARTIFACTS", async () => ({
+      baseline: artifactBaseline,
+      current: artifactBaseline,
+      added: [],
+      finalizedArchive: true
+    }));
+    if (finalizedArtifacts !== void 0) {
+      artifacts.push(...finalizedArtifacts);
+      await runStep("DOWNLOAD_AND_HASH_ARTIFACTS", async () => ({
+        downloaded: 0,
+        reused: finalizedArtifacts.length,
+        total: finalizedArtifacts.length,
+        finalizedArchive: true
+      }));
+    } else if ((args.output?.downloadArtifacts ?? "all") === "all" && archiveDirectory !== void 0) {
       const artifactArchiveDirectory = archiveDirectory;
       await runStep("DOWNLOAD_AND_HASH_ARTIFACTS", async () => {
         const staging = await mkdtemp(join7(tmpdir(), "chatgpt-pro-review-artifacts-"));
@@ -15874,6 +15888,9 @@ async function readArtifactDownloadCheckpoint(archiveDirectory) {
   }
   const entries = Array.isArray(value) ? value : isRecord6(value) && value.schemaVersion === 1 && Array.isArray(value.artifacts) ? value.artifacts : void 0;
   if (entries === void 0) throw new Error("The archived artifact download checkpoint is invalid.");
+  return verifyArchivedArtifacts(artifactsDirectory, entries);
+}
+async function verifyArchivedArtifacts(artifactsDirectory, entries) {
   const verified = [];
   for (const entry of entries) {
     if (!isRecord6(entry) || typeof entry.name !== "string" || typeof entry.path !== "string" || typeof entry.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(entry.sha256) || entry.inventoryKey !== void 0 && typeof entry.inventoryKey !== "string") {
@@ -15908,6 +15925,19 @@ function sameResolvedPath(left, right) {
 }
 function isRecord6(value) {
   return typeof value === "object" && value !== null;
+}
+async function readFinalizedArtifactManifest(archiveDirectory) {
+  const artifactsDirectory = resolve6(archiveDirectory, "artifacts");
+  const manifestPath = join7(artifactsDirectory, "manifest.json");
+  let value;
+  try {
+    value = JSON.parse(await readFile5(manifestPath, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return void 0;
+    throw error;
+  }
+  if (!Array.isArray(value)) throw new Error("The finalized artifact manifest is invalid.");
+  return verifyArchivedArtifacts(artifactsDirectory, value);
 }
 function validateRequestedThread(args) {
   if (args.resume !== void 0 && args.thread !== void 0) {

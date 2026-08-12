@@ -488,8 +488,26 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     verifiedAfterCompletion = after.data.verified && configurationMatchesSelection(after.data, { intelligence: "Pro" });
     if (!verifiedAfterCompletion) throw workflowBlocker("model_fallback", "pro_postcondition_unverified", "The visible Chat setting no longer strictly verifies Pro after completion; the response is archived but is not accepted as a verified Pro review.", "VERIFY_PRO_AFTER_COMPLETION");
 
-    const delta = requireData(await runStep("ENUMERATE_NEW_ARTIFACTS", () => port.artifactDelta(artifactBaseline!)), "ENUMERATE_NEW_ARTIFACTS").data;
-    if ((args.output?.downloadArtifacts ?? "all") === "all" && archiveDirectory !== undefined) {
+    const finalizedArtifacts = archiveDirectory === undefined
+      ? undefined
+      : await readFinalizedArtifactManifest(archiveDirectory);
+    const delta = finalizedArtifacts === undefined
+      ? requireData(await runStep("ENUMERATE_NEW_ARTIFACTS", () => port.artifactDelta(artifactBaseline!)), "ENUMERATE_NEW_ARTIFACTS").data
+      : await runStep("ENUMERATE_NEW_ARTIFACTS", async () => ({
+          baseline: artifactBaseline!,
+          current: artifactBaseline!,
+          added: [],
+          finalizedArchive: true
+        }));
+    if (finalizedArtifacts !== undefined) {
+      artifacts.push(...finalizedArtifacts);
+      await runStep("DOWNLOAD_AND_HASH_ARTIFACTS", async () => ({
+        downloaded: 0,
+        reused: finalizedArtifacts.length,
+        total: finalizedArtifacts.length,
+        finalizedArchive: true
+      }));
+    } else if ((args.output?.downloadArtifacts ?? "all") === "all" && archiveDirectory !== undefined) {
       const artifactArchiveDirectory = archiveDirectory;
       await runStep("DOWNLOAD_AND_HASH_ARTIFACTS", async () => {
         const staging = await mkdtemp(join(tmpdir(), "chatgpt-pro-review-artifacts-"));
@@ -1112,6 +1130,10 @@ async function readArtifactDownloadCheckpoint(archiveDirectory: string): Promise
       : undefined;
   if (entries === undefined) throw new Error("The archived artifact download checkpoint is invalid.");
 
+  return verifyArchivedArtifacts(artifactsDirectory, entries);
+}
+
+async function verifyArchivedArtifacts(artifactsDirectory: string, entries: unknown[]): Promise<ReviewArtifact[]> {
   const verified: ReviewArtifact[] = [];
   for (const entry of entries) {
     if (!isRecord(entry)
@@ -1166,6 +1188,20 @@ function sameResolvedPath(left: string, right: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+async function readFinalizedArtifactManifest(archiveDirectory: string): Promise<ReviewArtifact[] | undefined> {
+  const artifactsDirectory = resolve(archiveDirectory, "artifacts");
+  const manifestPath = join(artifactsDirectory, "manifest.json");
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(manifestPath, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (!Array.isArray(value)) throw new Error("The finalized artifact manifest is invalid.");
+  return verifyArchivedArtifacts(artifactsDirectory, value);
 }
 
 function validateRequestedThread(args: ProCodeReviewArgs): void {

@@ -250,11 +250,18 @@ describe("Pro review state machine", () => {
       resume: { archiveDirectory: first.archiveDirectory! }
     }, makePort(completedCalls, {
       readLatestUser: async () => success({ role: "user", text: archivedPrompt, format: "normalized_text" }),
-      artifactDelta: async () => success(delta)
+      artifactDelta: async () => success({
+        ...delta,
+        added: [
+          ...delta.added,
+          { key: "unrelated-key", kind: "file" as const, assistantIndex: 1, filename: "unrelated.csv", tag: "button" as const, occurrenceIndex: 0, downloadAvailable: true as const }
+        ]
+      })
     }));
 
     expect(resumedAgain.status).toBe("completed");
     expect(resumedAgain.artifacts.map(artifact => artifact.name)).toEqual(["first.csv", "second.csv"]);
+    expect(completedCalls).not.toContain("artifactDelta");
     expect(completedCalls).not.toContain("downloadFile");
   });
 
