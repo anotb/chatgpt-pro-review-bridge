@@ -14531,7 +14531,7 @@ async function runCodeReviewWithPort(args, port) {
       await writeImmutableJson(join6(archiveDirectory, "configuration.before.json"), configurationBefore);
     }
     let appliedData;
-    if (configurationMatchesSelection(configurationBefore.inspection, { intelligence: "Pro" })) {
+    if (configurationBefore.inspection.verified && configurationMatchesSelection(configurationBefore.inspection, { intelligence: "Pro" })) {
       const now = port.now().toISOString();
       appliedData = {
         requested: { intelligence: "Pro" },
@@ -15148,10 +15148,20 @@ function normalizePrompt(value) {
 function visibleUserTurnContainsExactPrompt(actual, expected) {
   const normalizedActual = normalizeVisiblePrompt(actual);
   const normalizedExpected = normalizeVisiblePrompt(expected);
-  return normalizedActual === normalizedExpected || normalizedActual.includes(normalizedExpected);
+  if (normalizedActual === normalizedExpected) return true;
+  const promptIndex = normalizedActual.indexOf(normalizedExpected);
+  if (promptIndex < 0 || normalizedActual.indexOf(normalizedExpected, promptIndex + normalizedExpected.length) >= 0) return false;
+  const prefix = normalizedActual.slice(0, promptIndex).trim();
+  const suffix = normalizedActual.slice(promptIndex + normalizedExpected.length).trim();
+  return isKnownAttachmentEnvelope(prefix) && (suffix === "" || suffix === "Show more");
 }
 function normalizeVisiblePrompt(value) {
   return normalizePrompt(value).replace(/\s+/g, " ");
+}
+function isKnownAttachmentEnvelope(prefix) {
+  if (prefix === "") return true;
+  const labels = prefix.split(/\s+File(?=\s|$)/).map((label) => label.trim()).filter(Boolean);
+  return labels.length > 0 && labels.every((label) => /^[^/\\\r\n]{1,240}\.[a-z0-9]{1,12}$/i.test(label));
 }
 function promptMatches(actual, expected, query) {
   if (actual === expected) return true;
