@@ -406,7 +406,7 @@ describe("Pro review state machine", () => {
       },
       readLatestUser: async () => success({
         role: "user",
-        text: `manifest.json\nFile\npacket-001.md\nFile\n${submittedPrompt}\nShow more`,
+        text: `manifest.json File packet-001.md File ${submittedPrompt.replace(/\s+/g, " ")} Show more`,
         format: "normalized_text"
       })
     }));

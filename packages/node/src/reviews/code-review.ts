@@ -1010,9 +1010,13 @@ function normalizePrompt(value: string): string {
 }
 
 function visibleUserTurnContainsExactPrompt(actual: string, expected: string): boolean {
-  const normalizedActual = normalizePrompt(actual);
-  const normalizedExpected = normalizePrompt(expected);
+  const normalizedActual = normalizeVisiblePrompt(actual);
+  const normalizedExpected = normalizeVisiblePrompt(expected);
   return normalizedActual === normalizedExpected || normalizedActual.includes(normalizedExpected);
+}
+
+function normalizeVisiblePrompt(value: string): string {
+  return normalizePrompt(value).replace(/\s+/g, " ");
 }
 
 function promptMatches(actual: string, expected: string, query: string): boolean {
