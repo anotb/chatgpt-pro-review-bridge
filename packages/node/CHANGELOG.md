@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-alpha.12
+
+- Compares prompt-identical visible user turns modulo whitespace layout so DOM
+  line-break flattening does not prevent safe same-thread resume.
+
 ## 0.6.0-alpha.11
 
 - Resumes a prompt-identical currently visible Chat conversation before history

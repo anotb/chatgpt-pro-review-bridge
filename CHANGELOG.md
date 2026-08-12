@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-alpha.12
+
+- Reconciles the exact archived prompt when ChatGPT's visible DOM flattens its
+  line breaks into spaces, without weakening content equality.
+
 ## 0.6.0-alpha.11
 
 - Claims an already-visible canonical conversation when its latest user turn
