@@ -1232,7 +1232,14 @@ async function removeLeaseIfOwnerExitedOrExpired(leasePath: string): Promise<boo
   try {
     value = JSON.parse(await readFile(leasePath, "utf8"));
   } catch {
-    return false;
+    try {
+      const leaseStat = await stat(leasePath);
+      if (Date.now() - leaseStat.mtimeMs < REVIEW_LEASE_MAX_AGE_MS) return false;
+      await rm(leasePath, { force: true });
+      return true;
+    } catch {
+      return false;
+    }
   }
   if (!isRecord(value) || value.schemaVersion !== 1 || !Number.isInteger(value.pid) || (value.pid as number) <= 0) return false;
   const acquiredAt = typeof value.acquiredAt === "string" ? Date.parse(value.acquiredAt) : Number.NaN;

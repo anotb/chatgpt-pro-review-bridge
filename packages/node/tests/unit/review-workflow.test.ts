@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -809,6 +809,30 @@ describe("Pro review state machine", () => {
     } finally {
       if (reusedOwner.exitCode === null) reusedOwner.kill();
     }
+  });
+
+  it("reclaims an old empty lease left by an interrupted writer", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([]));
+    const archiveDirectory = first.archiveDirectory!;
+    const prompt = await readFile(join(archiveDirectory, "prompt.md"), "utf8");
+    const leasePath = join(archiveDirectory, ".workflow.lock");
+    await writeFile(leasePath, "");
+    const staleTime = new Date(Date.now() - 10 * 60_000);
+    await utimes(leasePath, staleTime, staleTime);
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory }
+    }, makePort(calls, {
+      readLatestUser: async () => success({ role: "user", text: prompt, format: "normalized_text" })
+    }));
+
+    expect(resumed.status).toBe("completed");
+    expect(calls).toContain("bootstrap");
+    await expect(readFile(leasePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
 
