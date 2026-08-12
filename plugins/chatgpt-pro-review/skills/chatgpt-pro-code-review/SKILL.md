@@ -59,6 +59,11 @@ const review = await chatgpt.reviews.askPro({
     verifyTargetAfterCompletion: true,
     failOnFallback: true,
     restorePreviousConfiguration: false
+  },
+  polling: {
+    callTimeoutMs: 20000,
+    totalTimeoutMs: 1800000,
+    maxPollCallsPerInvocation: 1
   }
 });
 ```
@@ -82,7 +87,7 @@ const resumed = await chatgpt.reviews.codeReview({
 });
 ```
 
-Never submit the original prompt again after an attempted submission. The immutable submission receipt is authoritative: it restores and validates the canonical Chat conversation ID/URL, original packet manifest, artifact baseline, and configuration snapshot. Caller-supplied `conversationId` or `threadUrl` values are optional cross-checks and must match the receipt.
+Never submit the original prompt again after an attempted submission. The immutable submission receipt is authoritative: it restores and validates the canonical Chat conversation ID/URL, original packet manifest, artifact baseline, and configuration snapshot. Keep each browser-host call longer than `callTimeoutMs` (30 seconds is sufficient for the 20-second example). Caller-supplied `conversationId` or `threadUrl` values are optional cross-checks and must match the receipt.
 
 ## Return and verify
 

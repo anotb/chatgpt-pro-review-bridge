@@ -13834,6 +13834,7 @@ import { mkdtemp, open, readFile as readFile6, rename, rm as rm2, stat as stat8,
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join as join6, resolve as resolve6 } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 // src/reviews/archive.ts
 import { createHash as createHash5, randomBytes } from "node:crypto";
@@ -15580,7 +15581,7 @@ async function acquireReviewLease(archiveDirectory, now) {
       handle = await open(leasePath, "wx", 384);
       break;
     } catch (error) {
-      if (error.code === "EEXIST" && attempt === 0 && await removeLeaseIfOwnerExited(leasePath)) {
+      if (error.code === "EEXIST" && attempt === 0 && await waitForLeaseTurnover(leasePath)) {
         continue;
       }
       if (error.code === "EEXIST") {
@@ -15622,6 +15623,31 @@ async function removeLeaseIfOwnerExited(leasePath) {
   }
   await rm2(leasePath, { force: true });
   return true;
+}
+async function waitForLeaseTurnover(leasePath, timeoutMs = 3e3) {
+  let ownerPid;
+  try {
+    const value = JSON.parse(await readFile6(leasePath, "utf8"));
+    if (isRecord6(value) && value.schemaVersion === 1 && Number.isInteger(value.pid) && value.pid > 0) {
+      ownerPid = value.pid;
+    }
+  } catch {
+    return false;
+  }
+  if (ownerPid === process.pid) return false;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    if (await removeLeaseIfOwnerExited(leasePath)) return true;
+    try {
+      await stat8(leasePath);
+    } catch (error) {
+      if (error.code === "ENOENT") return true;
+      return false;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await delay(Math.min(100, remaining));
+  }
 }
 async function writeJsonReplacing(path3, value) {
   const temporary = `${path3}.next-${process.pid}-${randomUUID2()}`;

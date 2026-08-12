@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -711,14 +711,16 @@ describe("Pro review state machine", () => {
     await expect(readFile(join(archiveDirectory, ".workflow.lock"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("reclaims a dead process lease before resuming the same submitted thread", async () => {
+  it("waits for an exiting lease owner before resuming the same submitted thread", async () => {
     const repo = await fixtureRepository();
     const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([]));
     const archiveDirectory = first.archiveDirectory!;
     const prompt = await readFile(join(archiveDirectory, "prompt.md"), "utf8");
+    const owner = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 750)"], { stdio: "ignore" });
+    if (owner.pid === undefined) throw new Error("Unable to start the transitional lease-owner fixture.");
     await writeFile(join(archiveDirectory, ".workflow.lock"), JSON.stringify({
       schemaVersion: 1,
-      pid: 2_147_483_647,
+      pid: owner.pid,
       acquiredAt: "2026-08-11T12:00:00.000Z"
     }));
     const calls: string[] = [];
@@ -734,6 +736,7 @@ describe("Pro review state machine", () => {
     expect(resumed.status).toBe("completed");
     expect(calls).toContain("bootstrap");
     await expect(readFile(join(archiveDirectory, ".workflow.lock"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    if (owner.exitCode === null) owner.kill();
   });
 });
 

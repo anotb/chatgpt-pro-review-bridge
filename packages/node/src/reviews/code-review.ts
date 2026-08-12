@@ -2,6 +2,7 @@ import { mkdtemp, open, readFile, rename, rm, stat, writeFile } from "node:fs/pr
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { parseConversationId, readPageState, type PageState } from "../browser/page-state.js";
 import { captureArtifactBaseline, captureArtifactDelta } from "../commands/artifact-inventory.js";
@@ -1135,7 +1136,7 @@ async function acquireReviewLease(archiveDirectory: string, now: Date): Promise<
       handle = await open(leasePath, "wx", 0o600);
       break;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST" && attempt === 0 && await removeLeaseIfOwnerExited(leasePath)) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST" && attempt === 0 && await waitForLeaseTurnover(leasePath)) {
         continue;
       }
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
@@ -1177,6 +1178,37 @@ async function removeLeaseIfOwnerExited(leasePath: string): Promise<boolean> {
   }
   await rm(leasePath, { force: true });
   return true;
+}
+
+async function waitForLeaseTurnover(leasePath: string, timeoutMs = 3_000): Promise<boolean> {
+  let ownerPid: number | undefined;
+  try {
+    const value: unknown = JSON.parse(await readFile(leasePath, "utf8"));
+    if (isRecord(value) && value.schemaVersion === 1 && Number.isInteger(value.pid) && (value.pid as number) > 0) {
+      ownerPid = value.pid as number;
+    }
+  } catch {
+    return false;
+  }
+  // A concurrent call in this process is definitely live; preserve the fast
+  // fail-closed path. A different process may be the browser evaluator that is
+  // still exiting after its bounded host call timed out, so allow that brief
+  // turnover to finish before declaring the archive locked.
+  if (ownerPid === process.pid) return false;
+
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    if (await removeLeaseIfOwnerExited(leasePath)) return true;
+    try {
+      await stat(leasePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      return false;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await delay(Math.min(100, remaining));
+  }
 }
 
 async function writeJsonReplacing(path: string, value: unknown): Promise<void> {
