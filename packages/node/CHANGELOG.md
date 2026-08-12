@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0-alpha.6
+
+- Hardens visible uploads, origin checks, packet provenance and secret
+  exclusion, crash-safe exactly-once submission, archive-bound resume,
+  concurrent archive leases, artifact identity, blocker scoping, and terminal
+  provenance publication.
+
 ## 0.6.0-alpha.5
 
 - Prevents untracked local `.codex/` archives and task state from recursively

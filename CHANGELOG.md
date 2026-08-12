@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0-alpha.6
+
+- Fails closed around file transfer: no page-script byte injection, immediate
+  abort on explicit denial or bridge disconnect, composer-scoped attachment
+  evidence, and parsed ChatGPT-origin allowlisting.
+- Binds packet evidence to the requested Git commit, excludes secret/archive
+  paths from every evidence channel, rescans serialized packets, checks Git
+  failures, and enforces final byte budgets without silent truncation.
+- Adds durable pre-submit intent, exact visible-turn confirmation, crash
+  reconciliation without resubmission, immutable resume binding, archive
+  leases, strict configuration restoration evidence, and required terminal
+  provenance commits.
+- Stabilizes image artifact identity and download indexing, narrows blocker
+  detection to system UI, and requests private archive permissions.
+
 ## 0.6.0-alpha.5
 
 - Excludes untracked local `.codex/` state from review packet paths, source

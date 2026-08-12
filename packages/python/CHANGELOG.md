@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0a6
+
+- Picks up the hardened upload, packet, exactly-once resume, artifact, and
+  archive behavior from the bundled Node backend without changing Python APIs.
+
 ## 0.6.0a5
 
 - Picks up untracked local `.codex/` packet exclusion from the bundled Node
