@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0-alpha.14
+
+- Adds a context-free AskPro path that sends the caller's question exactly,
+  without Git preparation or uploads, while retaining durable same-thread resume.
+- Reclaims stale archive leases left by exited caller processes without weakening
+  the single-live-owner guarantee.
+
 ## 0.6.0-alpha.13
 
 - Requires verified configuration evidence before taking the already-Pro no-op

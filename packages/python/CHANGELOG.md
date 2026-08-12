@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0a14
+
+- Aligns the Python package with the context-free AskPro and stale-lease recovery
+  release implemented by the shared Node backend.
+
 ## 0.6.0a13
 
 - Aligns the Python package with the stricter Pro and prompt-ownership proof

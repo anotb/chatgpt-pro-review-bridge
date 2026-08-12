@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0-alpha.14
+
+- Supports repository-free Pro questions with exact prompt submission, no packet
+  attachment step, and the same durable completion/resume workflow.
+- Recovers an interrupted workflow when its recorded lease owner has exited.
+
 ## 0.6.0-alpha.13
 
 - Tightens strict Pro verification and prompt-to-response ownership proof after
