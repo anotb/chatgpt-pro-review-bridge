@@ -14713,17 +14713,18 @@ async function runCodeReviewWithPort(args, port) {
       recoveryQuery = checkpoint?.recoveryQuery ?? recoveryQueryFromPrepared(prepared);
       submitted = true;
     }
-    requireOk(await runStep("PREFLIGHT_BROWSER", () => port.bootstrap(args.resume === void 0 ? void 0 : {
+    const bootstrapTarget = args.resume === void 0 || isProvisionalConversationId(threadId) ? void 0 : {
       ...threadUrl === void 0 ? {} : { url: threadUrl },
       ...threadId === void 0 ? {} : { conversationId: threadId }
-    })), "PREFLIGHT_BROWSER");
+    };
+    requireOk(await runStep("PREFLIGHT_BROWSER", () => port.bootstrap(bootstrapTarget)), "PREFLIGHT_BROWSER");
     requireOk(await runStep("OPEN_CHAT", () => port.openChat()), "OPEN_CHAT");
     if (args.resume === void 0) {
       const opened = requireData(await runStep("OPEN_CHAT", () => port.newThread()), "OPEN_CHAT");
       threadUrl = opened.data.url || opened.context.url;
       threadId = opened.data.conversationId ?? opened.context.conversationId;
     } else {
-      const unconfirmedNeedsRecovery = archivedSubmission !== void 0 && archivedSubmission.state !== "confirmed" && (threadId === void 0 || isProvisionalConversationId(threadId)) && conversationIdFromUrl(threadUrl) === void 0;
+      const unconfirmedNeedsRecovery = archivedSubmission !== void 0 && archivedSubmission.state !== "confirmed" && (threadId === void 0 || isProvisionalConversationId(threadId));
       let openResult = unconfirmedNeedsRecovery ? await runStep("RECOVER_THREAD", () => port.recoverThread(recoveryQuery, prepared.prompt)) : await runStep("OPEN_CHAT", () => port.openThread({
         ...threadId === void 0 ? {} : { conversationId: threadId },
         ...threadUrl === void 0 ? {} : { url: threadUrl }
