@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Adds first-class full-repository packet scope, including repositories with no
+  commits yet, without requiring callers to manufacture an empty commit.
+- Infers full-repository scope when `repositoryRoot` is supplied without a
+  `baseRef`, while preserving base/head merge-base behavior for change reviews.
+- Makes cross-invocation polling cadence explicit for calling agents and
+  delegated subagents: 30s, 60s, 2m, 4m, then no more than once every 5m.
+
 ## 0.7.1
 
 - Reuses a completed review's finalized artifact manifest on resume instead of

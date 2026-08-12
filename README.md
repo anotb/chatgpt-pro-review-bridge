@@ -46,6 +46,8 @@ Ask naturally from any Codex task:
 
 > Ask Pro to review this branch against main and focus on anything we may have missed.
 
+> Ask Pro for a full repository review, including the current working tree—even if this repo has no commits yet.
+
 > Ask Pro to explain why this test is flaky.
 
 > Follow up in the same Pro chat and ask for a simpler approach.

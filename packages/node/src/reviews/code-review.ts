@@ -621,6 +621,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     ?? (args.context?.mode === "none" || (args.repositoryRoot === undefined && args.baseRef === undefined) ? "none" : "review-packets");
   const provenance: ProCodeReviewResult["provenance"] = { contextMode };
   if (contextMode === "review-packets") {
+    provenance.reviewScope = prepared?.manifest.reviewScope ?? args.context?.scope ?? (args.baseRef === undefined ? "repository" : "changes");
     const repositoryRoot = prepared?.manifest.repositoryRoot ?? args.repositoryRoot;
     const baseRef = prepared?.manifest.baseRef ?? args.baseRef;
     const headRef = prepared?.manifest.headRef ?? args.headRef ?? "HEAD";

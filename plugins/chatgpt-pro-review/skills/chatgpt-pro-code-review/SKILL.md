@@ -10,7 +10,7 @@ Use the bundled first-class workflow. Keep Codex responsible for repository evid
 ## Before invoking
 
 - Read [review-contract.md](references/review-contract.md) and [packet-policy.md](references/packet-policy.md).
-- Infer base/head only when repository state makes them unambiguous; otherwise ask.
+- For a change review, infer base/head only when repository state makes them unambiguous; otherwise ask. For a full-repository review, use repository scope and omit `baseRef`; never manufacture an empty commit or pass Git's empty-tree hash as a commit reference.
 - Do not attach unexpectedly sensitive material without the caller's approval. Conventional credential and browser-profile paths are excluded from repository packets.
 - Use the installed `browser:control-in-app-browser` skill to initialize the compatible visible browser runtime when `globalThis.agent` is absent. Do not inspect cookies, storage, tokens, or private endpoints.
 - Before the first file-backed review on each computer, tell the user to sign into ChatGPT visibly and enable both upload gates: Codex Settings > Computer Use > Google Chrome > Permissions > Uploads must allow `chatgpt.com` (or be set to Always allow), and Chrome `chrome://extensions` > Codex extension > Details must enable Allow access to file URLs. Never change these settings on the user's behalf. The workflow must fail closed before submission when either gate is missing.
@@ -38,6 +38,7 @@ const review = await chatgpt.reviews.askPro({
   target: { experience: "chat", intelligence: "Pro", strict: true },
   context: {
     mode: "review-packets",
+    scope: "changes",
     includeWorkingTree: true,
     includeInstructions: false,
     includeChangedFiles: true,
@@ -70,6 +71,26 @@ const review = await chatgpt.reviews.askPro({
 
 Pass the user's actual question faithfully. Use `focus` when the caller or session agent wants named areas of emphasis. `reviews.codeReview(...)` remains a compatibility alias for `reviews.askPro(...)`.
 
+For a full-repository review—including a Git repository with no commits yet—omit `baseRef` and select repository scope:
+
+```js
+const review = await chatgpt.reviews.askPro({
+  repositoryRoot: "/absolute/repository/root",
+  request: {
+    additionalInstructions: "<faithful caller-defined full-repository question or task>"
+  },
+  context: {
+    mode: "review-packets",
+    scope: "repository",
+    includeWorkingTree: true,
+    onBudgetExceeded: "partition"
+  },
+  // Use the same target, output, safeguards, and polling options as above.
+});
+```
+
+`repositoryRoot` without `baseRef` also defaults to repository scope. Set `scope: "repository"` explicitly in skill-driven calls so the archived intent is obvious. An unborn repository requires `includeWorkingTree: true`; committed full-repository reviews may set it to false for a commit-only snapshot.
+
 Do not branch on the selected Codex host model. Do not replace this call with a model-written repository summary.
 
 ## Resume without duplication
@@ -93,6 +114,8 @@ const resumed = await chatgpt.reviews.codeReview({
 ```
 
 Never submit the original prompt again after an attempted submission. The immutable submission receipt is authoritative: it restores and validates the canonical Chat conversation ID/URL, original packet manifest, artifact baseline, and configuration snapshot. Keep each browser-host call longer than `callTimeoutMs` (30 seconds is sufficient for the 20-second example). Pro can take minutes or more than an hour; `totalTimeoutMs` limits one invocation, not the repeated same-archive resume loop. Caller-supplied `conversationId` or `threadUrl` values are optional cross-checks and must match the receipt.
+
+Back off between separate resume invocations for the same archive. The calling agent—including any delegated subagent—owns this cadence: wait 30 seconds after the first `in_progress` result, then 60 seconds, 2 minutes, and 4 minutes; after that, poll no more often than every 5 minutes. Count only consecutive `in_progress` results for that archive and reset when it completes or reaches a blocker. Use the host's wait or wake-up mechanism between calls. Do not immediately recurse, busy-poll, or keep one browser-host call open during the delay. `pollMs` only samples visible DOM stability inside one bounded call; it is not the cross-invocation cadence.
 
 ## Return and verify
 

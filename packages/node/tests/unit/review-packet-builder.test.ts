@@ -35,6 +35,89 @@ describe("deterministic review packet builder", () => {
     });
   });
 
+  it("reviews a complete committed repository without a synthetic base commit", async () => {
+    const repo = await fixtureRepository();
+
+    const prepared = await prepareReviewContext({
+      repositoryRoot: repo,
+      context: { includeWorkingTree: false }
+    }, new Date("2026-08-11T12:00:00.000Z"));
+    const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
+
+    expect(prepared.manifest.reviewScope).toBe("repository");
+    expect(prepared.manifest.baseRef).toBeUndefined();
+    expect(prepared.manifest.baseSha).toBeUndefined();
+    expect(prepared.manifest.mergeBaseSha).toBeUndefined();
+    expect(prepared.manifest.headSha).toMatch(/^[a-f0-9]{40}$/);
+    expect(prepared.manifest.files).toContainEqual(expect.objectContaining({
+      path: "src/example.ts",
+      category: "repository-file",
+      status: "included"
+    }));
+    expect(packets).toContain("Review scope: repository");
+    expect(packets).toContain("Baseline: repository-format Git empty tree");
+    expect(packets).toContain("return 41");
+  });
+
+  it("derives the empty-tree baseline from the repository object format", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "chatgpt-pro-review-sha256-"));
+    await mkdir(join(repo, "src"), { recursive: true });
+    try {
+      git(repo, "init", "--object-format=sha256", "-b", "main");
+    } catch {
+      return;
+    }
+    git(repo, "config", "user.name", "Packet Test");
+    git(repo, "config", "user.email", "packet-test@example.invalid");
+    await writeFile(join(repo, "src", "example.ts"), "export const format = 'sha256';\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "base");
+
+    const prepared = await prepareReviewContext({
+      repositoryRoot: repo,
+      context: { scope: "repository", includeWorkingTree: false }
+    });
+    const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
+
+    expect(prepared.manifest.headSha).toMatch(/^[a-f0-9]{64}$/);
+    expect(packets).toMatch(/Baseline: repository-format Git empty tree \([a-f0-9]{64}\)/);
+    expect(packets).toContain("format = 'sha256'");
+  });
+
+  it("reviews an unborn repository directly from its index and working tree", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "chatgpt-pro-review-unborn-"));
+    await mkdir(join(repo, "src"), { recursive: true });
+    await writeFile(join(repo, "src", "staged.ts"), "export const staged = true;\n");
+    await writeFile(join(repo, "README.md"), "# New repository\n");
+    git(repo, "init", "-b", "main");
+    git(repo, "add", "src/staged.ts");
+
+    const prepared = await prepareReviewContext({
+      repositoryRoot: repo,
+      context: { scope: "repository", includeWorkingTree: true }
+    }, new Date("2026-08-11T12:00:00.000Z"));
+    const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
+
+    expect(prepared.manifest.reviewScope).toBe("repository");
+    expect(prepared.manifest.headSha).toBeUndefined();
+    expect(prepared.manifest.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "README.md", status: "included" }),
+      expect.objectContaining({ path: "src/staged.ts", status: "included" })
+    ]));
+    expect(packets).toContain("unborn; no commits yet");
+    expect(packets).toContain("export const staged = true");
+    expect(packets).toContain("# New repository");
+  });
+
+  it("requires a base only when change scope is requested", async () => {
+    const repo = await fixtureRepository();
+
+    await expect(prepareReviewContext({
+      repositoryRoot: repo,
+      context: { scope: "changes" }
+    })).rejects.toMatchObject({ code: "base_ref_required" });
+  });
+
   it("captures provenance, changed source, instructions, validation, partitions, and hashes", async () => {
     const repo = await fixtureRepository();
     await writeFile(join(repo, "AGENTS.md"), "# Repository rules\n");

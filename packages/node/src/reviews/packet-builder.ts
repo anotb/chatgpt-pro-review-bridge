@@ -8,7 +8,8 @@ import type {
   PacketFileRecord,
   PreparedReviewContext,
   ProCodeReviewArgs,
-  ReviewPacketManifest
+  ReviewPacketManifest,
+  ReviewScope
 } from "./types.js";
 
 const DEFAULT_PACKET_BYTES = 1_500_000;
@@ -65,21 +66,44 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
     );
   }
   if (usesContextFreeMode(args)) return prepareContextFreeQuestion(args, now);
-  if (args.repositoryRoot === undefined || args.baseRef === undefined) {
+  if (args.repositoryRoot === undefined) {
     throw new ReviewPreparationError(
-      "repositoryRoot and baseRef are both required when repository context is requested.",
+      "repositoryRoot is required when repository context is requested.",
       "repository_context_incomplete"
     );
   }
   const repositoryRoots = await resolveRepositoryRoots(args.repositoryRoot);
   const repositoryRoot = repositoryRoots.canonical;
-  const baseRef = requireNonEmpty(args.baseRef, "baseRef");
+  const reviewScope: ReviewScope = args.context?.scope ?? (args.baseRef === undefined ? "repository" : "changes");
+  if (reviewScope === "changes" && args.baseRef === undefined) {
+    throw new ReviewPreparationError(
+      "baseRef is required for a change review. Use context.scope = \"repository\" to review the complete repository.",
+      "base_ref_required"
+    );
+  }
+  const baseRef = reviewScope === "changes" ? requireNonEmpty(args.baseRef!, "baseRef") : undefined;
   const headRef = requireNonEmpty(args.headRef ?? "HEAD", "headRef");
-  const baseSha = await gitRequired(repositoryRoot, ["rev-parse", "--verify", `${baseRef}^{commit}`], "base_ref_unresolved");
-  const headSha = await gitRequired(repositoryRoot, ["rev-parse", "--verify", `${headRef}^{commit}`], "head_ref_unresolved");
-  const mergeBaseSha = await gitRequired(repositoryRoot, ["merge-base", baseSha, headSha], "merge_base_unresolved");
-  const checkedOutHeadSha = await gitRequired(repositoryRoot, ["rev-parse", "--verify", "HEAD^{commit}"], "checked_out_head_unresolved");
   const includeWorkingTree = args.context?.includeWorkingTree ?? true;
+  const checkedOutHeadSha = await gitCommit(repositoryRoot, "HEAD");
+  const headSha = await gitCommit(repositoryRoot, headRef);
+  const unbornHead = headSha === undefined && headRef === "HEAD" && checkedOutHeadSha === undefined;
+  if (headSha === undefined && !(reviewScope === "repository" && includeWorkingTree && unbornHead)) {
+    throw new ReviewPreparationError(
+      reviewScope === "repository" && !includeWorkingTree && unbornHead
+        ? "An unborn repository can only be reviewed with includeWorkingTree enabled."
+        : `Git commit reference could not be resolved: ${headRef}`,
+      reviewScope === "repository" && !includeWorkingTree && unbornHead ? "unborn_repository_worktree_required" : "head_ref_unresolved"
+    );
+  }
+  const baseSha = reviewScope === "changes"
+    ? await gitRequired(repositoryRoot, ["rev-parse", "--verify", `${baseRef}^{commit}`], "base_ref_unresolved")
+    : undefined;
+  const mergeBaseSha = reviewScope === "changes"
+    ? await gitRequired(repositoryRoot, ["merge-base", baseSha!, headSha!], "merge_base_unresolved")
+    : undefined;
+  const emptyTreeSha = reviewScope === "repository"
+    ? await gitRequired(repositoryRoot, ["hash-object", "-t", "tree", "--stdin"], "empty_tree_unresolved")
+    : undefined;
   if (includeWorkingTree && headSha !== checkedOutHeadSha) {
     throw new ReviewPreparationError(
       "Working-tree evidence can only overlay the checked-out HEAD. Set includeWorkingTree to false or check out the requested headRef.",
@@ -96,7 +120,10 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
     const branch = (await gitChecked(repositoryRoot, ["branch", "--show-current"], "git_branch_failed")).stdout.trim() || undefined;
     const packetStatus = filterPacketStatus(initialStatus.stdout, archivePathPrefix);
     const dirty = packetStatus.visible.trim().length > 0;
-    const changedAll = await changedFiles(repositoryRoot, mergeBaseSha, headSha, includeWorkingTree, archivePathPrefix);
+    const availableFiles = await snapshotFiles(repositoryRoot, headSha, includeWorkingTree, archivePathPrefix);
+    const changedAll = reviewScope === "repository"
+      ? availableFiles
+      : await changedFiles(repositoryRoot, mergeBaseSha!, headSha!, includeWorkingTree, archivePathPrefix);
     const excludedChanged = changedAll.filter(path => isPacketExcludedPath(path, archivePathPrefix));
     const changed = changedAll.filter(path => !isPacketExcludedPath(path, archivePathPrefix));
     const overlayPaths = includeWorkingTree
@@ -105,12 +132,12 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
     let validation = await validationOutput(args, repositoryRoot, repositoryRoots.lexical);
     const fileRecords: PacketFileRecord[] = packetStatus.excluded.map(item => ({
       path: item.path,
-      category: "changed-file",
+      category: reviewScope === "repository" ? "repository-file" : "changed-file",
       status: "excluded" as const,
       reason: item.reason
     })).concat(excludedChanged.map(path => ({
       path,
-      category: "changed-file",
+      category: reviewScope === "repository" ? "repository-file" : "changed-file",
       status: "excluded" as const,
       reason: excludedPathReason(path, archivePathPrefix)
     })));
@@ -118,7 +145,7 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
     const dependencies = new Map<string, Set<string>>();
     const maxSourceBytes = positiveInteger(args.context?.maxSourceFileBytes, DEFAULT_SOURCE_BYTES);
 
-    const candidates = await collectCandidateFiles(repositoryRoot, headSha, changed, args);
+    const candidates = collectCandidateFiles(availableFiles, changed, args, reviewScope);
     for (const candidate of candidates) {
       const normalized = normalizeRepoPath(candidate.path);
       if (SECRET_PATH_PATTERNS.some(pattern => pattern.test(normalized))) {
@@ -167,9 +194,10 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
       }
     }
 
-    const diff = await buildDiff(repositoryRoot, mergeBaseSha, headSha, includeWorkingTree, excludedChanged, archivePathPrefix);
+    const comparisonBaseSha = reviewScope === "repository" ? emptyTreeSha! : mergeBaseSha!;
+    const diff = await buildDiff(repositoryRoot, comparisonBaseSha, headSha, includeWorkingTree, excludedChanged, archivePathPrefix);
 
-    const nameStatus = await buildNameStatus(repositoryRoot, mergeBaseSha, headSha, includeWorkingTree, excludedChanged, archivePathPrefix);
+    const nameStatus = await buildNameStatus(repositoryRoot, comparisonBaseSha, headSha, includeWorkingTree, excludedChanged, archivePathPrefix);
     const callers = args.context?.includeRelevantCallers === true
       ? await callerEvidence(repositoryRoot, headSha, includeWorkingTree, dependencies, changed, archivePathPrefix)
       : "Caller/reference search not requested.";
@@ -180,9 +208,14 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
         files: [],
         body: [
           `Repository root: ${repositoryRoot}`,
-          `Base: ${baseRef} (${baseSha})`,
-          `Head: ${headRef} (${headSha})`,
-          `Merge base: ${mergeBaseSha}`,
+          `Review scope: ${reviewScope}`,
+          ...(reviewScope === "changes"
+            ? [`Base: ${baseRef} (${baseSha})`, `Head: ${headRef} (${headSha})`, `Merge base: ${mergeBaseSha}`]
+            : [
+                `Baseline: repository-format Git empty tree (${emptyTreeSha})`,
+                `Head: ${headRef} (${headSha ?? "unborn; no commits yet"})`,
+                "Merge base: not applicable to repository scope"
+              ]),
           `Branch: ${branch ?? "(detached or unavailable)"}`,
           `Working tree included: ${includeWorkingTree}`,
           `Working tree dirty: ${dirty}`,
@@ -195,8 +228,16 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
           `Excluded archive or sensitive paths: ${packetStatus.excluded.filter(item => item.reason !== "untracked_local_codex_state").length}`
         ].join("\n")
       },
-      { title: "Changed paths and rename evidence", files: changed, body: `\`\`\`text\n${nameStatus.trimEnd()}\n\`\`\`` },
-      { title: "Line-numbered unified diff", files: changed, body: `\`\`\`diff\n${diff.trimEnd()}\n\`\`\`` },
+      {
+        title: reviewScope === "repository" ? "Repository paths and status evidence" : "Changed paths and rename evidence",
+        files: changed,
+        body: `\`\`\`text\n${nameStatus.trimEnd()}\n\`\`\``
+      },
+      {
+        title: reviewScope === "repository" ? "Tracked repository diff from the empty tree" : "Line-numbered unified diff",
+        files: changed,
+        body: `\`\`\`diff\n${diff.trimEnd()}\n\`\`\``
+      },
       { title: "Deterministic caller/reference evidence", files: [], body: callers },
       { title: "Governing instruction files", files: instructions, body: instructions.length > 0 ? instructions.join("\n") : "No governing AGENTS.md files were present." },
       ...sourceSections
@@ -254,11 +295,12 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
       mode: "review-packets",
       generatedAt: now.toISOString(),
       repositoryRoot,
-      baseRef,
+      reviewScope,
+      ...(baseRef === undefined ? {} : { baseRef }),
       headRef,
-      baseSha,
-      headSha,
-      mergeBaseSha,
+      ...(baseSha === undefined ? {} : { baseSha }),
+      ...(headSha === undefined ? {} : { headSha }),
+      ...(mergeBaseSha === undefined ? {} : { mergeBaseSha }),
       ...(branch === undefined ? {} : { branch }),
       dirty,
       includeWorkingTree,
@@ -385,6 +427,27 @@ async function changedFiles(
   return [...new Set([...committed, ...unstaged, ...untracked].map(normalizeRepoPath))].sort();
 }
 
+async function snapshotFiles(
+  root: string,
+  headSha: string | undefined,
+  includeWorkingTree: boolean,
+  archivePathPrefix: string | undefined
+): Promise<string[]> {
+  const committed = headSha === undefined
+    ? []
+    : (await gitChecked(root, ["ls-tree", "-r", "--name-only", headSha], "git_head_tree_failed")).stdout
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map(normalizeRepoPath);
+  if (!includeWorkingTree) return [...new Set(committed)].sort();
+  const working = (await gitChecked(root, ["ls-files", "--cached", "--others", "--exclude-standard"], "git_worktree_list_failed")).stdout
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map(normalizeRepoPath)
+    .filter(path => !LOCAL_CODEX_STATE_PATTERN.test(path) && !isPacketExcludedPath(path, archivePathPrefix));
+  return [...new Set([...committed, ...working])].sort();
+}
+
 function filterPacketStatus(value: string, archivePathPrefix: string | undefined): { visible: string; excluded: Array<{ path: string; reason: string }> } {
   const excluded: Array<{ path: string; reason: string }> = [];
   const visible = value.split(/\r?\n/).filter(line => {
@@ -427,7 +490,7 @@ async function workingTreePaths(root: string, archivePathPrefix: string | undefi
 
 async function readCandidateBytes(
   root: string,
-  headSha: string,
+  headSha: string | undefined,
   path: string,
   includeWorkingTree: boolean,
   overlayPaths: Set<string>
@@ -440,6 +503,9 @@ async function readCandidateBytes(
       throw new ReviewPreparationError(`Review candidate is not a regular file: ${path}`, "candidate_not_regular_file");
     }
     return await readFile(absolute);
+  }
+  if (headSha === undefined) {
+    throw new ReviewPreparationError(`No committed Git blob is available for ${path}.`, "git_head_unavailable");
   }
   return await gitBlob(root, headSha, path);
 }
@@ -477,19 +543,29 @@ function packetExcludePathspec(excludedPaths: string[], archivePathPrefix: strin
   return [...exact, ...secretGlobs, ...archive];
 }
 
-async function collectCandidateFiles(root: string, headSha: string, changed: string[], args: ProCodeReviewArgs): Promise<Array<{ path: string; category: string }>> {
+function collectCandidateFiles(
+  availableFiles: string[],
+  changed: string[],
+  args: ProCodeReviewArgs,
+  reviewScope: ReviewScope
+): Array<{ path: string; category: string }> {
   const records = new Map<string, string>();
-  if (args.context?.includeChangedFiles !== false) for (const path of changed) records.set(path, TEST_PATTERN.test(path) ? "changed-test" : "changed-file");
-  const tracked = (await gitChecked(root, ["ls-tree", "-r", "--name-only", headSha], "git_head_tree_failed")).stdout.split(/\r?\n/).filter(Boolean).map(normalizeRepoPath);
-  if (args.context?.includeInstructions === true) {
-    for (const path of governingInstructions(tracked, changed)) records.set(path, "instructions");
+  if (args.context?.includeChangedFiles !== false) {
+    for (const path of changed) {
+      records.set(path, reviewScope === "repository"
+        ? (TEST_PATTERN.test(path) ? "repository-test" : "repository-file")
+        : (TEST_PATTERN.test(path) ? "changed-test" : "changed-file"));
+    }
   }
-  for (const path of tracked.filter(path => MANIFEST_PATTERN.test(path))) {
+  if (args.context?.includeInstructions === true) {
+    for (const path of governingInstructions(availableFiles, changed)) records.set(path, "instructions");
+  }
+  for (const path of availableFiles.filter(path => MANIFEST_PATTERN.test(path))) {
     if (changed.includes(path) || affectsChangedPath(path, changed)) records.set(path, "manifest-interface");
   }
   if (args.context?.includeRelatedTests === true) {
     const stems = new Set(changed.map(path => relatedFileStem(path)));
-    for (const path of tracked.filter(path => TEST_PATTERN.test(path))) {
+    for (const path of availableFiles.filter(path => TEST_PATTERN.test(path))) {
       if (changed.includes(path) || [...stems].some(stem => stem.length > 2 && relatedFileStem(path) === stem)) records.set(path, "related-test");
     }
   }
@@ -511,31 +587,48 @@ function affectsChangedPath(path: string, changed: string[]): boolean {
 
 async function buildDiff(
   root: string,
-  mergeBase: string,
-  headSha: string,
+  comparisonBase: string,
+  headSha: string | undefined,
   includeWorkingTree: boolean,
   excludedPaths: string[],
   archivePathPrefix: string | undefined
 ): Promise<string> {
   const pathspec = packetPathspec(excludedPaths, archivePathPrefix);
-  const committed = (await gitChecked(root, ["diff", "--no-ext-diff", "--find-renames", "--unified=80", `${mergeBase}..${headSha}`, ...pathspec], "git_diff_failed")).stdout;
+  const committed = headSha === undefined
+    ? ""
+    : (await gitChecked(root, ["diff", "--no-ext-diff", "--find-renames", "--unified=80", comparisonBase, headSha, ...pathspec], "git_diff_failed")).stdout;
   if (!includeWorkingTree) return committed;
-  const working = (await gitChecked(root, ["diff", "--no-ext-diff", "--find-renames", "--unified=80", "HEAD", ...pathspec], "git_worktree_diff_failed")).stdout;
-  return [committed, working.length > 0 ? `\n# WORKING TREE DIFF\n${working}` : ""].join("");
+  if (headSha !== undefined) {
+    const working = (await gitChecked(root, ["diff", "--no-ext-diff", "--find-renames", "--unified=80", "HEAD", ...pathspec], "git_worktree_diff_failed")).stdout;
+    return [committed, working.length > 0 ? `\n# WORKING TREE DIFF\n${working}` : ""].join("");
+  }
+  const staged = (await gitChecked(root, ["diff", "--cached", "--no-ext-diff", "--find-renames", "--unified=80", comparisonBase, ...pathspec], "git_worktree_diff_failed")).stdout;
+  const unstaged = (await gitChecked(root, ["diff", "--no-ext-diff", "--find-renames", "--unified=80", ...pathspec], "git_worktree_diff_failed")).stdout;
+  return [
+    staged.length > 0 ? `# INDEX DIFF FROM EMPTY TREE\n${staged}` : "",
+    unstaged.length > 0 ? `\n# UNSTAGED WORKING TREE DIFF\n${unstaged}` : ""
+  ].join("");
 }
 
 async function buildNameStatus(
   root: string,
-  mergeBase: string,
-  headSha: string,
+  comparisonBase: string,
+  headSha: string | undefined,
   includeWorkingTree: boolean,
   excludedPaths: string[],
   archivePathPrefix: string | undefined
 ): Promise<string> {
   const pathspec = ["--", ".", ...packetExcludePathspec(excludedPaths, archivePathPrefix)];
-  const committed = (await gitChecked(root, ["diff", "--name-status", "--find-renames", `${mergeBase}..${headSha}`, ...pathspec], "git_diff_name_status_failed")).stdout;
+  const committed = headSha === undefined
+    ? ""
+    : (await gitChecked(root, ["diff", "--name-status", "--find-renames", comparisonBase, headSha, ...pathspec], "git_diff_name_status_failed")).stdout;
   if (!includeWorkingTree) return committed;
-  const working = (await gitChecked(root, ["diff", "--name-status", "--find-renames", "HEAD", ...pathspec], "git_worktree_name_status_failed")).stdout;
+  const working = headSha === undefined
+    ? [
+        (await gitChecked(root, ["diff", "--cached", "--name-status", "--find-renames", comparisonBase, ...pathspec], "git_worktree_name_status_failed")).stdout,
+        (await gitChecked(root, ["diff", "--name-status", "--find-renames", ...pathspec], "git_worktree_name_status_failed")).stdout
+      ].filter(Boolean).join("\n")
+    : (await gitChecked(root, ["diff", "--name-status", "--find-renames", "HEAD", ...pathspec], "git_worktree_name_status_failed")).stdout;
   const untracked = (await gitChecked(root, ["ls-files", "--others", "--exclude-standard"], "git_untracked_list_failed")).stdout
     .split(/\r?\n/)
     .filter(Boolean)
@@ -548,7 +641,7 @@ async function buildNameStatus(
 
 async function callerEvidence(
   root: string,
-  headSha: string,
+  headSha: string | undefined,
   includeWorkingTree: boolean,
   symbols: Map<string, Set<string>>,
   changed: string[],
@@ -556,10 +649,10 @@ async function callerEvidence(
 ): Promise<string> {
   const lines: string[] = [];
   for (const symbol of [...symbols.keys()].sort().slice(0, 80)) {
-    const tree = includeWorkingTree ? [] : [headSha];
+    const tree = includeWorkingTree || headSha === undefined ? [] : [headSha];
     const result = await gitChecked(root, ["grep", "-n", "-I", "-F", "-e", symbol, ...tree, "--", ":(exclude)*.lock", ...packetExcludePathspec([], archivePathPrefix)], "git_caller_search_failed", [1]);
     const matches = result.stdout.split(/\r?\n/).filter(Boolean).map(line =>
-      includeWorkingTree || !line.startsWith(`${headSha}:`) ? line : line.slice(headSha.length + 1)
+      includeWorkingTree || headSha === undefined || !line.startsWith(`${headSha}:`) ? line : line.slice(headSha.length + 1)
     ).filter(line => {
       const path = normalizeRepoPath(line.split(":", 1)[0] ?? "");
       return !changed.some(changedPath => path === changedPath) && !isPacketExcludedPath(path, archivePathPrefix);
@@ -647,14 +740,19 @@ function packetHeader(index: number, total: number): string {
 function reviewPrompt(args: ProCodeReviewArgs, manifest: ReviewPacketManifest, packetPaths: string[]): string {
   const focus = args.request?.focus?.length ? args.request.focus.join(", ") : undefined;
   const extra = args.request?.additionalInstructions?.trim();
+  const reviewScope = manifest.reviewScope ?? "changes";
   return [
     reviewLabel(manifest),
     "",
     "Answer the caller's request using the attached repository context.",
     "",
-    extra === undefined || extra.length === 0 ? "Caller request: Analyze the attached change and provide the most useful grounded response." : `Caller request: ${extra}`,
+    extra === undefined || extra.length === 0
+      ? `Caller request: Analyze the attached ${reviewScope === "repository" ? "repository" : "change"} and provide the most useful grounded response.`
+      : `Caller request: ${extra}`,
     focus === undefined ? "" : `Requested emphasis: ${focus}.`,
-    `Scope: ${manifest.baseRef} (${manifest.baseSha}) through ${manifest.headRef} (${manifest.headSha}); merge base ${manifest.mergeBaseSha}.`,
+    reviewScope === "repository"
+      ? `Scope: complete repository snapshot at ${manifest.headRef} (${manifest.headSha ?? "unborn; working tree only"}).`
+      : `Scope: ${manifest.baseRef} (${manifest.baseSha}) through ${manifest.headRef} (${manifest.headSha}); merge base ${manifest.mergeBaseSha}.`,
     `Attached context: ${packetPaths.length} packet${packetPaths.length === 1 ? "" : "s"}, packet-001 through packet-${String(packetPaths.length).padStart(3, "0")}.`
   ].filter(Boolean).join("\n");
 }
@@ -665,10 +763,12 @@ function reviewLabel(manifest: ReviewPacketManifest): string {
 }
 
 function requestMarkdown(args: ProCodeReviewArgs, manifest: ReviewPacketManifest, packetPaths: string[]): string {
+  const reviewScope = manifest.reviewScope ?? "changes";
   return [
     "# ChatGPT Pro request",
     "",
-    `Base: \`${manifest.baseRef}\``,
+    `Review scope: \`${reviewScope}\``,
+    reviewScope === "changes" ? `Base: \`${manifest.baseRef}\`` : "",
     `Head: \`${manifest.headRef}\``,
     `Requested emphasis: ${(args.request?.focus ?? []).join(", ") || "none"}`,
     `Output mode: \`${args.output?.mode ?? "full"}\``,
@@ -715,6 +815,13 @@ function emptyManifest(input: Omit<ReviewPacketManifest, "schemaVersion" | "pack
     crossPacketDependencies: [],
     validationOutputIncluded: false
   };
+}
+
+async function gitCommit(root: string, ref: string): Promise<string | undefined> {
+  const result = await runGit(root, ["rev-parse", "--verify", `${ref}^{commit}`]);
+  if (result.code !== 0) return undefined;
+  const value = result.stdout.trim();
+  return value.length === 0 ? undefined : value;
 }
 
 async function gitRequired(root: string, args: string[], code: string): Promise<string> {

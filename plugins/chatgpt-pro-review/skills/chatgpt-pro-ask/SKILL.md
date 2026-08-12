@@ -55,7 +55,7 @@ const result = await chatgpt.reviews.askPro({
 
 This context-free form sends the question itself as the visible user turn and performs no Git commands or uploads. Pass the caller's question faithfully. Add context, focus, or output instructions only when the caller or current session wants them.
 
-When repository material is useful, use the sibling `chatgpt-pro-code-review` skill or add `repositoryRoot`, `baseRef`, `headRef`, and `context: { mode: "review-packets", ... }` deliberately.
+When repository material is useful, use the sibling `chatgpt-pro-code-review` skill. Change reviews add `repositoryRoot`, `baseRef`, `headRef`, and `context: { mode: "review-packets", scope: "changes", ... }`. Full-repository reviews omit `baseRef` and use `scope: "repository"`; this also works before the repository's first commit when the working tree is included.
 
 ## Resume without duplication
 
@@ -73,6 +73,8 @@ const resumed = await chatgpt.reviews.askPro({
 ```
 
 Never reattach files or resend the prompt. The archive's immutable receipt, original context, and thread checkpoint are authoritative. Keep each browser-host call longer than `callTimeoutMs` (30 seconds is sufficient for the 20-second example) and continue bounded resume calls until completion or a structured blocker. Pro can take minutes or more than an hour; `totalTimeoutMs` limits one invocation, not the repeated same-archive resume loop.
+
+Back off between separate resume invocations for the same archive. The calling agent—including any delegated subagent—owns this cadence: wait 30 seconds after the first `in_progress` result, then 60 seconds, 2 minutes, and 4 minutes; after that, poll no more often than every 5 minutes. Count only consecutive `in_progress` results for that archive and reset when it completes or reaches a blocker. Use the host's wait or wake-up mechanism between calls. Do not immediately recurse, busy-poll, or keep one browser-host call open during the delay. `pollMs` only samples visible DOM stability inside one bounded call; it is not the cross-invocation cadence.
 
 ## Ask a follow-up in the same thread
 

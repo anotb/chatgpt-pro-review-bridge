@@ -25,6 +25,8 @@ Resume with the same thread URL and archive directory. The workflow reloads the 
 
 One workflow invocation performs one bounded polling call by default, then returns `in_progress`. Keep that default in browser-hosted execution. `maxPollCallsPerInvocation` is an explicit local ceiling, not permission to exceed the host call budget.
 
+The calling agent owns cross-invocation backoff for each archive: 30 seconds, 60 seconds, 2 minutes, 4 minutes, then a maximum frequency of once every 5 minutes while consecutive results remain `in_progress`. A delegated subagent follows the same schedule. Wait outside browser-host calls; never immediately loop or hold the browser bridge open just to delay. This cadence is intentionally an agent contract rather than an SDK-enforced timer.
+
 ## Result interpretation
 
 - `completed`: full requested contract succeeded.

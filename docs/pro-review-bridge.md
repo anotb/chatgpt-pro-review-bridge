@@ -92,9 +92,14 @@ const result = await chatgpt.reviews.askPro({
 });
 ```
 
-That form sends the caller's question as the visible user turn, performs no Git commands, and uploads nothing. Add `repositoryRoot`, `baseRef`, `headRef`, and `context: { mode: "review-packets", ... }` only when the question needs repository evidence.
+That form sends the caller's question as the visible user turn, performs no Git commands, and uploads nothing. Add repository evidence in one of two explicit scopes:
 
-One invocation performs one bounded poll by default. If it returns `in_progress`, call the workflow again with `resume: { archiveDirectory }`; never resend the prompt. Pro can run for minutes or more than an hour, and `totalTimeoutMs` limits one invocation rather than the repeated resume loop. The immutable submission receipt holds the canonical `/c/<conversation-id>` URL and conversation ID. Optional caller-supplied `threadUrl` or `conversationId` values are treated only as mismatch-detecting cross-checks.
+- Change review: add `repositoryRoot`, `baseRef`, optional `headRef`, and `context: { mode: "review-packets", scope: "changes", ... }`.
+- Full repository: add `repositoryRoot` and `context: { mode: "review-packets", scope: "repository", ... }`, and omit `baseRef`.
+
+When `repositoryRoot` is present and `baseRef` is omitted, repository scope is inferred. It uses Git's empty tree internally as a diff baseline without requiring callers to invent an unattached commit. A repository with no commits is supported when `includeWorkingTree` is true.
+
+One invocation performs one bounded poll by default. If it returns `in_progress`, call the workflow again with `resume: { archiveDirectory }`; never resend the prompt. The calling agent waits 30 seconds before the first resume, then 60 seconds, 2 minutes, and 4 minutes, and thereafter resumes no more often than every 5 minutes. The delay happens outside browser-host calls. Pro can run for minutes or more than an hour, and `totalTimeoutMs` limits one invocation rather than the repeated resume loop. The immutable submission receipt holds the canonical `/c/<conversation-id>` URL and conversation ID. Optional caller-supplied `threadUrl` or `conversationId` values are treated only as mismatch-detecting cross-checks.
 
 When a running request has genuinely become obsolete, the session may explicitly stop and replace it. Open and verify the archived thread, call `chatgpt.messages.stop({ confirmStop: true })`, preserve the old archive/partial answer, then start a fresh `reviews.askPro(...)` request from the revised state. The bridge never auto-stops or silently edits an existing prompt.
 

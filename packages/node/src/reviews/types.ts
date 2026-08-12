@@ -7,11 +7,12 @@ import type {
 } from "../types.js";
 
 export type ReviewOutputMode = "full" | "indexed";
+export type ReviewScope = "changes" | "repository";
 
 export type ProCodeReviewArgs = {
-  /** Omit repositoryRoot and baseRef for a context-free Pro question. */
+  /** Omit repositoryRoot for a context-free Pro question. */
   repositoryRoot?: string;
-  /** Omit repositoryRoot and baseRef for a context-free Pro question. */
+  /** Required for change scope. Omit for a complete repository review. */
   baseRef?: string;
   headRef?: string;
   request?: {
@@ -31,6 +32,8 @@ export type ProCodeReviewArgs = {
   context?: {
     /** Defaults to none without repository refs and review-packets with them. */
     mode?: "none" | "review-packets";
+    /** Defaults to changes when baseRef is present and repository when it is omitted. */
+    scope?: ReviewScope;
     includeWorkingTree?: boolean;
     includeInstructions?: boolean;
     includeChangedFiles?: boolean;
@@ -138,7 +141,9 @@ export type ReviewPacketManifest = {
   mode?: "none" | "review-packets";
   generatedAt: string;
   repositoryRoot: string;
-  baseRef: string;
+  /** Older packet archives omitted this field and are read as changes. */
+  reviewScope?: ReviewScope;
+  baseRef?: string;
   headRef: string;
   baseSha?: string;
   headSha?: string;
@@ -188,6 +193,7 @@ export type ProCodeReviewResult = {
   };
   provenance: {
     contextMode: "none" | "review-packets";
+    reviewScope?: ReviewScope;
     repositoryRoot?: string;
     baseRef?: string;
     headRef?: string;
