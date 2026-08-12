@@ -1,220 +1,81 @@
 # ChatGPT Pro Review Bridge
 
-Let a Codex task ask visible ChatGPT Pro, wait for the answer, and bring the complete result back—without copy/paste or duplicate submissions.
+Send a question from Codex to ChatGPT Pro and get the complete answer back in the same task.
 
 [![Release](https://img.shields.io/github/v/release/anotb/chatgpt-pro-review-bridge?label=release)](https://github.com/anotb/chatgpt-pro-review-bridge/releases)
 [![Release checks](https://img.shields.io/github/actions/workflow/status/anotb/chatgpt-pro-review-bridge/release.yml?label=release%20checks&logo=github)](https://github.com/anotb/chatgpt-pro-review-bridge/actions/workflows/release.yml)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
-This fork packages the visible-session browser controller from [adamallcock/codex-chatgpt-control](https://github.com/adamallcock/codex-chatgpt-control) as a focused Codex plugin for asking ChatGPT's **Chat / Pro** setting questions.
+Use it for code reviews, design feedback, debugging ideas, explanations, or any other question where you want a second pass from Pro. The current Codex task decides what to ask and how much context to send.
 
-It supports two useful modes:
+## What it does
 
-- **AskPro:** send an ordinary question exactly as written.
-- **Pro code review:** build repository context, attach it visibly, and ask whatever review, design, explanation, brainstorming, or code question the current Codex task chooses.
+- Opens ChatGPT in the Chrome session where you are already signed in.
+- Selects Pro and checks that Pro is active.
+- Sends the question once.
+- Waits for long responses and resumes the same chat when needed.
+- Returns the full Markdown response and any new files or images.
+- Keeps a local archive so an interrupted task can continue without sending the question again.
+- Supports follow-up questions in the same ChatGPT conversation.
 
-## What happens
-
-For each request, the bridge:
-
-1. Uses the signed-in ChatGPT session you can see in Chrome.
-2. Opens Chat and strictly verifies that the visible setting is **Pro**.
-3. Submits the prompt once.
-4. Polls the same conversation while long Pro work continues.
-5. Returns the complete Markdown once, downloads every new visible artifact, and keeps a local recovery archive.
-6. Leaves Chat on Pro for the next request.
-
-Any failure to verify Pro—including fallback, login, permission, or ambiguous-page states—returns a structured blocker before the workflow continues.
+If Pro cannot be confirmed, the request stops and Codex tells you what needs attention.
 
 ## Install
 
-Install a pinned release from this repository:
+The easiest option is to give this repository to Codex or another assistant that can configure Codex plugins:
 
-```powershell
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.1
-codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
-```
+> Install the latest tagged release of https://github.com/anotb/chatgpt-pro-review-bridge as a Codex plugin, then verify that the ChatGPT Pro Review skills are available in a new task.
 
-Then start a new Codex task so the new skills load.
+For a manual install, add this repository as a marketplace pinned to `v0.7.1` with `codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.1`, then install it with `codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge`.
 
-Requirements:
+Start a new Codex task after installation.
 
-- Codex Desktop with its compatible visible Chrome/browser bridge.
-- A ChatGPT session signed in visibly on each computer.
-- Node.js 20 or newer for source development. The installed plugin includes its runtime.
+### Before the first file-backed review
 
-No API key is required.
+You need Codex Desktop, Chrome, and a signed-in ChatGPT account with Pro available.
 
-The reusable Node SDK is released as `chatgpt-pro-review-bridge` on npm. The
-Python wheel is attached to each GitHub release:
+For reviews that upload repository context, allow uploads to `chatgpt.com` under **Codex Settings > Computer Use > Google Chrome > Permissions > Uploads**. Then open the Codex extension details in Chrome and enable **Allow access to file URLs**.
 
-```powershell
-npm install chatgpt-pro-review-bridge@0.7.1
-python -m pip install https://github.com/anotb/chatgpt-pro-review-bridge/releases/download/v0.7.1/chatgpt_pro_review_bridge-0.7.1-py3-none-any.whl
-```
+Plain questions do not upload repository files.
 
-### File-backed questions
+## Use
 
-Plain AskPro questions upload nothing. Repository reviews or other file-backed requests need two one-time local permissions:
+Ask naturally from any Codex task:
 
-1. In Codex: **Settings → Computer Use → Google Chrome → Permissions → Uploads**, allow `chatgpt.com` (or choose **Always allow**).
-2. In Chrome: `chrome://extensions` → Codex extension → **Details** → enable **Allow access to file URLs**.
+> Ask Pro for a second opinion on this design.
 
-## Use it
+> Ask Pro to review this branch against main and focus on anything we may have missed.
 
-### From a normal Codex task
+> Ask Pro to explain why this test is flaky.
 
-Ask naturally:
+> Follow up in the same Pro chat and ask for a simpler approach.
 
-```text
-Ask Pro to explain in two short paragraphs why idempotency matters when polling a long-running job.
-```
+Codex will choose the general AskPro skill or the repository-aware review skill based on the request. You can also name `$chatgpt-pro-ask` or `$chatgpt-pro-code-review` directly.
 
-Or invoke the skill explicitly:
+Pro work can take minutes or more than an hour. Codex polls the same conversation and can resume after a timeout or restart. It does not send the prompt again while a review is already running.
 
-```text
-Use $chatgpt-pro-ask to ask Pro: "Give me three names for this feature and explain the tradeoffs."
-```
+## Results and recovery
 
-For repository work:
+Each request gets its own folder under `.codex/pro-reviews/`. It contains the submitted prompt, the final response, downloaded artifacts, the ChatGPT conversation link, and the information needed to resume.
 
-```text
-Use $chatgpt-pro-code-review to review this branch against main. Ask the question you think is most useful, then verify any material findings before changing code.
-```
+Generated patches stay in the response until you choose to apply them.
 
-The current Codex task chooses the question, scope, depth, and desired output.
+## Update or remove
 
-### From an agent
+To update, ask Codex to reinstall the plugin from a newer tagged release. A manually pinned marketplace stays on its selected tag until you change it.
 
-Use `$chatgpt-pro-ask` for a context-free question. Its minimal runtime call is:
+To remove it, run `codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge`, then `codex plugin marketplace remove chatgpt-pro-review-bridge`.
 
-```js
-const result = await chatgpt.reviews.askPro({
-  request: {
-    additionalInstructions: "Explain briefly why stable job IDs matter."
-  }
-});
-```
+## Packages and documentation
 
-With no repository refs, the visible Chat user turn is the question itself and there is no attachment step.
+Most people only need the Codex plugin. The reusable runtime is also available as [`chatgpt-pro-review-bridge` on npm](https://www.npmjs.com/package/chatgpt-pro-review-bridge), and Python packages are attached to each [GitHub release](https://github.com/anotb/chatgpt-pro-review-bridge/releases).
 
-Continue that conversation with another AskPro call:
-
-```js
-const followUp = await chatgpt.reviews.askPro({
-  thread: result.thread,
-  request: {
-    additionalInstructions: "Now express the same idea in exactly five words."
-  }
-});
-```
-
-The follow-up is submitted once in the same visible thread, archived separately, and resumed from its own archive if it runs long.
-
-Use `$chatgpt-pro-code-review` when repository evidence is useful:
-
-```js
-const result = await chatgpt.reviews.askPro({
-  repositoryRoot: "/absolute/repository/root",
-  baseRef: "origin/main",
-  headRef: "HEAD",
-  request: {
-    additionalInstructions: "Review this change and tell me what you think matters."
-  },
-  context: {
-    mode: "review-packets",
-    includeWorkingTree: true
-  }
-});
-```
-
-The installed skills contain the browser-runtime bootstrap, strict Pro safeguards, output options, and resume loop. Agents should use those skills instead of recreating the workflow from snippets.
-
-## Long answers and resume
-
-Pro can take minutes or more than an hour. Each call performs a bounded wait; an incomplete result is returned as `in_progress` with an archive directory. The agent keeps resuming that same archive until completion or a structured blocker:
-
-```js
-await chatgpt.reviews.askPro({
-  resume: { archiveDirectory: result.archiveDirectory }
-});
-```
-
-The archived submission receipt is authoritative. Resume reopens the same visible conversation, proves the prompt identity, and polls without reattaching files or resending the question. An interrupted caller can resume later; a live concurrent owner is still rejected.
-
-The current Codex session can explicitly stop an obsolete visible response and start a revised request.
-
-## Output and local archive
-
-By default the caller gets:
-
-- the complete final Markdown;
-- every new downloadable file or generated image;
-- the canonical Chat conversation URL;
-- strict Pro verification evidence;
-- hashes and a local archive for recovery.
-
-Archives live under `.codex/pro-reviews/` by default and are gitignored in this repository. Context-free asks archive only the request/workflow evidence and result. Repository-backed asks also archive the packet manifest and packet files.
-
-Codex decides what to inspect, test, and apply; generated code is never applied automatically.
-
-## Visible-session boundary
-
-The bridge works through the ChatGPT page you can see and keeps each action inside that visible session. It does not run generated patches automatically.
-
-See [privacy](docs/plugin-review-privacy.md), [terms](docs/plugin-review-terms.md), and the detailed [bridge guide](docs/pro-review-bridge.md).
-
-## Update or uninstall
-
-A marketplace installed with `--ref` stays pinned. To move to a newer tag:
-
-```powershell
-codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
-codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref <new-tag>
-codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
-```
-
-Start a new Codex task afterward.
-
-To uninstall:
-
-```powershell
-codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
-codex plugin marketplace remove chatgpt-pro-review-bridge
-```
-
-## Develop
-
-The focused plugin is in [plugins/chatgpt-pro-review](plugins/chatgpt-pro-review). The reusable TypeScript runtime is in [packages/node](packages/node), with a Python parity client in [packages/python](packages/python).
-
-Common gates:
-
-```powershell
-npm --prefix packages/node ci
-npm run node:test
-npm run node:build
-npm run node:contracts
-npm run python:test
-npm run python:pyright
-npm run plugin:build
-npm run plugin:check
-npm run plugin:validate
-npm run release:smoke-source
-```
-
-Live browser qualification must run from a browser-enabled Codex task; an ordinary shell is expected to return `browser_bridge_unavailable`.
-
-Useful references:
-
-- [Architecture](docs/architecture.md)
-- [Browser bridge](docs/browser-bridge.md)
+- [Detailed bridge guide](docs/pro-review-bridge.md)
 - [Troubleshooting](docs/troubleshooting.md)
-- [Release process](docs/release-process.md)
-- [Full SDK skill](skills/codex-chatgpt-control/SKILL.md)
+- [Privacy](docs/plugin-review-privacy.md)
+- [Terms](docs/plugin-review-terms.md)
+- [Development and releases](docs/release-process.md)
 
-## Upstream
+This project is a focused fork of [adamallcock/codex-chatgpt-control](https://github.com/adamallcock/codex-chatgpt-control).
 
-The general Chat/Work controller originated in [adamallcock/codex-chatgpt-control](https://github.com/adamallcock/codex-chatgpt-control). Generic compatibility fixes are kept separate and proposed upstream; the focused AskPro workflow and plugin remain in this fork.
-
-License: [MIT](LICENSE).
+[MIT](LICENSE)
