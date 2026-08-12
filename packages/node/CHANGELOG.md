@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-beta.9
+
+- Avoids false in-progress results from unrelated generic cancel controls in
+  the current Chat UI.
+
 ## 0.6.0-beta.8
 
 - Recovers archives whose previous bounded browser call was interrupted while

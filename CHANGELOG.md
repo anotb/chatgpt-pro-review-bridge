@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-beta.9
+
+- Stops treating a generic visible `Cancel` control as proof that ChatGPT is
+  still generating; explicit visible stop controls remain authoritative.
+
 ## 0.6.0-beta.8
 
 - Reclaims incomplete review lease files after the same five-minute stale

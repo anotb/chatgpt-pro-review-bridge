@@ -323,7 +323,7 @@ var en = {
   /** Exact-match transient assistant placeholders filtered out of captured responses. */
   transientAssistant: ["thinking", "reasoning", "searching", "searching the web"],
   /** Streaming "stop" control text, matched while a response generates. */
-  stopControl: ["stop generating", "stop streaming", "stop answering", "cancel"],
+  stopControl: ["stop generating", "stop streaming", "stop answering"],
   /** Interrupted generation markers shown after the assistant stops before completion. */
   stoppedAssistant: ["stopped thinking", "stopped answering", "generation stopped"],
   /** Response-action affordance text (fallback to the structural copy-button locator). */

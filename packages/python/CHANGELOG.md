@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0b9
+
+- Aligns the Python parity package with the current Chat generation-control
+  detection fix in the shared backend.
+
 ## 0.6.0b8
 
 - Aligns the Python parity package with stale incomplete-lease recovery in the
