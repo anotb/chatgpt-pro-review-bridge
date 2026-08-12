@@ -96,16 +96,25 @@ export function artifactInventoryItems(
 ): ArtifactInventoryItem[] {
   return [
     ...images.map(artifact => ({
-      key: stableKey({
-        kind: "image",
-        index: artifact.index,
-        turnId: artifact.turnId,
-        src: artifact.src,
-        width: artifact.width,
-        height: artifact.height,
-        alt: artifact.alt,
-        ariaLabel: artifact.ariaLabel
-      }),
+      key: stableKey(artifact.turnId === undefined
+        ? {
+            kind: "image",
+            index: artifact.index,
+            src: artifact.src,
+            width: artifact.width,
+            height: artifact.height,
+            alt: artifact.alt,
+            ariaLabel: artifact.ariaLabel
+          }
+        : {
+            kind: "image",
+            index: artifact.index,
+            turnId: artifact.turnId,
+            width: artifact.width,
+            height: artifact.height,
+            alt: artifact.alt,
+            ariaLabel: artifact.ariaLabel
+          }),
       kind: "image" as const,
       artifact
     })),

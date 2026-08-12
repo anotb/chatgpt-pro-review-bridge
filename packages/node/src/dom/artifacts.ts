@@ -107,10 +107,11 @@ export async function readImageDataUrl(
         });
         const image = selector === "latest"
           ? candidates.at(-1)
-          : candidates.filter(candidate => {
-              if (selector.turnId === undefined) return true;
-              return candidate.closest("[data-testid^='conversation-turn']")?.getAttribute("data-testid") === selector.turnId;
-            })[selector.index];
+          : candidates[selector.index];
+        if (image !== undefined && selector !== "latest" && selector.turnId !== undefined
+          && image.closest("[data-testid^='conversation-turn']")?.getAttribute("data-testid") !== selector.turnId) {
+          return undefined;
+        }
         if (image === undefined) return undefined;
         const src = image.currentSrc || image.src;
         if (/^data:image\//i.test(src)) {
@@ -140,6 +141,7 @@ export async function readImageDataUrl(
   const html = await readContentWithTimeout(page, guardMs).catch(() => undefined);
   if (html === undefined) return undefined;
   const parsed = parseArtifactsFromHtml(html);
+  if (which !== "latest" && which.turnId !== undefined) return undefined;
   const artifact = which === "latest" ? parsed.at(-1) : parsed[which.index];
   if (artifact?.src === undefined || !/^data:image\//i.test(artifact.src)) return undefined;
   return artifact.alt === undefined

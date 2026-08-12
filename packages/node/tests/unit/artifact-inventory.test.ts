@@ -59,4 +59,15 @@ describe("artifact inventory baselines", () => {
     expect(second.key).not.toBe(item.key);
     expect(artifactInventoryItems([], [file])[0]?.key).toBe(item.key);
   });
+
+  it("does not report an old turn image as new when only its signed URL changes", () => {
+    const baselineItem = artifactInventoryItems([{ ...oldImage, src: "https://cdn.example/old?token=one" }], [])[0]!;
+    const refreshedItem = artifactInventoryItems([{ ...oldImage, src: "https://cdn.example/old?token=two" }], [])[0]!;
+
+    expect(refreshedItem.key).toBe(baselineItem.key);
+    expect(diffArtifactInventories(
+      { capturedAt: "before", items: [baselineItem] },
+      { capturedAt: "after", items: [refreshedItem] }
+    ).added).toEqual([]);
+  });
 });
