@@ -1,0 +1,6 @@
+# Generated plugin runtimes must remain byte-identical to the LF bundles built
+# by esbuild, including in Windows clones with core.autocrlf=true.
+plugins/codex-chatgpt-control/runtime/*.mjs text eol=lf
+plugins/codex-chatgpt-control/runtime/node/*.mjs text eol=lf
+plugins/chatgpt-pro-review/runtime/*.mjs text eol=lf
+plugins/chatgpt-pro-review/runtime/node/*.mjs text eol=lf

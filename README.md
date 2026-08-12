@@ -1,473 +1,210 @@
-# codex-chatgpt-control
+# ChatGPT Pro Review Bridge
 
-> This fork adds the portable **ChatGPT Pro Review Bridge** plugin. It keeps Codex as the repository executor while a first-class workflow builds deterministic repository packets, submits a caller-defined question once to the strictly verified visible ChatGPT **Chat / Pro** setting, polls by metadata, returns and archives the complete Markdown once, and downloads every new artifact. See [Pro review bridge](docs/pro-review-bridge.md).
+Let a Codex task ask visible ChatGPT Pro, wait for the answer, and bring the complete result back—without copy/paste or duplicate submissions.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/adamallcock/codex-chatgpt-control/parity.yml?branch=main&label=CI&logo=github)](https://github.com/adamallcock/codex-chatgpt-control/actions/workflows/parity.yml)
-[![npm](https://img.shields.io/npm/v/codex-chatgpt-control?logo=npm)](https://www.npmjs.com/package/codex-chatgpt-control)
-[![PyPI](https://img.shields.io/pypi/v/codex-chatgpt-control?logo=pypi)](https://pypi.org/project/codex-chatgpt-control/)
-![License](https://img.shields.io/badge/License-MIT-yellow)
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![Node](https://img.shields.io/badge/Node-20%2B-green)
+[![Release](https://img.shields.io/github/v/release/anotb/chatgpt-pro-review-bridge?include_prereleases&label=release)](https://github.com/anotb/chatgpt-pro-review-bridge/releases)
+[![Release checks](https://img.shields.io/github/actions/workflow/status/anotb/chatgpt-pro-review-bridge/release.yml?label=release%20checks&logo=github)](https://github.com/anotb/chatgpt-pro-review-bridge/actions/workflows/release.yml)
+![License](https://img.shields.io/badge/license-MIT-yellow)
 
-Unofficial alpha SDK for agents that need to delegate user-directed workflows to the visible ChatGPT Chat and Work experiences.
+This fork packages the visible-session browser controller from [adamallcock/codex-chatgpt-control](https://github.com/adamallcock/codex-chatgpt-control) as a focused Codex plugin for asking ChatGPT's **Chat / Pro** setting questions.
 
-https://github.com/user-attachments/assets/6ca38f2d-6646-490d-8e4d-8a6dc21e926f
+It supports two useful modes:
 
+- **AskPro:** send an ordinary question exactly as written, with no Git work and no file upload.
+- **Pro code review:** build repository context, attach it visibly, and ask whatever review, design, explanation, brainstorming, or code question the current Codex task chooses.
 
-## Why This Exists
+The plugin is unofficial and is not affiliated with or endorsed by OpenAI.
 
-This project exists because one desktop shell can still contain distinct execution experiences. Codex is the supported home for local repository work: editing, commands, tests, branches, and deployment. Visible ChatGPT Chat and Work carry different conversation/task state, controls, files, progress, and artifacts.
+## What happens
 
-In practice, that means a user can still end up moving work by hand across product surfaces:
+For each request, the bridge:
 
-> I am using Codex for local execution, Chat for conversational review, and Work for longer tasks and deliverables.
+1. Uses the signed-in ChatGPT session you can see in Chrome.
+2. Opens Chat and strictly verifies that the visible setting is **Pro**.
+3. Submits the prompt once.
+4. Polls the same conversation while long Pro work continues.
+5. Returns the complete Markdown once, downloads every new visible artifact, and keeps a local recovery archive.
+6. Leaves Chat on Pro for the next request.
 
-`codex-chatgpt-control` turns that handoff into a structured, visible, user-directed bridge. It detects Chat versus Work, inspects the controls actually available to the signed-in user, applies configuration with postcondition verification, and preserves thread/task identity while waiting, steering, reading, and retrieving artifacts.
-
-- **Keep Codex as home base:** preserve the supported local execution loop while delegating suitable review, research, or deliverable work to visible ChatGPT.
-- **Treat Chat and Work as capabilities, not model folklore:** discover each surface and its nested configuration instead of assuming one flat picker.
-- **Submit once:** separate Work start, status, wait, steer, read, and artifact operations so timeouts do not create duplicate tasks.
-- **Visible-session only:** drive chatgpt.com through a compatible Codex/browser bridge and user-visible UI controls, including file uploads and visible downloads where available.
-- **Workflow primitives, not a ChatGPT API:** support prompts, thread workflows, response capture, clear stop reasons, and privacy-preserving local reports without private endpoint access.
-- **Narrow by design:** built for agent -> browser -> chatgpt.com workflows; it is not a generic browser automation framework, scraping tool, OpenAI API wrapper, official OpenAI project, or replacement for the official Codex SDK.
-
-This project is not affiliated with, endorsed by, or sponsored by OpenAI.
-
-## What This Is For
-
-Use `codex-chatgpt-control` when a Codex-style agent needs to work with the real ChatGPT web product that the user can see:
-
-- detect and open Chat or Work
-- inspect available model/intelligence/effort/speed controls without mutation
-- apply explicit visible configuration and verify the final state
-- start or continue visible ChatGPT threads
-- start, poll, steer, and read visible Work tasks
-- submit prompts and read Markdown responses
-- attach approved local files through visible upload controls
-- download visible generated files and artifacts
-- wait for and download image-only generated artifacts
-- tell the agent exactly why it could not continue when ChatGPT needs login, captcha, permissions, or UI review
-- save local run reports that omit prompt and response content by default
-
-This project deliberately does not provide hidden ChatGPT access, account automation, a replacement for the OpenAI API, or a replacement for the official Codex SDK/CLI.
-
------
+If Pro cannot be verified, the session falls back, login or a permission is required, or the visible page becomes ambiguous, the workflow stops with a structured blocker. It does not silently continue under a different setting.
 
 ## Install
 
-Node:
+Install a pinned release from this repository:
 
-```bash
-npm install codex-chatgpt-control@next
-```
-
-Python:
-
-```bash
-python -m pip install --pre codex-chatgpt-control
-```
-
-The Node package is the browser-control runtime authority. The Python package is a parity client over the same local backend protocol.
-
-The project is prerelease software. npm prereleases are published under
-`next`, so plain `npm install codex-chatgpt-control` may intentionally resolve
-to an older `latest` release.
-
-## Codex Desktop Setup
-
-This repo includes a Codex plugin at [plugins/codex-chatgpt-control](plugins/codex-chatgpt-control). It is the easiest way to make Codex Desktop agents use this SDK consistently instead of hand-rolling browser commands.
-
-Install the repository as a Codex plugin marketplace and add the plugin:
-
-```bash
-codex plugin marketplace add adamallcock/codex-chatgpt-control --ref main
-codex plugin add codex-chatgpt-control@codex-chatgpt-control
-```
-
-When a new version ships, refresh the marketplace snapshot and reinstall the plugin, then start a new Codex thread so updated skill metadata is loaded:
-
-```bash
-codex plugin marketplace upgrade codex-chatgpt-control
-codex plugin add codex-chatgpt-control@codex-chatgpt-control
-```
-
-The plugin contains:
-
-- `codex-chatgpt-control`: the broad visible Chat/Work workflow and diagnostics skill.
-- `chatgpt-delegate`: the preferred surface-neutral Chat/Work delegation workflow.
-- `chatgpt-pro-consult`: a backward-compatible visible Chat Pro-setting alias.
-- bundled Node runtime files for bridge-enabled imports.
-
-This fork also exposes a separate non-conflicting marketplace plugin. Install a pinned tag, then start a new Codex task:
-
-```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.14
+```powershell
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.1
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
-Before the first file-backed review on each computer, sign into ChatGPT in the
-visible browser and enable both local upload gates:
+Then start a new Codex task so the new skills load.
 
-1. Codex Settings > Computer Use > Google Chrome > Permissions > Uploads:
-   allow `chatgpt.com` or choose **Always allow**.
-2. Chrome `chrome://extensions` > Codex extension > Details: enable
-   **Allow access to file URLs**.
+Requirements:
 
-The bridge fails closed before submission when either permission is missing.
-These settings and the signed-in browser session are per-machine and are not
-included in the plugin.
+- Codex Desktop with its compatible visible Chrome/browser bridge.
+- A ChatGPT session signed in visibly on each computer.
+- Node.js 20 or newer only for source development; normal plugin users use the bundled runtime.
 
-To move a pinned installation to a newer release tag, remove its installed
-snapshot and add the new ref explicitly before reinstalling:
+No API key is required. Browser sign-in state, cookies, and profiles are never bundled or copied between computers.
 
-```bash
-codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
-codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.14
-codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
-```
+### File-backed questions
 
-Invoke `$chatgpt-pro-code-review` for full repository reviews. Each computer must separately sign in to ChatGPT and initialize its visible browser bridge; never copy browser credentials or profiles between machines.
+Plain AskPro questions upload nothing. Repository reviews or other file-backed requests need two one-time local permissions:
 
-Manual skill-only install is still available as a fallback at [skills/codex-chatgpt-control/SKILL.md](skills/codex-chatgpt-control/SKILL.md):
+1. In Codex: **Settings → Computer Use → Google Chrome → Permissions → Uploads**, allow `chatgpt.com` (or choose **Always allow**).
+2. In Chrome: `chrome://extensions` → Codex extension → **Details** → enable **Allow access to file URLs**.
 
-```bash
-mkdir -p ~/.codex/skills/codex-chatgpt-control
-rsync -a skills/codex-chatgpt-control/ ~/.codex/skills/codex-chatgpt-control/
-```
+The plugin never changes those settings for you.
 
-Then add a short instruction to any repo where agents should be allowed to consult ChatGPT web:
+## Use it
 
-```markdown
-When a task would benefit from the visible ChatGPT web product, use the
-codex-chatgpt-control skill and SDK. Keep the workflow visible and
-user-directed. If I say a ChatGPT thread is already open, reuse that tab with
-existingTab/existing_tab instead of opening a replacement. If the browser bridge
-or ChatGPT UI is unavailable, report the SDK stop reason and do not retry
-blindly.
-```
+### From a normal Codex task
 
-The plugin and skill are agent-facing operating guides plus local runtime bundles. They do not bundle a browser bridge, credentials, or ChatGPT account access. Real browser workflows still require a compatible Codex/browser bridge and a visible signed-in ChatGPT web session.
-
-## Node Quick Start
-
-Use the SDK from a Codex/browser-bridge host that provides `globalThis.agent`:
-
-```ts
-import { createChatGPT } from "codex-chatgpt-control";
-
-const chatgpt = createChatGPT({ agent: globalThis.agent });
-const reviewer = chatgpt.agent({
-  name: "reviewer",
-  instructions: "Review carefully and return Markdown."
-});
-
-const result = await chatgpt.runner.run(reviewer, {
-  input: "Reply with a one-sentence summary of this project.",
-  thread: { type: "new" },
-  experience: "chat",
-  response: { format: "markdown" }
-});
-
-console.log(result.output_text);
-```
-
-Inspect and apply visible configuration:
-
-```ts
-const surface = await chatgpt.experience.detect();
-const capabilities = await chatgpt.configuration.inspect();
-
-await chatgpt.experience.open({ experience: "work" });
-await chatgpt.configuration.apply({
-  experience: "work",
-  desired: {
-    model: "GPT-5.6 Sol",
-    effort: "High",
-    speed: "Standard"
-  },
-  strict: true
-});
-
-const snapshot = await chatgpt.configuration.snapshot({ experience: "chat" });
-if (snapshot.ok && snapshot.data) {
-  await chatgpt.configuration.restore({ snapshot: snapshot.data });
-}
-```
-
-Do not assume the currently selected ChatGPT pane matches the requested
-experience. `experience.open` handles the current Chat/Work home radios,
-returns from an active Work task to the selector when necessary, retains older
-UI fallbacks, and verifies the resulting pane.
-
-Start Work once, then poll or steer the same task:
-
-```ts
-const started = await chatgpt.work.start({
-  prompt: "Produce a decision-ready implementation brief.",
-  newTask: true,
-  wait: false,
-  read: false
-});
-
-const status = await chatgpt.work.status({ includeArtifacts: true });
-await chatgpt.work.steer({
-  prompt: "Add a prioritized migration sequence.",
-  wait: false,
-  read: false
-});
-const latest = await chatgpt.work.readLatest({ format: "markdown" });
-```
-
-`newTask` defaults to true. If a current Work task is loaded and no unique
-new-task control can be verified, the SDK blocks instead of appending
-accidentally. After a partial or timeout result, use `work.status`,
-`work.wait`, or `work.readLatest`; do not resubmit the original task.
-
-Continue a user-open ChatGPT thread without replacing the tab:
-
-```ts
-await chatgpt.askInThread({
-  thread: { type: "url", url: "https://chatgpt.com/c/<conversation-id>" },
-  existingTab: true,
-  prompt: "Continue from the latest answer.",
-  wait: true,
-  read: { format: "markdown" }
-});
-```
-
-If you run browser-required commands from an ordinary shell, the safe expected result is a structured `browser_bridge_unavailable` blocker. That means the protocol path is working, but no visible browser bridge was available to the process.
-
-Download an image-only generation through the artifact primitives:
-
-```ts
-const before = await chatgpt.artifacts.captureBaseline();
-
-await chatgpt.artifacts.wait({
-  kind: "image",
-  requireDownload: true
-});
-
-const downloaded = await chatgpt.artifacts.downloadLatest({
-  destDir: "/absolute/output/dir"
-});
-
-const delta = before.data
-  ? await chatgpt.artifacts.captureDelta({ baseline: before.data })
-  : undefined;
-```
-
-Generated images are artifacts, not assistant text. `messages.readLatest()` can
-correctly return `not_found` for an image-only result while
-`artifacts.downloadLatest()` still saves the image. If a claimed user-open tab's
-bridge session is stale, artifact export may recover by reopening the same saved
-`https://chatgpt.com/c/...` conversation in a temporary bridge-owned tab and
-using the bridge page-assets inventory. This recovery is fallback-only; normal
-text/thread commands do not automatically replace the user's tab.
-
-## Python Quick Start
-
-The Python package talks to the Node backend. Build or install a backend command first, then point Python at it:
-
-```bash
-python -m pip install --pre codex-chatgpt-control
-npm install codex-chatgpt-control@next
-```
-
-```python
-from codex_chatgpt_control import Agent, BackendClient, Runner, StdioBackendTransport
-
-backend = BackendClient(StdioBackendTransport(
-    command=["npx", "--yes", "--package", "codex-chatgpt-control", "codex-chatgpt-control-backend"]
-))
-runner = Runner(backend)
-
-try:
-    result = runner.run_sync(
-        Agent(name="reviewer", instructions="Review carefully."),
-        {
-            "input": "Reply with hi.",
-            "thread": {"type": "new"},
-            "response": {"format": "markdown"},
-        },
-    )
-finally:
-    backend.close()
-
-print(result.status)
-print(result.output_text)
-```
-
-The Python package is a protocol client. The current browser runtime is still Node-backed.
-
-## Quick Start From Source
-
-Clone the repo and build the Node runtime:
-
-```bash
-git clone https://github.com/adamallcock/codex-chatgpt-control.git
-cd codex-chatgpt-control/packages/node
-npm ci
-npm test
-npm run build
-npm run bundle
-npm run bundle:backend
-```
-
-Use the built source bundle from a Codex/browser-bridge host:
-
-```ts
-import { createChatGPT } from "./dist/codex-chatgpt-control.bundle.mjs";
-
-const chatgpt = createChatGPT({ agent: globalThis.agent });
-```
-
------
-
-![codex-chatgpt-control visible-session bridge banner](assets/readme/codex-chatgpt-control-readme-banner.png)
-
-## SDK Shape
-
-The main Node entrypoint is `createChatGPT({ agent })`. It exposes:
-
-- `chatgpt.agent(...)` and `chatgpt.runner.run(...)` for Agents-style visible-session workflows.
-- `chatgpt.ask(...)`, `askInThread(...)`, `askWithFiles(...)`, and `askAndDownload(...)` for common task flows.
-- `chatgpt.responses.create(...)` for a narrow Responses-shaped adapter over the same visible browser runner.
-- Primitive groups for `session`, `experience`, `configuration`, `work`, `threads`, `messages`, `artifacts`, `files`, `modes`, `tools`, and `response`.
-- Discovery helpers: `chatgpt.help()`, `chatgpt.commands()`, and `chatgpt.describe(name)`.
-- Local run reports through `chatgpt.createReport(...)` and `chatgpt.reports`; prompt and response content is omitted unless explicitly enabled.
-
-Useful repo links:
-
-- [Bundled Codex skill](skills/codex-chatgpt-control/SKILL.md)
-- [Chat and Work migration](docs/chat-work-migration.md)
-- [Architecture](docs/architecture.md)
-- [Browser bridge](docs/browser-bridge.md)
-- [Safety model](docs/safety.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Release process](docs/release-process.md)
-- [Python examples](packages/python/examples/)
-
-## Runtime Requirements
-
-For deterministic tests and ordinary-shell protocol checks:
-
-- Node.js 20 or newer for `packages/node`
-- Python 3.10 or newer for `packages/python`
-- npm for Node dependency installation
-- Python virtualenv tooling for Python development
-
-For real ChatGPT browser control:
-
-- a signed-in ChatGPT web session in Chrome
-- a compatible Codex/browser bridge that exposes `globalThis.agent`
-- a visible browser tab or permission to open one
-- user approval for prompts, files, downloads, and any account-affecting action
-
-`globalThis.agent` is not created by this package. It must come from the host runtime, such as a Codex environment with a compatible browser bridge. The SDK refuses to fake this path: ordinary shell runs should return `browser_bridge_unavailable` for browser-required operations.
-
-### Local File Upload Requirements
-
-Attachment paths must be absolute on the machine running the Node backend. Use `/home/you/file.pdf` or `/mnt/c/work/file.pdf` for Linux/WSL backends. Use `C:\Users\you\file.pdf` or `\\server\share\file.pdf` for Windows backends. The backend rejects ambiguous Windows forms such as `C:Users\you\file.pdf` and rejects Windows-looking paths when the backend host is POSIX.
-
-File attachments need two separate permission gates:
-
-1. **Chrome extension gate:** open `chrome://extensions`, choose the Codex/browser bridge extension, open **Details**, and enable **Allow access to file URLs**.
-2. **Codex app gate:** in Codex settings, allow Google Chrome uploads under **Computer Use > Google Chrome > Permissions > Uploads**. Choose the most restrictive setting that still fits your workflow; for unattended local smoke tests, use the setting that always allows uploads.
-
-If either gate is missing, file upload workflows should stop with a structured permission blocker instead of retrying blindly.
-
-On current Chrome bridge builds, the Node runtime uses the tab's origin-scoped
-CDP capability only to click Chat's hidden file input with a browser user
-gesture. The approved native chooser still performs the local-file handoff;
-packet bytes are not copied through page scripts or hidden network endpoints.
-An unavailable browser upload surface and a disconnected bridge are reported
-separately from an explicit permission denial.
-
-## Repository Layout
+Ask naturally:
 
 ```text
-skills/             Public Codex skill for agent-facing usage
-packages/node/      TypeScript runtime, contracts, backend server, tests
-packages/python/    Python parity client, examples, tests
-docs/               Public architecture, safety, bridge, and release notes
-.github/workflows/  Deterministic CI gates
+Ask Pro to explain in two short paragraphs why idempotency matters when polling a long-running job.
 ```
 
------
+Or invoke the skill explicitly:
 
-## Development
-
-Run deterministic Node gates:
-
-```bash
-cd packages/node
-npm ci
-npm test
-npm run build
-npm run bundle
-npm run bundle:backend
-npm run contract:validate
-npm run docs:drift
-npm run parity:fixtures
-npm run parity:suite
+```text
+Use $chatgpt-pro-ask to ask Pro: "Give me three names for this feature and explain the tradeoffs."
 ```
 
-Run deterministic Python gates after the backend bundle exists:
+For repository work:
 
-```bash
-cd packages/python
-python -m pip install -e .[dev]
-python -m unittest discover -s tests
-python -m compileall -q src examples
-python -m pyright src tests
-python scripts/live_smoke.py --mode ordinary-shell
+```text
+Use $chatgpt-pro-code-review to review this branch against main. Ask the question you think is most useful, then verify any material findings before changing code.
 ```
 
-Ordinary-shell smoke checks are expected to return structured browser-bridge blockers for browser-required actions. A real ChatGPT run requires a compatible visible browser session and bridge.
+The current Codex task controls the actual question. The skill does not force an audit checklist, findings schema, patch ban, or a particular depth.
 
-Before claiming Chat/Work support is live-qualified, run the reusable expansion
-scenario from a bridge-enabled installed candidate:
+### From an agent
 
-```bash
-CHATGPT_E2E_SCENARIOS="chat-work-expansion" npm --prefix packages/node run smoke:live
+Use `$chatgpt-pro-ask` for a context-free question. Its minimal runtime call is:
+
+```js
+const result = await chatgpt.reviews.askPro({
+  request: {
+    additionalInstructions: "Explain briefly why stable job IDs matter."
+  }
+});
 ```
 
-The real-setting mutation scenario is opt-in and restores the original Work
-effort plus Chat pane in a `finally` path:
+With no repository refs, the visible Chat user turn is the question itself and there is no attachment step.
 
-```bash
-CHATGPT_E2E_CONFIGURATION_MUTATION=1 \
-CHATGPT_E2E_SCENARIOS="configuration-mutate-restore" \
-npm --prefix packages/node run smoke:live
+Use `$chatgpt-pro-code-review` when repository evidence is useful:
+
+```js
+const result = await chatgpt.reviews.askPro({
+  repositoryRoot: "/absolute/repository/root",
+  baseRef: "origin/main",
+  headRef: "HEAD",
+  request: {
+    additionalInstructions: "Review this change and tell me what you think matters."
+  },
+  context: {
+    mode: "review-packets",
+    includeWorkingTree: true
+  }
+});
 ```
 
-To prepare a sanitized locale/rollout fixture draft from an already-open
-authorized ChatGPT tab:
+The installed skills contain the browser-runtime bootstrap, strict Pro safeguards, output options, and resume loop. Agents should use those skills instead of recreating the workflow from snippets.
 
-```bash
-cd packages/node
-npm run capture:surface-profile -- --id work-basic-en --locale en-US --experience work
+## Long answers and resume
+
+Pro can take minutes. Each call performs a bounded wait; an incomplete result is returned as `in_progress` with an archive directory. The agent resumes with:
+
+```js
+await chatgpt.reviews.askPro({
+  resume: { archiveDirectory: result.archiveDirectory }
+});
 ```
 
-The draft defaults to `unverified`, strips conversation identity/content, and
-must pass contract validation and human review before being committed.
+The archived submission receipt is authoritative. Resume reopens the same visible conversation, proves the prompt identity, and polls without reattaching files or resending the question. An interrupted caller can resume later; a live concurrent owner is still rejected.
 
-Use `--experience chat` or `--experience work` to select and safely restore a
-specific pane. For all supported languages, the existing loop can also capture
-the localized Chat/Work radios and Work configuration graph:
+If a running request has genuinely become obsolete, the current Codex session may explicitly stop that exact visible response and start a new request. The bridge never auto-stops merely because files changed.
 
-```bash
-npm run capture:intelligence-locales -- --auto-switch --all --capture-surfaces
+## Output and local archive
+
+By default the caller gets:
+
+- the complete final Markdown;
+- every new downloadable file or generated image;
+- the canonical Chat conversation URL;
+- strict Pro verification evidence;
+- hashes and a local archive for recovery.
+
+Archives live under `.codex/pro-reviews/` by default and are gitignored in this repository. Context-free asks archive only the request/workflow evidence and result. Repository-backed asks also archive the packet manifest and packet files.
+
+Generated patches, scripts, and code remain suggestions. Codex decides what to inspect, test, and apply.
+
+## Visible-session boundary
+
+This project controls the visible ChatGPT web product through approved browser actions. It does not:
+
+- call hidden ChatGPT endpoints;
+- extract credentials, cookies, tokens, or browser storage;
+- bypass login, CAPTCHA, confirmations, or file permissions;
+- scrape private history in the background;
+- silently truncate a completed answer;
+- automatically execute generated patches.
+
+See [privacy](docs/plugin-review-privacy.md), [terms](docs/plugin-review-terms.md), and the detailed [bridge guide](docs/pro-review-bridge.md).
+
+## Update or uninstall
+
+A marketplace installed with `--ref` stays pinned. To move to a newer tag:
+
+```powershell
+codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
+codex plugin marketplace remove chatgpt-pro-review-bridge
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref <new-tag>
+codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
-## Package Coordinates
+Start a new Codex task afterward.
 
-- npm package: [`codex-chatgpt-control`](https://www.npmjs.com/package/codex-chatgpt-control)
-- PyPI package: [`codex-chatgpt-control`](https://pypi.org/project/codex-chatgpt-control/)
-- Node import: `import { createChatGPT } from "codex-chatgpt-control";`
-- Python import: `import codex_chatgpt_control`
+To uninstall:
 
-## Safety
+```powershell
+codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
+codex plugin marketplace remove chatgpt-pro-review-bridge
+```
 
-Do not use this project to bypass login, access hidden endpoints, scrape private data, or automate activity outside a user-directed visible session. See [docs/safety.md](docs/safety.md) and [SECURITY.md](SECURITY.md).
+## Develop
+
+The focused plugin is in [plugins/chatgpt-pro-review](plugins/chatgpt-pro-review). The reusable TypeScript runtime is in [packages/node](packages/node), with a Python parity client in [packages/python](packages/python).
+
+Common gates:
+
+```powershell
+npm --prefix packages/node ci
+npm run node:test
+npm run node:build
+npm run node:contracts
+npm run python:test
+npm run python:pyright
+npm run plugin:build
+npm run plugin:check
+npm run plugin:validate
+npm run release:smoke-source
+```
+
+Live browser qualification must run from a browser-enabled Codex task; an ordinary shell is expected to return `browser_bridge_unavailable`.
+
+Useful references:
+
+- [Architecture](docs/architecture.md)
+- [Browser bridge](docs/browser-bridge.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Release process](docs/release-process.md)
+- [Full SDK skill](skills/codex-chatgpt-control/SKILL.md)
+
+## Upstream
+
+The general Chat/Work controller originated in [adamallcock/codex-chatgpt-control](https://github.com/adamallcock/codex-chatgpt-control). Generic compatibility fixes are kept separate and proposed upstream; the focused AskPro workflow and plugin remain in this fork.
+
+License: [MIT](LICENSE).

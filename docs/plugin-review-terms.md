@@ -9,6 +9,6 @@ status: prerelease
 
 This is unofficial open-source software and is not affiliated with, endorsed by, or sponsored by OpenAI. Use remains subject to the applicable ChatGPT, Codex, browser, repository, and account permissions.
 
-Use only for user-directed visible-session workflows. Do not use it to bypass login, CAPTCHA, product limits, account confirmations, or file permissions; access hidden endpoints; extract credentials; rotate accounts; scrape private history; or automatically execute generated patches and scripts.
+Use only for user-directed visible-session workflows. Do not use it to bypass login, CAPTCHA, account confirmations, or file permissions; access hidden endpoints; extract credentials; scrape private history; or automatically execute generated patches and scripts.
 
 The software is provided under the repository license.
