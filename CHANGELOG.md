@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-beta.8
+
+- Reclaims incomplete review lease files after the same five-minute stale
+  window used for valid leases, while preserving fresh fail-closed locking.
+
 ## 0.6.0-beta.7
 
 - Adds submit-once AskPro follow-ups in an existing canonical visible Chat

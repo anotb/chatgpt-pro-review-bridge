@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-beta.8
+
+- Recovers archives whose previous bounded browser call was interrupted while
+  creating its lease record.
+
 ## 0.6.0-beta.7
 
 - Adds `thread` targeting for new AskPro questions so follow-ups retain strict

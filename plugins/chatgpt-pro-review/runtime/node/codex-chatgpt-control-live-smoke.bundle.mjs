@@ -15624,7 +15624,14 @@ async function removeLeaseIfOwnerExitedOrExpired(leasePath) {
   try {
     value = JSON.parse(await readFile5(leasePath, "utf8"));
   } catch {
-    return false;
+    try {
+      const leaseStat = await stat8(leasePath);
+      if (Date.now() - leaseStat.mtimeMs < REVIEW_LEASE_MAX_AGE_MS) return false;
+      await rm2(leasePath, { force: true });
+      return true;
+    } catch {
+      return false;
+    }
   }
   if (!isRecord6(value) || value.schemaVersion !== 1 || !Number.isInteger(value.pid) || value.pid <= 0) return false;
   const acquiredAt = typeof value.acquiredAt === "string" ? Date.parse(value.acquiredAt) : Number.NaN;

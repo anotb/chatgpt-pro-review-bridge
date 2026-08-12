@@ -31,7 +31,7 @@ Any failure to verify Pro—including fallback, login, permission, or ambiguous-
 Install a pinned release from this repository:
 
 ```powershell
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.7
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.8
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
