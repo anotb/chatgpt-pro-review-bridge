@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0-beta.6
+
+- Adds visible-history recovery for provisional Chat conversation IDs.
+- Makes archive leases resilient to process-ID reuse after bounded browser
+  calls exit.
+- Restores lexical containment checks before validation-path canonicalization.
+
 ## 0.6.0-beta.5
 
 - Documents the distinction between one bounded poll invocation and the

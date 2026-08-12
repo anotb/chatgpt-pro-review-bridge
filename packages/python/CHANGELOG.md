@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0b6
+
+- Aligns the Python parity package with visible-history recovery, resilient
+  leases, and validation-path containment fixes in the shared backend.
+
 ## 0.6.0b5
 
 - Aligns the Python parity package with the long-running resume documentation.

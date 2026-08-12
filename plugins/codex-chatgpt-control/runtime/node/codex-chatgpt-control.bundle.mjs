@@ -5699,6 +5699,19 @@ async function searchThreads(env, args) {
     return resultError(error instanceof Error ? error : new Error(String(error)), await contextFromPage(page));
   }
 }
+async function listVisibleThreads(env, limit = 20) {
+  const boot = await ensurePage(env);
+  if (!boot.ok) {
+    return boot;
+  }
+  const page = env.page;
+  try {
+    const results = (await extractThreadSearchResultsFromPage(page)).slice(0, limit);
+    return resultOk({ query: "", results }, await contextFromPage(page));
+  } catch (error) {
+    return resultError(error instanceof Error ? error : new Error(String(error)), await contextFromPage(page));
+  }
+}
 async function newThread(env, args = {}) {
   const boot = await ensurePage(env);
   if (!boot.ok) {
@@ -14024,7 +14037,8 @@ async function prepareReviewContext(args, now = /* @__PURE__ */ new Date()) {
       "repository_context_incomplete"
     );
   }
-  const repositoryRoot = await resolveRepositoryRoot(args.repositoryRoot);
+  const repositoryRoots = await resolveRepositoryRoots(args.repositoryRoot);
+  const repositoryRoot = repositoryRoots.canonical;
   const baseRef = requireNonEmpty(args.baseRef, "baseRef");
   const headRef = requireNonEmpty(args.headRef ?? "HEAD", "headRef");
   const baseSha = await gitRequired(repositoryRoot, ["rev-parse", "--verify", `${baseRef}^{commit}`], "base_ref_unresolved");
@@ -14051,7 +14065,7 @@ async function prepareReviewContext(args, now = /* @__PURE__ */ new Date()) {
     const excludedChanged = changedAll.filter((path3) => isPacketExcludedPath(path3, archivePathPrefix));
     const changed = changedAll.filter((path3) => !isPacketExcludedPath(path3, archivePathPrefix));
     const overlayPaths = includeWorkingTree ? await workingTreePaths(repositoryRoot, archivePathPrefix) : /* @__PURE__ */ new Set();
-    let validation = await validationOutput(args, repositoryRoot);
+    let validation = await validationOutput(args, repositoryRoot, repositoryRoots.lexical);
     const fileRecords = packetStatus.excluded.map((item) => ({
       path: item.path,
       category: "changed-file",
@@ -14304,11 +14318,13 @@ Requested emphasis: ${focus.join(", ")}.`;
     );
   }
 }
-async function resolveRepositoryRoot(input) {
+async function resolveRepositoryRoots(input) {
   const candidate = resolve5(input);
   const root = (await gitChecked(candidate, ["rev-parse", "--show-toplevel"], "repository_not_found")).stdout.trim();
   if (root.length === 0) throw new ReviewPreparationError("repositoryRoot is not a Git worktree.", "repository_not_found");
-  return await realpath(root);
+  const prefix = (await gitChecked(candidate, ["rev-parse", "--show-prefix"], "repository_not_found")).stdout.trim();
+  const lexical = prefix.length === 0 ? candidate : resolve5(candidate, ...prefix.split("/").filter(Boolean).map(() => ".."));
+  return { canonical: await realpath(root), lexical };
 }
 async function changedFiles(root, mergeBase, headSha, includeWorkingTree, archivePathPrefix) {
   const committed = parseNameStatus((await gitChecked(root, ["diff", "--name-status", "--find-renames", `${mergeBase}..${headSha}`], "git_diff_name_status_failed")).stdout);
@@ -14558,12 +14574,15 @@ function requestMarkdown(args, manifest, packetPaths) {
     args.request?.additionalInstructions ?? ""
   ].join("\n");
 }
-async function validationOutput(args, root) {
+async function validationOutput(args, root, lexicalRoot) {
   if (args.context?.includeValidationOutput === false) return void 0;
   if (args.context?.validationOutput !== void 0) return args.context.validationOutput;
   const path3 = args.context?.validationOutputPath;
   if (path3 === void 0) return void 0;
   const supplied = isAbsolute2(path3) ? resolve5(path3) : resolve5(root, path3);
+  if (!isInside(root, supplied) && !isInside(lexicalRoot, supplied)) {
+    throw new ReviewPreparationError(`Path escapes repository root: ${supplied}`, "repository_path_escape");
+  }
   const absolute = join5(await realpath(dirname3(supplied)), basename4(supplied));
   assertInside(root, absolute);
   const linkInfo = await lstat(absolute);
@@ -14654,9 +14673,12 @@ function generatedPathReason(path3) {
   return void 0;
 }
 function assertInside(root, target) {
-  const rel = relative2(resolve5(root), resolve5(target));
-  if (rel === "" || !rel.startsWith(`..${sep2}`) && rel !== ".." && !isAbsolute2(rel)) return;
+  if (isInside(root, target)) return;
   throw new ReviewPreparationError(`Path escapes repository root: ${target}`, "repository_path_escape");
+}
+function isInside(root, target) {
+  const rel = relative2(resolve5(root), resolve5(target));
+  return rel === "" || !rel.startsWith(`..${sep2}`) && rel !== ".." && !isAbsolute2(rel);
 }
 function positiveInteger(value, fallback) {
   return Number.isInteger(value) && (value ?? 0) > 0 ? value : fallback;
@@ -14750,10 +14772,10 @@ async function runCodeReviewWithPort(args, port) {
     if (args.resume === void 0) {
       prepared = await runStep("PREPARE_CONTEXT", () => prepareReviewContext(args, port.now()));
       archiveDirectory = prepared.archiveDirectory;
-      releaseLease = await acquireReviewLease(archiveDirectory, port.now());
+      releaseLease = await acquireReviewLease(archiveDirectory);
     } else {
       archiveDirectory = args.resume.archiveDirectory;
-      releaseLease = await acquireReviewLease(archiveDirectory, port.now());
+      releaseLease = await acquireReviewLease(archiveDirectory);
       prepared = await readArchivedPreparedContext(args.resume.archiveDirectory);
       try {
         configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
@@ -15462,6 +15484,25 @@ function validateThreadCheckpoint(checkpoint, submission, prepared) {
   }
 }
 async function recoverReviewThread(env, query, expectedPrompt) {
+  const visible = await listVisibleThreads(env, 20);
+  if (visible.ok && visible.data !== void 0) {
+    const candidates = visible.data.results.map((candidate, index) => ({ candidate, index, score: recoveryCandidateScore(candidate.title, query) })).sort((left, right) => right.score - left.score || left.index - right.index).slice(0, 12);
+    for (const { candidate } of candidates) {
+      const opened = await openThread(env, { url: new URL(candidate.href, "https://chatgpt.com/").toString(), timeoutMs: 12e3 });
+      if (!opened.ok) continue;
+      const user = await readLatest(env, { role: "user", format: "text" });
+      if (user.ok && visibleUserTurnContainsExactPrompt(user.data?.text ?? "", expectedPrompt)) {
+        return {
+          ...opened,
+          warnings: [
+            ...visible.warnings,
+            ...opened.warnings,
+            "Recovered the archived review from a prompt-identical conversation in visible Chat history."
+          ]
+        };
+      }
+    }
+  }
   const search = await searchThreads(env, { query, limit: 3 });
   if (!search.ok || search.data === void 0) {
     return {
@@ -15492,6 +15533,13 @@ async function recoverReviewThread(env, query, expectedPrompt) {
     },
     context: search.context
   };
+}
+function recoveryCandidateScore(title, query) {
+  const queryTerms = new Set(recoveryTerms(query));
+  return recoveryTerms(title).reduce((score, term) => score + (queryTerms.has(term) ? 1 : 0), 0);
+}
+function recoveryTerms(value) {
+  return (value.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((term) => term.length >= 3).map((term) => term.length > 4 && term.endsWith("s") ? term.slice(0, -1) : term);
 }
 function normalizePrompt(value) {
   return value.replace(/\r\n/g, "\n").trim();
@@ -15573,7 +15621,8 @@ function sameResolvedPath(left, right) {
 function isRecord6(value) {
   return typeof value === "object" && value !== null;
 }
-async function acquireReviewLease(archiveDirectory, now) {
+var REVIEW_LEASE_MAX_AGE_MS = 5 * 6e4;
+async function acquireReviewLease(archiveDirectory) {
   const leasePath = join6(archiveDirectory, ".workflow.lock");
   let handle;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -15596,7 +15645,13 @@ async function acquireReviewLease(archiveDirectory, now) {
     }
   }
   if (handle === void 0) throw new Error("Unable to acquire the review archive lease.");
-  await handle.writeFile(`${JSON.stringify({ schemaVersion: 1, pid: process.pid, acquiredAt: now.toISOString() })}
+  const acquiredAt = /* @__PURE__ */ new Date();
+  await handle.writeFile(`${JSON.stringify({
+    schemaVersion: 1,
+    pid: process.pid,
+    acquiredAt: acquiredAt.toISOString(),
+    expiresAt: new Date(acquiredAt.getTime() + REVIEW_LEASE_MAX_AGE_MS).toISOString()
+  })}
 `);
   let released = false;
   return async () => {
@@ -15606,7 +15661,7 @@ async function acquireReviewLease(archiveDirectory, now) {
     await rm2(leasePath, { force: true });
   };
 }
-async function removeLeaseIfOwnerExited(leasePath) {
+async function removeLeaseIfOwnerExitedOrExpired(leasePath) {
   let value;
   try {
     value = JSON.parse(await readFile6(leasePath, "utf8"));
@@ -15614,6 +15669,13 @@ async function removeLeaseIfOwnerExited(leasePath) {
     return false;
   }
   if (!isRecord6(value) || value.schemaVersion !== 1 || !Number.isInteger(value.pid) || value.pid <= 0) return false;
+  const acquiredAt = typeof value.acquiredAt === "string" ? Date.parse(value.acquiredAt) : Number.NaN;
+  const expiresAt = typeof value.expiresAt === "string" ? Date.parse(value.expiresAt) : Number.NaN;
+  const expired = Number.isFinite(expiresAt) ? Date.now() >= expiresAt : Number.isFinite(acquiredAt) && Date.now() - acquiredAt >= REVIEW_LEASE_MAX_AGE_MS;
+  if (expired) {
+    await rm2(leasePath, { force: true });
+    return true;
+  }
   try {
     process.kill(value.pid, 0);
     return false;
@@ -15625,6 +15687,7 @@ async function removeLeaseIfOwnerExited(leasePath) {
   return true;
 }
 async function waitForLeaseTurnover(leasePath, timeoutMs = 3e3) {
+  if (await removeLeaseIfOwnerExitedOrExpired(leasePath)) return true;
   let ownerPid;
   try {
     const value = JSON.parse(await readFile6(leasePath, "utf8"));
@@ -15637,7 +15700,7 @@ async function waitForLeaseTurnover(leasePath, timeoutMs = 3e3) {
   if (ownerPid === process.pid) return false;
   const deadline = Date.now() + timeoutMs;
   while (true) {
-    if (await removeLeaseIfOwnerExited(leasePath)) return true;
+    if (await removeLeaseIfOwnerExitedOrExpired(leasePath)) return true;
     try {
       await stat8(leasePath);
     } catch (error) {
@@ -17418,6 +17481,7 @@ export {
   listLatestArtifacts,
   listPageArtifacts,
   listProjectSources,
+  listVisibleThreads,
   locatorCountWithTimeout,
   messageStatus,
   newChatButton,

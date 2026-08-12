@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0-beta.6
+
+- Recovers provisional submissions from prompt-identical conversations in the
+  visible Chat history before falling back to Chat search.
+- Expires abandoned workflow leases safely when Windows reuses a dead worker's
+  process ID.
+- Rejects outside validation paths before resolving their parent directories.
+
 ## 0.6.0-beta.5
 
 - Clarifies that bounded calls may resume the same Pro request for more than an
