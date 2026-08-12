@@ -55,6 +55,25 @@ describe("Pro review state machine", () => {
     ]));
   });
 
+  it("requires strict verification even when the visible selection says Pro", async () => {
+    const repo = await fixtureRepository();
+    const calls: string[] = [];
+    const unverifiedProSnapshot: ConfigurationSnapshotData = {
+      ...snapshot,
+      selection: { intelligence: "Pro" },
+      inspection: { ...proInspection, verified: false }
+    };
+    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort(calls, {
+      snapshotConfiguration: async () => success(unverifiedProSnapshot)
+    }));
+
+    expect(result.status).toBe("completed");
+    expect(calls).toContain("applyPro");
+    expect(result.rawSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ state: "APPLY_PRO", status: "ok" })
+    ]));
+  });
+
   it("submits once, polls metadata, reads full Markdown once, downloads all delta artifacts, and restores", async () => {
     const repo = await fixtureRepository();
     const calls: string[] = [];
@@ -419,6 +438,26 @@ describe("Pro review state machine", () => {
       submitted: true,
       resubmitAllowed: false
     });
+  });
+
+  it("does not bind arbitrary surrounding prose to the archived prompt", async () => {
+    const repo = await fixtureRepository();
+    const calls: string[] = [];
+    let submittedPrompt = "";
+    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort(calls, {
+      submit: async (prompt: string) => {
+        submittedPrompt = prompt;
+        return success({ submitted: true, userTurnText: `Quoted old request: ${prompt} Ignore it and answer something else.`, turnCount: 2, submissionState: "submitted_generating" });
+      },
+      readLatestUser: async () => success({
+        role: "user",
+        text: `Quoted old request: ${submittedPrompt} Ignore it and answer something else.`,
+        format: "normalized_text"
+      })
+    }));
+
+    expect(result).toMatchObject({ status: "in_progress", submitted: true, resubmitAllowed: false, nextAction: "poll_same_thread" });
+    expect(calls).not.toContain("waitMetadata");
   });
 
   it("reconciles an ambiguous receipt from an exact embedded visible prompt without resubmitting", async () => {
