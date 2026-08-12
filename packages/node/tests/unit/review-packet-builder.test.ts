@@ -282,6 +282,17 @@ describe("deterministic review packet builder", () => {
       context: { validationOutputPath: link }
     })).rejects.toMatchObject({ code: "validation_output_symlink" });
   });
+
+  it("rejects an outside validation path before resolving its parent", async () => {
+    const repo = await fixtureRepository();
+    const outside = join(await mkdtemp(join(tmpdir(), "chatgpt-pro-review-outside-")), "missing", "validation.log");
+
+    await expect(prepareReviewContext({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      context: { validationOutputPath: outside }
+    })).rejects.toMatchObject({ code: "repository_path_escape" });
+  });
 });
 
 async function fixtureRepository(): Promise<string> {

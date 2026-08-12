@@ -55,6 +55,7 @@ export class ReviewPreparationError extends Error {
 
 type GitResult = { stdout: string; stderr: string; code: number };
 type Section = { title: string; body: string; files: string[] };
+type RepositoryRoots = { canonical: string; lexical: string };
 
 export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Date()): Promise<PreparedReviewContext> {
   if (args.output?.archive === false) {
@@ -70,7 +71,8 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
       "repository_context_incomplete"
     );
   }
-  const repositoryRoot = await resolveRepositoryRoot(args.repositoryRoot);
+  const repositoryRoots = await resolveRepositoryRoots(args.repositoryRoot);
+  const repositoryRoot = repositoryRoots.canonical;
   const baseRef = requireNonEmpty(args.baseRef, "baseRef");
   const headRef = requireNonEmpty(args.headRef ?? "HEAD", "headRef");
   const baseSha = await gitRequired(repositoryRoot, ["rev-parse", "--verify", `${baseRef}^{commit}`], "base_ref_unresolved");
@@ -100,7 +102,7 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
     const overlayPaths = includeWorkingTree
       ? await workingTreePaths(repositoryRoot, archivePathPrefix)
       : new Set<string>();
-    let validation = await validationOutput(args, repositoryRoot);
+    let validation = await validationOutput(args, repositoryRoot, repositoryRoots.lexical);
     const fileRecords: PacketFileRecord[] = packetStatus.excluded.map(item => ({
       path: item.path,
       category: "changed-file",
@@ -354,11 +356,15 @@ async function prepareContextFreeQuestion(args: ProCodeReviewArgs, now: Date): P
   }
 }
 
-async function resolveRepositoryRoot(input: string): Promise<string> {
+async function resolveRepositoryRoots(input: string): Promise<RepositoryRoots> {
   const candidate = resolve(input);
   const root = (await gitChecked(candidate, ["rev-parse", "--show-toplevel"], "repository_not_found")).stdout.trim();
   if (root.length === 0) throw new ReviewPreparationError("repositoryRoot is not a Git worktree.", "repository_not_found");
-  return await realpath(root);
+  const prefix = (await gitChecked(candidate, ["rev-parse", "--show-prefix"], "repository_not_found")).stdout.trim();
+  const lexical = prefix.length === 0
+    ? candidate
+    : resolve(candidate, ...prefix.split("/").filter(Boolean).map(() => ".."));
+  return { canonical: await realpath(root), lexical };
 }
 
 async function changedFiles(
@@ -672,12 +678,15 @@ function requestMarkdown(args: ProCodeReviewArgs, manifest: ReviewPacketManifest
   ].join("\n");
 }
 
-async function validationOutput(args: ProCodeReviewArgs, root: string): Promise<string | undefined> {
+async function validationOutput(args: ProCodeReviewArgs, root: string, lexicalRoot: string): Promise<string | undefined> {
   if (args.context?.includeValidationOutput === false) return undefined;
   if (args.context?.validationOutput !== undefined) return args.context.validationOutput;
   const path = args.context?.validationOutputPath;
   if (path === undefined) return undefined;
   const supplied = isAbsolute(path) ? resolve(path) : resolve(root, path);
+  if (!isInside(root, supplied) && !isInside(lexicalRoot, supplied)) {
+    throw new ReviewPreparationError(`Path escapes repository root: ${supplied}`, "repository_path_escape");
+  }
   // Canonicalize the parent without following the leaf. macOS exposes /var as
   // a link to /private/var, and Windows can likewise alias temporary roots.
   // Comparing the uncanonicalized spelling to a real repository root would
@@ -799,9 +808,13 @@ function generatedPathReason(path: string): string | undefined {
 }
 
 function assertInside(root: string, target: string): void {
-  const rel = relative(resolve(root), resolve(target));
-  if (rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel))) return;
+  if (isInside(root, target)) return;
   throw new ReviewPreparationError(`Path escapes repository root: ${target}`, "repository_path_escape");
+}
+
+function isInside(root: string, target: string): boolean {
+  const rel = relative(resolve(root), resolve(target));
+  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
