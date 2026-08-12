@@ -742,6 +742,37 @@ describe("Pro review state machine", () => {
     await expect(readFile(join(archiveDirectory, ".workflow.lock"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     if (owner.exitCode === null) owner.kill();
   });
+
+  it("reclaims an expired lease whose PID has been reused by a live process", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([]));
+    const archiveDirectory = first.archiveDirectory!;
+    const prompt = await readFile(join(archiveDirectory, "prompt.md"), "utf8");
+    const reusedOwner = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 10000)"], { stdio: "ignore" });
+    if (reusedOwner.pid === undefined) throw new Error("Unable to start the reused-PID fixture.");
+    await writeFile(join(archiveDirectory, ".workflow.lock"), JSON.stringify({
+      schemaVersion: 1,
+      pid: reusedOwner.pid,
+      acquiredAt: new Date(Date.now() - 10 * 60_000).toISOString()
+    }));
+    const calls: string[] = [];
+
+    try {
+      const resumed = await runCodeReviewWithPort({
+        repositoryRoot: repo,
+        baseRef: "HEAD",
+        resume: { archiveDirectory }
+      }, makePort(calls, {
+        readLatestUser: async () => success({ role: "user", text: prompt, format: "normalized_text" })
+      }));
+
+      expect(resumed.status).toBe("completed");
+      expect(calls).toContain("bootstrap");
+      await expect(readFile(join(archiveDirectory, ".workflow.lock"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (reusedOwner.exitCode === null) reusedOwner.kill();
+    }
+  });
 });
 
 function makePort(calls: string[], overrides: Partial<ReviewWorkflowPort> = {}): ReviewWorkflowPort {

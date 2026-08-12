@@ -12,7 +12,7 @@ import { openExperience } from "../commands/experience.js";
 import { attachFiles, downloadLatestFile } from "../commands/files.js";
 import { composeMessage, messageStatus, readLatest, submitMessage, waitForMessage } from "../commands/messages.js";
 import { bootstrap } from "../commands/session.js";
-import { newThread, openThread, searchThreads } from "../commands/threads.js";
+import { listVisibleThreads, newThread, openThread, searchThreads } from "../commands/threads.js";
 import { redactReportValue } from "../safety/report-redaction.js";
 import type {
   ApplyConfigurationData,
@@ -158,10 +158,10 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     if (args.resume === undefined) {
       prepared = await runStep("PREPARE_CONTEXT", () => prepareReviewContext(args, port.now()));
       archiveDirectory = prepared.archiveDirectory;
-      releaseLease = await acquireReviewLease(archiveDirectory, port.now());
+      releaseLease = await acquireReviewLease(archiveDirectory);
     } else {
       archiveDirectory = args.resume.archiveDirectory;
-      releaseLease = await acquireReviewLease(archiveDirectory, port.now());
+      releaseLease = await acquireReviewLease(archiveDirectory);
       prepared = await readArchivedPreparedContext(args.resume.archiveDirectory);
       try {
         configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
@@ -984,6 +984,29 @@ function validateThreadCheckpoint(
 }
 
 async function recoverReviewThread(env: RuntimeEnv, query: string, expectedPrompt: string): Promise<CommandResult<OpenThreadData>> {
+  const visible = await listVisibleThreads(env, 20);
+  if (visible.ok && visible.data !== undefined) {
+    const candidates = visible.data.results
+      .map((candidate, index) => ({ candidate, index, score: recoveryCandidateScore(candidate.title, query) }))
+      .sort((left, right) => right.score - left.score || left.index - right.index)
+      .slice(0, 12);
+    for (const { candidate } of candidates) {
+      const opened = await openThread(env, { url: new URL(candidate.href, "https://chatgpt.com/").toString(), timeoutMs: 12_000 });
+      if (!opened.ok) continue;
+      const user = await readLatest(env, { role: "user", format: "text" });
+      if (user.ok && visibleUserTurnContainsExactPrompt(user.data?.text ?? "", expectedPrompt)) {
+        return {
+          ...opened,
+          warnings: [
+            ...visible.warnings,
+            ...opened.warnings,
+            "Recovered the archived review from a prompt-identical conversation in visible Chat history."
+          ]
+        };
+      }
+    }
+  }
+
   const search = await searchThreads(env, { query, limit: 3 });
   if (!search.ok || search.data === undefined) {
     return {
@@ -1014,6 +1037,17 @@ async function recoverReviewThread(env: RuntimeEnv, query: string, expectedPromp
     },
     context: search.context
   };
+}
+
+function recoveryCandidateScore(title: string, query: string): number {
+  const queryTerms = new Set(recoveryTerms(query));
+  return recoveryTerms(title).reduce((score, term) => score + (queryTerms.has(term) ? 1 : 0), 0);
+}
+
+function recoveryTerms(value: string): string[] {
+  return (value.toLowerCase().match(/[a-z0-9]+/g) ?? [])
+    .filter(term => term.length >= 3)
+    .map(term => term.length > 4 && term.endsWith("s") ? term.slice(0, -1) : term);
 }
 
 function normalizePrompt(value: string): string {
@@ -1128,7 +1162,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-async function acquireReviewLease(archiveDirectory: string, now: Date): Promise<() => Promise<void>> {
+const REVIEW_LEASE_MAX_AGE_MS = 5 * 60_000;
+
+async function acquireReviewLease(archiveDirectory: string): Promise<() => Promise<void>> {
   const leasePath = join(archiveDirectory, ".workflow.lock");
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1151,7 +1187,13 @@ async function acquireReviewLease(archiveDirectory: string, now: Date): Promise<
     }
   }
   if (handle === undefined) throw new Error("Unable to acquire the review archive lease.");
-  await handle.writeFile(`${JSON.stringify({ schemaVersion: 1, pid: process.pid, acquiredAt: now.toISOString() })}\n`);
+  const acquiredAt = new Date();
+  await handle.writeFile(`${JSON.stringify({
+    schemaVersion: 1,
+    pid: process.pid,
+    acquiredAt: acquiredAt.toISOString(),
+    expiresAt: new Date(acquiredAt.getTime() + REVIEW_LEASE_MAX_AGE_MS).toISOString()
+  })}\n`);
   let released = false;
   return async () => {
     if (released) return;
@@ -1161,7 +1203,7 @@ async function acquireReviewLease(archiveDirectory: string, now: Date): Promise<
   };
 }
 
-async function removeLeaseIfOwnerExited(leasePath: string): Promise<boolean> {
+async function removeLeaseIfOwnerExitedOrExpired(leasePath: string): Promise<boolean> {
   let value: unknown;
   try {
     value = JSON.parse(await readFile(leasePath, "utf8"));
@@ -1169,6 +1211,15 @@ async function removeLeaseIfOwnerExited(leasePath: string): Promise<boolean> {
     return false;
   }
   if (!isRecord(value) || value.schemaVersion !== 1 || !Number.isInteger(value.pid) || (value.pid as number) <= 0) return false;
+  const acquiredAt = typeof value.acquiredAt === "string" ? Date.parse(value.acquiredAt) : Number.NaN;
+  const expiresAt = typeof value.expiresAt === "string" ? Date.parse(value.expiresAt) : Number.NaN;
+  const expired = Number.isFinite(expiresAt)
+    ? Date.now() >= expiresAt
+    : Number.isFinite(acquiredAt) && Date.now() - acquiredAt >= REVIEW_LEASE_MAX_AGE_MS;
+  if (expired) {
+    await rm(leasePath, { force: true });
+    return true;
+  }
   try {
     process.kill(value.pid as number, 0);
     return false;
@@ -1181,6 +1232,7 @@ async function removeLeaseIfOwnerExited(leasePath: string): Promise<boolean> {
 }
 
 async function waitForLeaseTurnover(leasePath: string, timeoutMs = 3_000): Promise<boolean> {
+  if (await removeLeaseIfOwnerExitedOrExpired(leasePath)) return true;
   let ownerPid: number | undefined;
   try {
     const value: unknown = JSON.parse(await readFile(leasePath, "utf8"));
@@ -1198,7 +1250,7 @@ async function waitForLeaseTurnover(leasePath: string, timeoutMs = 3_000): Promi
 
   const deadline = Date.now() + timeoutMs;
   while (true) {
-    if (await removeLeaseIfOwnerExited(leasePath)) return true;
+    if (await removeLeaseIfOwnerExitedOrExpired(leasePath)) return true;
     try {
       await stat(leasePath);
     } catch (error) {

@@ -81,6 +81,24 @@ export async function searchThreads(
   }
 }
 
+export async function listVisibleThreads(
+  env: RuntimeEnv,
+  limit = 20
+): Promise<CommandResult<SearchThreadsData>> {
+  const boot = await ensurePage(env);
+  if (!boot.ok) {
+    return boot as CommandResult<SearchThreadsData>;
+  }
+
+  const page = env.page!;
+  try {
+    const results = (await extractThreadSearchResultsFromPage(page)).slice(0, limit);
+    return resultOk({ query: "", results }, await contextFromPage(page));
+  } catch (error) {
+    return resultError(error instanceof Error ? error : new Error(String(error)), await contextFromPage(page));
+  }
+}
+
 export async function newThread(env: RuntimeEnv, args: NewThreadArgs = {}): Promise<CommandResult<OpenThreadData>> {
   const boot = await ensurePage(env);
   if (!boot.ok) {
