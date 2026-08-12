@@ -30,6 +30,8 @@ import type {
   SnapshotConfigurationArgs,
   ListArtifactsArgs,
   MessageStatusArgs,
+  StopGenerationArgs,
+  StopGenerationData,
   NewThreadArgs,
   OpenThreadArgs,
   OpenExperienceData,
@@ -64,7 +66,7 @@ import { captureArtifactBaseline, captureArtifactDelta } from "./commands/artifa
 import { attachFiles, downloadLatestFile, preflightFiles } from "./commands/files.js";
 import { addProjectSources, buildProjectSourceAddPlan, listProjectSources } from "./commands/project-sources.js";
 import { doctor, type DoctorArgs, type DoctorReport } from "./commands/doctor.js";
-import { askMessage, composeMessage, messageStatus, readLatest, submitMessage, waitAndRead, waitForMessage } from "./commands/messages.js";
+import { askMessage, composeMessage, messageStatus, readLatest, stopGeneration, submitMessage, waitAndRead, waitForMessage } from "./commands/messages.js";
 import { getMode, selectTool, setMode } from "./commands/modes.js";
 import {
   applyConfiguration,
@@ -265,6 +267,7 @@ export type ChatGPTClient = {
     wait(args?: WaitArgs): Promise<CommandResult<unknown>>;
     readLatest(args?: ReadLatestArgs): Promise<CommandResult<unknown>>;
     status(args?: MessageStatusArgs): Promise<CommandResult<unknown>>;
+    stop(args: StopGenerationArgs): Promise<CommandResult<StopGenerationData>>;
     waitAndRead(args?: WaitArgs & ReadLatestArgs): Promise<CommandResult<unknown>>;
   };
   files: {
@@ -290,6 +293,7 @@ export type ChatGPTClient = {
     copy(args?: CopyResponseArgs): Promise<CommandResult<unknown>>;
   };
   reviews: {
+    askPro(args: ProCodeReviewArgs): Promise<ProCodeReviewResult>;
     codeReview(args: ProCodeReviewArgs): Promise<ProCodeReviewResult>;
   };
 };
@@ -372,6 +376,7 @@ export function createChatGPT(options: ChatGPTClientOptions = {}): ChatGPTClient
       wait: args => waitForMessage(env, args),
       readLatest: args => readLatest(env, args),
       status: args => messageStatus(env, args),
+      stop: args => stopGeneration(env, args),
       waitAndRead: args => waitAndRead(env, args)
     },
     files: {
@@ -404,6 +409,7 @@ export function createChatGPT(options: ChatGPTClientOptions = {}): ChatGPTClient
       copy: args => copyResponse(env, args)
     },
     reviews: {
+      askPro: args => codeReview(env, args),
       codeReview: args => codeReview(env, args)
     }
   };

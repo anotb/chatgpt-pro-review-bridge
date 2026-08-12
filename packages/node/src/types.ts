@@ -547,6 +547,19 @@ export type DownloadLatestArgs = {
   timeoutMs?: number;
 };
 
+export type StopGenerationArgs = {
+  /** Required acknowledgement because stopping changes the visible Chat turn. */
+  confirmStop?: boolean;
+  timeoutMs?: number;
+};
+
+export type StopGenerationData = {
+  wasGenerating: boolean;
+  stopped: boolean;
+  signalsBefore: string[];
+  signalsAfter: string[];
+};
+
 export type DownloadedFile = {
   path: string;
   suggestedFilename?: string;
@@ -936,6 +949,7 @@ export type SequenceStep =
   | { id: string; command: "messages.wait"; args: WaitArgs }
   | { id: string; command: "messages.readLatest"; args?: ReadLatestArgs }
   | { id: string; command: "messages.status"; args?: MessageStatusArgs }
+  | { id: string; command: "messages.stop"; args: StopGenerationArgs }
   | { id: string; command: "messages.waitAndRead"; args: WaitAndReadArgs }
   | { id: string; command: "artifacts.listLatest"; args?: ListArtifactsArgs }
   | { id: string; command: "artifacts.wait"; args?: ArtifactWaitArgs }

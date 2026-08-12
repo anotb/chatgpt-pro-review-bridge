@@ -1,7 +1,7 @@
 {
   "name": "chatgpt-pro-review",
   "version": "0.6.0-alpha.6+codex.20260811",
-  "description": "Build deterministic repository packets and offload a full review to the strictly verified visible ChatGPT Chat Pro setting.",
+  "description": "Ask the strictly verified visible ChatGPT Chat Pro setting flexible questions and bring the complete answer back.",
   "author": {
     "name": "anotb",
     "url": "https://github.com/anotb"
@@ -20,8 +20,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "ChatGPT Pro Review Bridge",
-    "shortDescription": "Verified visible-Pro reviews with full provenance",
-    "longDescription": "Build deterministic code-review packets in Codex, submit them once to the visible ChatGPT Chat Pro setting, poll compactly, preserve the complete Markdown and every new artifact, restore the previous setting, and return a provenance archive. The plugin uses visible browser controls only and never executes generated patches.",
+    "shortDescription": "Flexible visible-Pro answers that resume cleanly",
+    "longDescription": "Ask a caller-defined question in visible ChatGPT Chat with Pro strictly verified, poll long responses without duplicate submission, and bring back the complete Markdown and artifacts. Repository packets and durable state are used only when useful; the calling session decides whether to request a review, ideas, explanation, design comparison, code, or another answer.",
     "developerName": "anotb",
     "category": "Developer Tools",
     "capabilities": [
@@ -33,8 +33,10 @@
     "privacyPolicyURL": "https://github.com/anotb/chatgpt-pro-review-bridge/blob/main/docs/plugin-review-privacy.md",
     "termsOfServiceURL": "https://github.com/anotb/chatgpt-pro-review-bridge/blob/main/docs/plugin-review-terms.md",
     "defaultPrompt": [
+      "Use $chatgpt-pro-ask to ask visible ChatGPT Pro this repository-grounded question and return its complete response.",
       "Use $chatgpt-pro-code-review to review this branch against main and return the complete verified Pro response.",
       "Use $chatgpt-pro-code-review for a deep security and concurrency review of this change.",
+      "Use $chatgpt-pro-ask to ask Pro for design ideas grounded in this branch.",
       "Use $chatgpt-pro-code-review to resume the submitted review in its existing ChatGPT thread without resubmitting."
     ],
     "brandColor": "#0B5FFF",

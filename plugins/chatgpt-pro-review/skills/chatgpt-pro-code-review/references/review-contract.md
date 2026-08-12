@@ -8,7 +8,7 @@
 - Submit once; persist the thread URL immediately.
 - Poll bounded metadata only. Read complete Markdown once after completion.
 - Reinspect Pro and scan visible fallback/unavailability evidence before accepting the answer.
-- Restore and strictly verify the prior setting in `finally`.
+- Leave Chat on Pro by default. Restore a prior setting only when the caller explicitly opts in.
 
 Treat `in_progress` as durable state:
 
@@ -28,9 +28,9 @@ One workflow invocation performs one bounded polling call by default, then retur
 ## Result interpretation
 
 - `completed`: full requested contract succeeded.
-- `completed_with_warnings`: review completed, but inspect every warning; restoration failure makes `ok` false.
+- `completed_with_warnings`: the request completed, but inspect every warning.
 - `in_progress`: generation continues; resume, never resubmit.
-- `blocked`: user action, target uncertainty, sensitivity, fallback, or restoration prevented acceptance.
+- `blocked`: user action, target uncertainty, sensitivity, fallback, or another fail-closed check prevented acceptance.
 - `failed`: transport/archive/artifact correctness failed.
 
-The raw `response.md` is authoritative. `findings.json` exists only when the optional JSON appendix parsed completely.
+The raw `response.md` contains the captured answer.

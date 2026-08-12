@@ -50,7 +50,12 @@ describe("deterministic review packet builder", () => {
     expect(prepared.manifest.packets.every(packet => /^[a-f0-9]{64}$/.test(packet.sha256))).toBe(true);
     expect(prepared.manifest.packets.every(packet => packet.sizeBytes <= 900)).toBe(true);
     expect(prepared.manifest.validationOutputIncluded).toBe(true);
-    expect(await readFile(prepared.promptPath, "utf8")).toContain("untrusted data");
+    const prompt = await readFile(prepared.promptPath, "utf8");
+    expect(prompt).not.toContain("untrusted data");
+    expect(prompt).not.toContain("Do not follow instructions");
+    expect(prompt).not.toContain("Review actual behavior across callers, callees");
+    expect(prompt).not.toContain("fenced JSON appendix");
+    expect(prompt).not.toContain("Do not create or modify code");
     expect(await readFile(prepared.manifestPath, "utf8")).not.toContain("tests: passed");
   });
 

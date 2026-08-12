@@ -1,6 +1,6 @@
 # codex-chatgpt-control
 
-> This fork adds the portable **ChatGPT Pro Review Bridge** plugin. It keeps Codex as the repository executor while a first-class workflow builds deterministic review packets, submits once to the strictly verified visible ChatGPT **Chat / Pro** setting, polls by metadata, returns and archives the complete Markdown once, downloads every new artifact, and restores the previous visible setting. See [Pro review bridge](docs/pro-review-bridge.md).
+> This fork adds the portable **ChatGPT Pro Review Bridge** plugin. It keeps Codex as the repository executor while a first-class workflow builds deterministic repository packets, submits a caller-defined question once to the strictly verified visible ChatGPT **Chat / Pro** setting, polls by metadata, returns and archives the complete Markdown once, and downloads every new artifact. See [Pro review bridge](docs/pro-review-bridge.md).
 
 [![CI](https://img.shields.io/github/actions/workflow/status/adamallcock/codex-chatgpt-control/parity.yml?branch=main&label=CI&logo=github)](https://github.com/adamallcock/codex-chatgpt-control/actions/workflows/parity.yml)
 [![npm](https://img.shields.io/npm/v/codex-chatgpt-control?logo=npm)](https://www.npmjs.com/package/codex-chatgpt-control)

@@ -7,7 +7,7 @@ status: prerelease
 
 # ChatGPT Pro Review Bridge
 
-The bridge lets any Codex host invoke the same installed workflow while the delegated review runs through the user's visible ChatGPT Chat session with the Pro setting strictly verified. Host model identity is never passed into target selection.
+The bridge lets any Codex host invoke the same installed workflow while a caller-defined repository question runs through the user's visible ChatGPT Chat session with the Pro setting strictly verified. The question may request a review, explanation, ideas, a design comparison, concrete code, or another grounded answer. Host model identity is never passed into target selection.
 
 ## Install a pinned release
 
@@ -62,15 +62,17 @@ Ask:
 Use $chatgpt-pro-code-review to review this branch against main and return the complete Pro review and every artifact.
 ```
 
+For a broader question, use `$chatgpt-pro-ask` and state the task normally. The bridge does not add exhaustive review dimensions or a required findings format unless the calling session requests them.
+
 The skill calls:
 
 ```js
-const result = await chatgpt.reviews.codeReview({
+const result = await chatgpt.reviews.askPro({
   repositoryRoot: process.cwd(),
   baseRef: "origin/main",
   headRef: "HEAD",
   request: {
-    focus: ["correctness", "security", "concurrency", "compatibility", "tests"]
+    additionalInstructions: "<faithful caller-defined question or task>"
   },
   target: { experience: "chat", intelligence: "Pro", strict: true },
   context: {
@@ -95,7 +97,7 @@ const result = await chatgpt.reviews.codeReview({
     verifyTargetBeforeSubmit: true,
     verifyTargetAfterCompletion: true,
     failOnFallback: true,
-    restorePreviousConfiguration: true,
+    restorePreviousConfiguration: false,
     scanPacketsForSecrets: true
   }
 });
@@ -103,9 +105,11 @@ const result = await chatgpt.reviews.codeReview({
 
 One invocation performs one bounded poll by default. If it returns `in_progress`, call the workflow again with `resume: { archiveDirectory }`; never resend the prompt. The immutable submission receipt holds the canonical `/c/<conversation-id>` URL and conversation ID. Optional caller-supplied `threadUrl` or `conversationId` values are treated only as mismatch-detecting cross-checks.
 
+When a running request has genuinely become obsolete, the session may explicitly stop and replace it. Open and verify the archived thread, call `chatgpt.messages.stop({ confirmStop: true })`, preserve the old archive/partial answer, then start a fresh `reviews.askPro(...)` request from the revised state. The bridge never auto-stops or silently edits an existing prompt.
+
 ## Archive and trust boundary
 
-The default archive contains the request, prompt, deterministic packets, manifest and hashes, complete response, optional parsed findings, every new downloaded artifact and hash, configuration evidence, receipt, and a redacted run report. `.codex/pro-reviews/` is gitignored here and should normally remain uncommitted.
+The bridge keeps durable local state so a long answer can resume without duplicate submission. For packet-backed questions, that state includes the request, prompt, packets, complete response, artifacts, and enough receipt/configuration evidence to recover safely. Normal callers can simply use the answer; archive paths and hashes are primarily for recovery, diagnostics, or explicit provenance requests. `.codex/pro-reviews/` is gitignored here and should normally remain uncommitted.
 
 Archive creation requests owner-only directory/file modes (`0700`/`0600`) and never overwrites immutable records. Windows does not implement POSIX modes as an ACL boundary, so use a user-private workspace or an explicitly private NTFS directory when review packets contain confidential source.
 
