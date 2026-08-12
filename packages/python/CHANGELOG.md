@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0a8
+
+- Repackages the alpha.7 backend after the cross-platform release preflight
+  correction.
+
 ## 0.6.0a7
 
 - Exposes the explicitly confirmed `messages.stop` backend primitive and picks

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0-alpha.8
+
+- Makes the Windows npm launcher tests platform-independent so the release
+  preflight uses Windows path semantics even when running on Linux CI.
+- Keeps synthetic credential fixtures effective at runtime without storing
+  credential-shaped literals that block the bridge's own review packets.
+
 ## 0.6.0-alpha.7
 
 - Adds caller-directed `$chatgpt-pro-ask` delegation without imposed review
