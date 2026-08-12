@@ -31,7 +31,7 @@ Any failure to verify Pro—including fallback, login, permission, or ambiguous-
 Install a pinned release from this repository:
 
 ```powershell
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.4
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.5
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -111,7 +111,7 @@ The installed skills contain the browser-runtime bootstrap, strict Pro safeguard
 
 ## Long answers and resume
 
-Pro can take minutes. Each call performs a bounded wait; an incomplete result is returned as `in_progress` with an archive directory. The agent resumes with:
+Pro can take minutes or more than an hour. Each call performs a bounded wait; an incomplete result is returned as `in_progress` with an archive directory. The agent keeps resuming that same archive until completion or a structured blocker:
 
 ```js
 await chatgpt.reviews.askPro({

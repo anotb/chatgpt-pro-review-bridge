@@ -72,7 +72,7 @@ const resumed = await chatgpt.reviews.askPro({
 });
 ```
 
-Never reattach files or resend the prompt. The archive's immutable receipt, original context, and thread checkpoint are authoritative. Keep each browser-host call longer than `callTimeoutMs` (30 seconds is sufficient for the 20-second example) and continue bounded resume calls until completion or a structured blocker; Pro answers can take minutes.
+Never reattach files or resend the prompt. The archive's immutable receipt, original context, and thread checkpoint are authoritative. Keep each browser-host call longer than `callTimeoutMs` (30 seconds is sufficient for the 20-second example) and continue bounded resume calls until completion or a structured blocker. Pro can take minutes or more than an hour; `totalTimeoutMs` limits one invocation, not the repeated same-archive resume loop.
 
 ## Stop and replace an obsolete request
 

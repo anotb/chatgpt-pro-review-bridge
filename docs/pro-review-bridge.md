@@ -12,7 +12,7 @@ The bridge lets any Codex host invoke the same installed workflow while a caller
 ## Install a pinned release
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.4
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.5
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -41,7 +41,7 @@ remove the installed plugin and marketplace snapshot, then add the new tag:
 ```bash
 codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
 codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.4
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-beta.5
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -87,7 +87,7 @@ const result = await chatgpt.reviews.askPro({
     restorePreviousConfiguration: false
   },
   polling: {
-    callTimeoutMs: 30000,
+    callTimeoutMs: 20000,
     totalTimeoutMs: 1800000,
     maxPollCallsPerInvocation: 1
   }
@@ -96,7 +96,7 @@ const result = await chatgpt.reviews.askPro({
 
 That form sends the caller's question as the visible user turn, performs no Git commands, and uploads nothing. Add `repositoryRoot`, `baseRef`, `headRef`, and `context: { mode: "review-packets", ... }` only when the question needs repository evidence.
 
-One invocation performs one bounded poll by default. If it returns `in_progress`, call the workflow again with `resume: { archiveDirectory }`; never resend the prompt. The immutable submission receipt holds the canonical `/c/<conversation-id>` URL and conversation ID. Optional caller-supplied `threadUrl` or `conversationId` values are treated only as mismatch-detecting cross-checks.
+One invocation performs one bounded poll by default. If it returns `in_progress`, call the workflow again with `resume: { archiveDirectory }`; never resend the prompt. Pro can run for minutes or more than an hour, and `totalTimeoutMs` limits one invocation rather than the repeated resume loop. The immutable submission receipt holds the canonical `/c/<conversation-id>` URL and conversation ID. Optional caller-supplied `threadUrl` or `conversationId` values are treated only as mismatch-detecting cross-checks.
 
 When a running request has genuinely become obsolete, the session may explicitly stop and replace it. Open and verify the archived thread, call `chatgpt.messages.stop({ confirmStop: true })`, preserve the old archive/partial answer, then start a fresh `reviews.askPro(...)` request from the revised state. The bridge never auto-stops or silently edits an existing prompt.
 
