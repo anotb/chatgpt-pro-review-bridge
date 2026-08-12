@@ -101,7 +101,7 @@ The plugin contains:
 This fork also exposes a separate non-conflicting marketplace plugin. Install a pinned tag, then start a new Codex task:
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.12
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.13
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -123,7 +123,7 @@ snapshot and add the new ref explicitly before reinstalling:
 ```bash
 codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
 codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.12
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.13
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 

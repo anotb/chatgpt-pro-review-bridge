@@ -12,7 +12,7 @@ The bridge lets any Codex host invoke the same installed workflow while a caller
 ## Install a pinned release
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.12
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.13
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -41,7 +41,7 @@ remove the installed plugin and marketplace snapshot, then add the new tag:
 ```bash
 codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
 codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.12
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.6.0-alpha.13
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 

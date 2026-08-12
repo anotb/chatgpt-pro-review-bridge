@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-alpha.13
+
+- Requires verified configuration evidence before taking the already-Pro no-op
+  path and accepts only the known attachment/UI wrapper around an exact prompt.
+
 ## 0.6.0-alpha.12
 
 - Reconciles the exact archived prompt when ChatGPT's visible DOM flattens its

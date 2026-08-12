@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0-alpha.13
+
+- Tightens strict Pro verification and prompt-to-response ownership proof after
+  incorporating the completed live Pro review's concrete findings.
+
 ## 0.6.0-alpha.12
 
 - Compares prompt-identical visible user turns modulo whitespace layout so DOM

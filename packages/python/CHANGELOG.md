@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0a13
+
+- Aligns the Python package with the stricter Pro and prompt-ownership proof
+  release implemented by the shared Node backend.
+
 ## 0.6.0a12
 
 - Aligns the Python package with the whitespace-stable visible prompt resume
