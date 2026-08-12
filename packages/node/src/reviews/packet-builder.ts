@@ -677,7 +677,12 @@ async function validationOutput(args: ProCodeReviewArgs, root: string): Promise<
   if (args.context?.validationOutput !== undefined) return args.context.validationOutput;
   const path = args.context?.validationOutputPath;
   if (path === undefined) return undefined;
-  const absolute = isAbsolute(path) ? resolve(path) : resolve(root, path);
+  const supplied = isAbsolute(path) ? resolve(path) : resolve(root, path);
+  // Canonicalize the parent without following the leaf. macOS exposes /var as
+  // a link to /private/var, and Windows can likewise alias temporary roots.
+  // Comparing the uncanonicalized spelling to a real repository root would
+  // reject an otherwise in-repository path before we can inspect the leaf.
+  const absolute = join(await realpath(dirname(supplied)), basename(supplied));
   assertInside(root, absolute);
   const linkInfo = await lstat(absolute);
   if (linkInfo.isSymbolicLink()) {

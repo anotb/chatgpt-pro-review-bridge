@@ -14846,7 +14846,8 @@ async function validationOutput(args, root) {
   if (args.context?.validationOutput !== void 0) return args.context.validationOutput;
   const path3 = args.context?.validationOutputPath;
   if (path3 === void 0) return void 0;
-  const absolute = isAbsolute2(path3) ? resolve5(path3) : resolve5(root, path3);
+  const supplied = isAbsolute2(path3) ? resolve5(path3) : resolve5(root, path3);
+  const absolute = join6(await realpath(dirname4(supplied)), basename4(supplied));
   assertInside(root, absolute);
   const linkInfo = await lstat(absolute);
   if (linkInfo.isSymbolicLink()) {
