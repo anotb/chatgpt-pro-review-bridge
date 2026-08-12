@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
@@ -69,6 +70,7 @@ export type ReviewWorkflowPort = {
   submit(text: string, previousTurnCount: number | undefined): Promise<CommandResult<SubmitData>>;
   waitMetadata(afterAssistantTurnCount: number, timeoutMs: number, stableMs: number, pollMs: number): Promise<CommandResult<WaitData>>;
   readFullMarkdown(): Promise<CommandResult<ReadLatestData>>;
+  readLatestUser(): Promise<CommandResult<ReadLatestData>>;
   downloadFile(destDir: string, filename: string, assistantIndex: number, occurrenceIndex: number): Promise<CommandResult<DownloadedFile>>;
   downloadImage(destDir: string, index: number, turnId?: string): Promise<CommandResult<DownloadedFile>>;
 };
@@ -115,6 +117,8 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
   let artifactBaseline: ArtifactInventoryData | undefined = args.resume?.artifactBaseline;
   let primaryError: unknown;
   let recoveryQuery: string | undefined;
+  let releaseLease: (() => Promise<void>) | undefined;
+  let archivedSubmission: ArchivedSubmission | undefined;
 
   const runStep = async <T>(state: ReviewState, operation: () => Promise<T>): Promise<T> => {
     const startedAt = port.now().toISOString();
@@ -155,12 +159,26 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     if (args.resume === undefined) {
       prepared = await runStep("PREPARE_CONTEXT", () => prepareReviewContext(args, port.now()));
       archiveDirectory = prepared.archiveDirectory;
+      releaseLease = await acquireReviewLease(archiveDirectory, port.now());
     } else {
       archiveDirectory = args.resume.archiveDirectory;
+      releaseLease = await acquireReviewLease(archiveDirectory, port.now());
       prepared = await readArchivedPreparedContext(args.resume.archiveDirectory);
-      const archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory);
-      const checkpoint = await readArchivedThreadCheckpoint(args.resume.archiveDirectory).catch(() => undefined);
-      const archivedTarget = checkpoint?.current ?? archivedSubmission.thread;
+      try {
+        configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
+      } catch (error) {
+        throw new ReviewPreparationError(
+          `The original configuration snapshot is missing or invalid; automatic restoration cannot be proven. ${error instanceof Error ? error.message : String(error)}`,
+          "resume_configuration_snapshot_invalid"
+        );
+      }
+      archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, sha256Text(normalizePrompt(prepared.prompt)));
+      const checkpoint = await readOptionalThreadCheckpoint(args.resume.archiveDirectory);
+      validateThreadCheckpoint(checkpoint, archivedSubmission, prepared);
+      const archivedTarget = checkpoint !== undefined
+        && (archivedSubmission.state === "intent" || isProvisionalConversationId(archivedSubmission.thread.id))
+        ? checkpoint.current
+        : archivedSubmission.thread;
       const archivedThreadId = archivedTarget.id ?? conversationIdFromUrl(archivedTarget.url);
       const suppliedUrlId = conversationIdFromUrl(threadUrl);
       if (threadId !== undefined && archivedThreadId !== undefined && threadId !== archivedThreadId) {
@@ -171,7 +189,11 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       }
       threadId = archivedThreadId ?? threadId ?? suppliedUrlId;
       threadUrl = archivedTarget.url ?? threadUrl;
-      artifactBaseline = args.resume.artifactBaseline ?? archivedSubmission.artifactBaseline;
+      if (args.resume.artifactBaseline !== undefined
+        && sha256Text(JSON.stringify(args.resume.artifactBaseline)) !== sha256Text(JSON.stringify(archivedSubmission.artifactBaseline))) {
+        throw new ReviewPreparationError("resume.artifactBaseline does not match the immutable archived submission baseline.", "resume_artifact_baseline_mismatch");
+      }
+      artifactBaseline = archivedSubmission.artifactBaseline;
       recoveryQuery = checkpoint?.recoveryQuery ?? recoveryQueryFromPrepared(prepared);
       submitted = true;
     }
@@ -186,22 +208,74 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       threadUrl = opened.data.url || opened.context.url;
       threadId = opened.data.conversationId ?? opened.context.conversationId;
     } else {
-      let openResult = await runStep("OPEN_CHAT", () => port.openThread({
-        ...(threadId === undefined ? {} : { conversationId: threadId }),
-        ...(threadUrl === undefined ? {} : { url: threadUrl })
-      }));
+      const intentNeedsRecovery = archivedSubmission?.state === "intent"
+        && (threadId === undefined || isProvisionalConversationId(threadId))
+        && conversationIdFromUrl(threadUrl) === undefined;
+      let openResult = intentNeedsRecovery
+        ? await runStep("RECOVER_THREAD", () => port.recoverThread(recoveryQuery!, prepared!.prompt))
+        : await runStep("OPEN_CHAT", () => port.openThread({
+            ...(threadId === undefined ? {} : { conversationId: threadId }),
+            ...(threadUrl === undefined ? {} : { url: threadUrl })
+          }));
       if (!openResult.ok && isProvisionalConversationId(threadId) && recoveryQuery !== undefined) {
         openResult = await runStep("RECOVER_THREAD", () => port.recoverThread(recoveryQuery!, prepared!.prompt));
       }
       const opened = requireData(openResult, openResult.ok ? "OPEN_CHAT" : "RECOVER_THREAD");
+      const openedThreadId = opened.data.conversationId ?? conversationIdFromUrl(opened.data.url || opened.context.url);
+      const expectedThreadId = archivedSubmission?.thread.id ?? conversationIdFromUrl(archivedSubmission?.thread.url);
+      if (expectedThreadId !== undefined
+        && openedThreadId !== undefined
+        && !isProvisionalConversationId(expectedThreadId)
+        && openedThreadId !== expectedThreadId) {
+        throw new ReviewPreparationError("The visible opened thread does not match the immutable submission receipt.", "resume_opened_thread_mismatch");
+      }
       threadUrl = opened.data.url || opened.context.url || threadUrl;
       threadId = opened.data.conversationId ?? opened.context.conversationId;
       await persistThreadCheckpoint(archiveDirectory!, prepared!, threadUrl, threadId, port.now());
+      const latestUser = requireData(await port.readLatestUser(), "POLL_METADATA");
+      const observedUserSha256 = sha256Text(normalizePrompt(latestUser.data.text));
+      const expectedUserSha256 = archivedSubmission?.userTurnSha256 ?? sha256Text(normalizePrompt(prepared!.prompt));
+      if (observedUserSha256 !== expectedUserSha256) {
+        throw new ReviewPreparationError(
+          "The latest visible user turn is not the archived submitted review prompt. Resume refused to capture a later or ambiguous response.",
+          "resume_user_turn_mismatch"
+        );
+      }
+      if (archivedSubmission?.state === "intent" && archiveDirectory !== undefined) {
+        await writeImmutableJson(join(archiveDirectory, "submission-confirmation.json"), {
+          schemaVersion: 2,
+          state: "confirmed",
+          submitted: true,
+          resubmitAllowed: false,
+          submittedAt: port.now().toISOString(),
+          promptSha256: sha256Text(normalizePrompt(prepared!.prompt)),
+          userTurnSha256: observedUserSha256,
+          thread: { url: threadUrl, id: threadId },
+          baselineTurnCount: archivedSubmission.baselineTurnCount,
+          baselineAssistantCount: archivedSubmission.baselineAssistantCount,
+          artifactBaseline: archivedSubmission.artifactBaseline,
+          reconciliation: "visible_prompt_match"
+        });
+        archivedSubmission = {
+          ...archivedSubmission,
+          state: "confirmed",
+          submitted: true,
+          userTurnSha256: observedUserSha256,
+          thread: { ...(threadUrl === undefined ? {} : { url: threadUrl }), ...(threadId === undefined ? {} : { id: threadId }) }
+        };
+      }
     }
     await assertPageSafe(port, "PREFLIGHT_BROWSER");
 
-    if (args.resume !== undefined && archiveDirectory !== undefined) {
-      configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory).catch(() => undefined);
+    if (args.resume !== undefined && archiveDirectory !== undefined && configurationBefore === undefined) {
+      try {
+        configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
+      } catch (error) {
+        throw new ReviewPreparationError(
+          `The original configuration snapshot is missing or invalid; automatic restoration cannot be proven. ${error instanceof Error ? error.message : String(error)}`,
+          "resume_configuration_snapshot_invalid"
+        );
+      }
     }
     if (configurationBefore === undefined) {
       configurationBefore = requireData(await runStep("SNAPSHOT_CONFIGURATION", () => port.snapshotConfiguration()), "SNAPSHOT_CONFIGURATION").data;
@@ -245,22 +319,73 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       baselineAssistantCount = beforeMessage.data.assistantTurnCount;
       requireOk(await port.compose(prepared!.prompt), "SUBMIT_ONCE");
       await assertPageSafe(port, "VERIFY_PRO_BEFORE_SUBMIT");
-      submitted = true;
-      const submitResult = await runStep("SUBMIT_ONCE", () => port.submit(prepared!.prompt, beforeMessage.data.turnCount));
-      threadUrl = submitResult.context.url ?? threadUrl;
-      threadId = submitResult.context.conversationId ?? threadId;
+      if (archiveDirectory !== undefined) {
+        await writeImmutableJson(join(archiveDirectory, "submission-intent.json"), {
+          schemaVersion: 2,
+          state: "intent",
+          resubmitAllowed: false,
+          createdAt: port.now().toISOString(),
+          promptSha256: sha256Text(normalizePrompt(prepared!.prompt)),
+          thread: { url: threadUrl, id: threadId },
+          baselineTurnCount: beforeMessage.data.turnCount,
+          baselineAssistantCount,
+          artifactBaseline
+        });
+      }
+
+      let submitResult: CommandResult<SubmitData> | undefined;
+      let submitError: unknown;
+      try {
+        submitResult = await runStep("SUBMIT_ONCE", () => port.submit(prepared!.prompt, beforeMessage.data.turnCount));
+      } catch (error) {
+        submitError = error;
+      }
+      threadUrl = submitResult?.context.url ?? threadUrl;
+      threadId = submitResult?.context.conversationId ?? threadId;
+      const afterMessage = await port.messageStatus().catch(() => undefined);
+      const latestUser = await port.readLatestUser().catch(() => undefined);
+      const latestUserText = latestUser?.ok === true ? latestUser.data?.text : undefined;
+      const exactUserTurn = latestUserText !== undefined
+        && sha256Text(normalizePrompt(latestUserText)) === sha256Text(normalizePrompt(prepared!.prompt));
+      const pageAdvanced = afterMessage?.ok === true && (
+        (beforeMessage.data.turnCount !== undefined
+          && afterMessage.data?.turnCount !== undefined
+          && afterMessage.data.turnCount > beforeMessage.data.turnCount)
+        || afterMessage.data?.generationActive === true
+      );
+      const submitReported = submitResult?.ok === true && submitResult.data?.submitted === true;
+      const submissionState = exactUserTurn ? "confirmed" : (submitReported || pageAdvanced ? "ambiguous" : "failed");
+      submitted = submissionState !== "failed";
       if (archiveDirectory !== undefined) {
         await writeImmutableJson(join(archiveDirectory, "submission.json"), {
-          submitted: true,
+          schemaVersion: 2,
+          state: submissionState,
+          submitted,
           resubmitAllowed: false,
           submittedAt: port.now().toISOString(),
+          promptSha256: sha256Text(normalizePrompt(prepared!.prompt)),
+          ...(exactUserTurn ? { userTurnSha256: sha256Text(normalizePrompt(latestUserText!)) } : {}),
           thread: { url: threadUrl, id: threadId },
+          baselineTurnCount: beforeMessage.data.turnCount,
+          baselineAssistantCount,
           artifactBaseline,
-          result: redactReportValue(submitResult)
+          result: redactReportValue(submitResult ?? { error: submitError instanceof Error ? { name: submitError.name, message: submitError.message } : String(submitError) })
         });
         await persistThreadCheckpoint(archiveDirectory, prepared!, threadUrl, threadId, port.now());
       }
-      requireOk(submitResult, "SUBMIT_ONCE");
+      if (submissionState !== "confirmed") {
+        throw workflowBlocker(
+          "unknown",
+          submissionState === "ambiguous" ? "submission_ambiguous" : "submission_unconfirmed",
+          submissionState === "ambiguous"
+            ? "ChatGPT showed possible submission progress, but the exact visible user turn could not be proven. The prompt will not be resent."
+            : "The single allowed submit attempt did not produce a matching visible user turn. The prompt will not be resent automatically.",
+          "SUBMIT_ONCE"
+        );
+      }
+      if (submitResult?.ok !== true && submitError !== undefined) {
+        warnings.push(`Submit transport reported an error after the exact visible user turn was confirmed: ${submitError instanceof Error ? submitError.message : String(submitError)}`);
+      }
     } else {
       const current = requireData(await port.messageStatus(), "POLL_METADATA");
       // A resumed review owns a fresh one-prompt thread. Poll the already-visible
@@ -268,7 +393,8 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       // "partial"; the bounded metadata wait is responsible for confirming
       // response actions, text stability, and inactive generation. Using the
       // full assistant count here waits for a nonexistent duplicate response.
-      baselineAssistantCount = Math.max(0, current.data.assistantTurnCount - (current.data.assistantTurnCount > 0 ? 1 : 0));
+      baselineAssistantCount = archivedSubmission?.baselineAssistantCount
+        ?? Math.max(0, current.data.assistantTurnCount - (current.data.assistantTurnCount > 0 ? 1 : 0));
     }
 
     const callTimeoutMs = positive(args.polling?.callTimeoutMs, 45_000);
@@ -393,10 +519,14 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       archiveDirectory = error.archiveDirectory ?? archiveDirectory;
       terminalStatus = "blocked";
       blocker = {
-        kind: error.code.includes("secret") ? "confirmation" : "unknown",
+        kind: error.code.includes("secret")
+          ? "confirmation"
+          : error.code.includes("configuration_snapshot")
+            ? "configuration_restore_failed"
+            : "unknown",
         code: error.code,
         message: error.message,
-        resumable: false
+        resumable: error.code === "review_archive_locked"
       };
     } else if (error instanceof ReviewWorkflowError) {
       terminalStatus = error.result.status === "blocked" || error.result.status === "needs_confirmation" ? "blocked" : "failed";
@@ -488,28 +618,45 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     }
   }
 
-  if (archiveDirectory !== undefined) {
-    const configurationRecord = {
-      before: configurationBefore,
-      requested,
-      applied,
-      verifiedBeforeSubmit,
-      verifiedAfterCompletion,
-      restored,
-      restorationVerified
-    };
-    await writeJsonReplacing(join(archiveDirectory, "configuration.json"), configurationRecord).catch(error => result.warnings.push(`Could not archive configuration evidence: ${String(error)}`));
-    const receipt = {
-      ...result,
-      responseMarkdown: responseMarkdown === undefined ? undefined : { bytes: Buffer.byteLength(responseMarkdown), sha256: responseSha256 },
-      diagnosticMetadata: args.diagnosticMetadata,
-      primaryError: primaryError instanceof Error ? { name: primaryError.name, message: primaryError.message } : undefined
-    };
-    await writeJsonReplacing(join(archiveDirectory, "receipt.json"), receipt).catch(error => result.warnings.push(`Could not archive receipt: ${String(error)}`));
-    await writeJsonReplacing(join(archiveDirectory, "run-report.redacted.json"), redactReportValue(receipt)).catch(error => result.warnings.push(`Could not archive redacted run report: ${String(error)}`));
+  try {
+    if (archiveDirectory !== undefined && (releaseLease !== undefined || result.blocker?.code !== "review_archive_locked")) {
+      const configurationRecord = {
+        before: configurationBefore,
+        requested,
+        applied,
+        verifiedBeforeSubmit,
+        verifiedAfterCompletion,
+        restored,
+        restorationVerified
+      };
+      const receipt = {
+        ...result,
+        responseMarkdown: responseMarkdown === undefined ? undefined : { bytes: Buffer.byteLength(responseMarkdown), sha256: responseSha256 },
+        diagnosticMetadata: args.diagnosticMetadata,
+        primaryError: primaryError instanceof Error ? { name: primaryError.name, message: primaryError.message } : undefined
+      };
+      try {
+        await writeJsonReplacing(join(archiveDirectory, "configuration.json"), configurationRecord);
+        await writeJsonReplacing(join(archiveDirectory, "run-report.redacted.json"), redactReportValue(receipt));
+        await writeJsonReplacing(join(archiveDirectory, "receipt.json"), receipt);
+      } catch (error) {
+        const message = `Required terminal provenance could not be committed: ${error instanceof Error ? error.message : String(error)}`;
+        result.ok = false;
+        result.status = "failed";
+        result.warnings.push(message);
+        result.blocker = {
+          kind: "unknown",
+          code: "archive_terminal_commit_failed",
+          message,
+          resumable: false
+        };
+      }
+    }
+    steps.push({ state: "RETURN_FULL_RESULT", startedAt: port.now().toISOString(), endedAt: port.now().toISOString(), ok: result.ok, status: result.status });
+    return result;
+  } finally {
+    await releaseLease?.();
   }
-  steps.push({ state: "RETURN_FULL_RESULT", startedAt: port.now().toISOString(), endedAt: port.now().toISOString(), ok: result.ok, status: result.status });
-  return result;
 }
 
 export function defaultReviewWorkflowPort(env: RuntimeEnv): ReviewWorkflowPort {
@@ -553,6 +700,7 @@ export function defaultReviewWorkflowPort(env: RuntimeEnv): ReviewWorkflowPort {
       responseContent: "metadata"
     }),
     readFullMarkdown: () => readLatest(env, { role: "assistant", format: "markdown" }),
+    readLatestUser: () => readLatest(env, { role: "user", format: "text" }),
     downloadFile: (destDir, filename, assistantIndex, occurrenceIndex) => downloadLatestFile(env, {
       destDir,
       filenamePattern: `^${escapeRegExp(filename)}$`,
@@ -641,8 +789,14 @@ async function readArchivedArtifactBaseline(archiveDirectory: string): Promise<A
 }
 
 type ArchivedSubmission = {
-  submitted: true;
+  submitted: boolean;
   resubmitAllowed: false;
+  schemaVersion?: 1 | 2;
+  state: "confirmed" | "intent";
+  promptSha256?: string;
+  userTurnSha256?: string;
+  baselineTurnCount?: number;
+  baselineAssistantCount?: number;
   thread: { url?: string; id?: string };
   artifactBaseline: ArtifactInventoryData;
 };
@@ -655,10 +809,22 @@ type ThreadCheckpoint = {
   updatedAt: string;
 };
 
-async function readArchivedSubmission(archiveDirectory: string): Promise<ArchivedSubmission> {
-  const value = JSON.parse(await readFile(join(archiveDirectory, "submission.json"), "utf8")) as Partial<ArchivedSubmission>;
-  if (value.submitted !== true || value.resubmitAllowed !== false) {
+async function readArchivedSubmission(archiveDirectory: string, expectedPromptSha256: string): Promise<ArchivedSubmission> {
+  const confirmation = await readOptionalJson(join(archiveDirectory, "submission-confirmation.json"));
+  const submittedRecord = confirmation ?? await readOptionalJson(join(archiveDirectory, "submission.json"));
+  const intentOnly = submittedRecord === undefined;
+  const value = (submittedRecord ?? await readOptionalJson(join(archiveDirectory, "submission-intent.json"))) as Partial<ArchivedSubmission> | undefined;
+  if (value === undefined) {
+    throw new ReviewPreparationError("The archive has no durable submission intent or confirmation record.", "resume_submission_unverified");
+  }
+  const state = intentOnly ? "intent" : (value.state ?? "confirmed");
+  if (value.resubmitAllowed !== false
+    || (state === "confirmed" && value.submitted !== true)
+    || (state !== "confirmed" && state !== "intent")) {
     throw new ReviewPreparationError("The archived submission receipt does not prove a submit-once, non-resubmittable review.", "resume_submission_unverified");
+  }
+  if (value.promptSha256 !== undefined && value.promptSha256 !== expectedPromptSha256) {
+    throw new ReviewPreparationError("The archived submission prompt hash does not match prompt.md.", "resume_prompt_hash_mismatch");
   }
   if (value.thread === undefined || (value.thread.url === undefined && value.thread.id === undefined)) {
     throw new ReviewPreparationError("The archived submission receipt has no canonical Chat conversation target.", "resume_thread_missing");
@@ -666,7 +832,16 @@ async function readArchivedSubmission(archiveDirectory: string): Promise<Archive
   if (value.artifactBaseline === undefined || !Array.isArray(value.artifactBaseline.items)) {
     throw new ReviewPreparationError("The archived submission receipt has no valid artifact baseline.", "resume_artifact_baseline_invalid");
   }
-  return value as ArchivedSubmission;
+  return { ...value, state, submitted: state === "confirmed" } as ArchivedSubmission;
+}
+
+async function readOptionalJson(path: string): Promise<Record<string, unknown> | undefined> {
+  try {
+    return JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
 }
 
 function conversationIdFromUrl(url: string | undefined): string | undefined {
@@ -714,6 +889,34 @@ async function readArchivedThreadCheckpoint(archiveDirectory: string): Promise<T
     throw new Error("Archived thread checkpoint is invalid.");
   }
   return value as ThreadCheckpoint;
+}
+
+async function readOptionalThreadCheckpoint(archiveDirectory: string): Promise<ThreadCheckpoint | undefined> {
+  try {
+    return await readArchivedThreadCheckpoint(archiveDirectory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new ReviewPreparationError(
+      `The archived thread checkpoint is invalid. ${error instanceof Error ? error.message : String(error)}`,
+      "resume_checkpoint_invalid"
+    );
+  }
+}
+
+function validateThreadCheckpoint(
+  checkpoint: ThreadCheckpoint | undefined,
+  submission: ArchivedSubmission,
+  prepared: PreparedReviewContext
+): void {
+  if (checkpoint === undefined) return;
+  if (checkpoint.promptSha256 !== sha256Text(prepared.prompt)) {
+    throw new ReviewPreparationError("The mutable thread checkpoint prompt hash does not match the immutable archived prompt.", "resume_checkpoint_prompt_mismatch");
+  }
+  const submittedId = submission.thread.id ?? conversationIdFromUrl(submission.thread.url);
+  const checkpointId = checkpoint.current.id ?? conversationIdFromUrl(checkpoint.current.url);
+  if (submittedId !== undefined && checkpointId !== undefined && !isProvisionalConversationId(submittedId) && submittedId !== checkpointId) {
+    throw new ReviewPreparationError("The mutable thread checkpoint points at a different conversation than the immutable submission receipt.", "resume_checkpoint_thread_mismatch");
+  }
 }
 
 async function recoverReviewThread(env: RuntimeEnv, query: string, expectedPrompt: string): Promise<CommandResult<OpenThreadData>> {
@@ -840,9 +1043,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+async function acquireReviewLease(archiveDirectory: string, now: Date): Promise<() => Promise<void>> {
+  const leasePath = join(archiveDirectory, ".workflow.lock");
+  let handle;
+  try {
+    handle = await open(leasePath, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new ReviewPreparationError(
+        "Another process or task already holds the exclusive lease for this review archive.",
+        "review_archive_locked",
+        undefined,
+        archiveDirectory
+      );
+    }
+    throw error;
+  }
+  await handle.writeFile(`${JSON.stringify({ schemaVersion: 1, pid: process.pid, acquiredAt: now.toISOString() })}\n`);
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    await handle.close().catch(() => undefined);
+    await rm(leasePath, { force: true });
+  };
+}
+
 async function writeJsonReplacing(path: string, value: unknown): Promise<void> {
-  const temporary = `${path}.next-${process.pid}`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx" });
+  const temporary = `${path}.next-${process.pid}-${randomUUID()}`;
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx", mode: 0o600 });
   try {
     await rename(temporary, path);
   } catch (error) {

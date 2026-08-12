@@ -107,6 +107,8 @@ One invocation performs one bounded poll by default. If it returns `in_progress`
 
 The default archive contains the request, prompt, deterministic packets, manifest and hashes, complete response, optional parsed findings, every new downloaded artifact and hash, configuration evidence, receipt, and a redacted run report. `.codex/pro-reviews/` is gitignored here and should normally remain uncommitted.
 
+Archive creation requests owner-only directory/file modes (`0700`/`0600`) and never overwrites immutable records. Windows does not implement POSIX modes as an ACL boundary, so use a user-private workspace or an explicitly private NTFS directory when review packets contain confidential source.
+
 The workflow uses only visible browser controls. It does not call hidden ChatGPT endpoints, extract credentials, bypass login/CAPTCHA, scrape history in the background, rotate accounts, silently truncate output, or execute generated patches. Secret scanning is a guardrail, not proof of safety. Codex must independently verify findings before edits.
 
 ## Opt-in installed-runtime canary

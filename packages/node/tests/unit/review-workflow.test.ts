@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -128,12 +128,14 @@ describe("Pro review state machine", () => {
     ]);
 
     const resumeAttempts: string[] = [];
+    const archivedPrompt = await readFile(join(first.archiveDirectory!, "prompt.md"), "utf8");
     const resumed = await runCodeReviewWithPort({
       repositoryRoot: repo,
       baseRef: "HEAD",
       output: { downloadArtifacts: "all" },
       resume: { archiveDirectory: first.archiveDirectory! }
     }, makePort([], {
+      readLatestUser: async () => success({ role: "user", text: archivedPrompt, format: "normalized_text" }),
       artifactDelta: async () => success(delta),
       downloadFile: async (destDir: string, filename: string) => {
         resumeAttempts.push(filename);
@@ -153,6 +155,7 @@ describe("Pro review state machine", () => {
       output: { downloadArtifacts: "all" },
       resume: { archiveDirectory: first.archiveDirectory! }
     }, makePort(completedCalls, {
+      readLatestUser: async () => success({ role: "user", text: archivedPrompt, format: "normalized_text" }),
       artifactDelta: async () => success(delta)
     }));
 
@@ -215,13 +218,16 @@ describe("Pro review state machine", () => {
       waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
     }));
     const resumeCalls: string[] = [];
+    const archivedPrompt = await readFile(join(first.archiveDirectory!, "prompt.md"), "utf8");
     const resumed = await runCodeReviewWithPort({
       repositoryRoot: repo,
       baseRef: "HEAD",
       resume: {
         archiveDirectory: first.archiveDirectory!
       }
-    }, makePort(resumeCalls));
+    }, makePort(resumeCalls, {
+      readLatestUser: async () => success({ role: "user", text: archivedPrompt, format: "normalized_text" })
+    }));
 
     expect(resumed.status).toBe("completed");
     expect(resumeCalls).toContain("openThread");
@@ -291,10 +297,218 @@ describe("Pro review state machine", () => {
     expect(result.blocker).toMatchObject({ kind: "configuration_restore_failed", code: "restore_failed" });
     expect(result.configuration.restorationVerified).toBe(false);
   });
+
+  it("records a failed single submit attempt without claiming submission", async () => {
+    const repo = await fixtureRepository();
+    const calls: string[] = [];
+    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort(calls, {
+      submit: async () => ({
+        ok: false,
+        status: "blocked",
+        warnings: [],
+        blocker: { kind: "selector_drift", code: "send_unavailable", message: "Send control unavailable.", resumable: true },
+        context: context()
+      }),
+      readLatestUser: async () => success({ role: "user", text: "", format: "normalized_text" })
+    }));
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      submitted: false,
+      resubmitAllowed: false,
+      blocker: { code: "submission_unconfirmed" }
+    });
+    expect(calls.filter(call => call === "submit")).toHaveLength(1);
+    const intent = JSON.parse(await readFile(join(result.archiveDirectory!, "submission-intent.json"), "utf8"));
+    const outcome = JSON.parse(await readFile(join(result.archiveDirectory!, "submission.json"), "utf8"));
+    expect(intent).toMatchObject({ state: "intent", resubmitAllowed: false });
+    expect(outcome).toMatchObject({ state: "failed", submitted: false, resubmitAllowed: false });
+  });
+
+  it("records ambiguous post-click evidence and never proceeds to polling", async () => {
+    const repo = await fixtureRepository();
+    const calls: string[] = [];
+    let statusCalls = 0;
+    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort(calls, {
+      submit: async () => {
+        throw new Error("transport ended after click");
+      },
+      messageStatus: async () => {
+        statusCalls += 1;
+        return success(statusCalls === 1
+          ? { turnCount: 0, assistantTurnCount: 0, completionState: "unknown", generationActive: false, generationSignals: [] }
+          : { turnCount: 1, assistantTurnCount: 0, completionState: "generating", generationActive: true, generationSignals: ["stop-answering"] });
+      },
+      readLatestUser: async () => success({ role: "user", text: "unverified rendered text", format: "normalized_text" })
+    }));
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      submitted: true,
+      resubmitAllowed: false,
+      blocker: { code: "submission_ambiguous" }
+    });
+    expect(calls).not.toContain("waitMetadata");
+    expect(JSON.parse(await readFile(join(result.archiveDirectory!, "submission.json"), "utf8"))).toMatchObject({
+      state: "ambiguous",
+      submitted: true,
+      resubmitAllowed: false
+    });
+  });
+
+  it("fails closed when a later user turn makes resume response ownership ambiguous", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    const calls: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls, {
+      readLatestUser: async () => success({ role: "user", text: "later follow-up", format: "normalized_text" })
+    }));
+
+    expect(resumed.status).toBe("blocked");
+    expect(resumed.blocker?.code).toBe("resume_user_turn_mismatch");
+    expect(calls).not.toContain("waitMetadata");
+    expect(calls).not.toContain("readFullMarkdown");
+    expect(calls).not.toContain("submit");
+  });
+
+  it("reconciles a durable intent after receipt loss without resubmitting", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    const archivedPrompt = await readFile(join(first.archiveDirectory!, "prompt.md"), "utf8");
+    await rm(join(first.archiveDirectory!, "submission.json"));
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls, {
+      readLatestUser: async () => success({ role: "user", text: archivedPrompt, format: "normalized_text" })
+    }));
+
+    expect(resumed.status).toBe("completed");
+    expect(calls).not.toContain("attach");
+    expect(calls).not.toContain("compose");
+    expect(calls).not.toContain("submit");
+    expect(JSON.parse(await readFile(join(first.archiveDirectory!, "submission-confirmation.json"), "utf8"))).toMatchObject({
+      state: "confirmed",
+      submitted: true,
+      resubmitAllowed: false,
+      reconciliation: "visible_prompt_match"
+    });
+  });
+
+  it("rejects a mutated checkpoint before opening a browser", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    const checkpointPath = join(first.archiveDirectory!, "thread-checkpoint.json");
+    const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+    checkpoint.current = { url: "https://chatgpt.com/c/different", id: "different" };
+    await writeFile(checkpointPath, `${JSON.stringify(checkpoint, null, 2)}\n`);
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls));
+
+    expect(resumed.status).toBe("blocked");
+    expect(resumed.blocker?.code).toBe("resume_checkpoint_thread_mismatch");
+    expect(calls).not.toContain("bootstrap");
+  });
+
+  it("requires the original configuration snapshot on resume", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    await rm(join(first.archiveDirectory!, "configuration.before.json"));
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls));
+
+    expect(resumed).toMatchObject({
+      status: "blocked",
+      blocker: { kind: "configuration_restore_failed", code: "resume_configuration_snapshot_invalid" }
+    });
+    expect(calls).not.toContain("bootstrap");
+  });
+
+  it("allows only one concurrent owner of a review archive", async () => {
+    const repo = await fixtureRepository();
+    let releaseWait!: () => void;
+    let enteredWait!: () => void;
+    const entered = new Promise<void>(resolve => { enteredWait = resolve; });
+    const held = new Promise<void>(resolve => { releaseWait = resolve; });
+    const firstPromise = runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => {
+        enteredWait();
+        await held;
+        return failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" });
+      }
+    }));
+    await entered;
+    const archiveRoot = join(repo, ".codex", "pro-reviews");
+    const [archiveName] = await readdir(archiveRoot);
+    const archiveDirectory = join(archiveRoot, archiveName!);
+    const secondCalls: string[] = [];
+
+    const second = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory }
+    }, makePort(secondCalls));
+
+    expect(second).toMatchObject({
+      status: "blocked",
+      blocker: { code: "review_archive_locked", resumable: true }
+    });
+    expect(secondCalls).not.toContain("bootstrap");
+    releaseWait();
+    const first = await firstPromise;
+    expect(first.status).toBe("in_progress");
+    await expect(readFile(join(archiveDirectory, ".workflow.lock"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });
 
 function makePort(calls: string[], overrides: Partial<ReviewWorkflowPort> = {}): ReviewWorkflowPort {
   let tick = 0;
+  let latestUserText = "";
   const record = <T extends (...args: never[]) => unknown>(name: string, fn: T): T => ((...args: never[]) => {
     calls.push(name);
     return fn(...args);
@@ -319,10 +533,14 @@ function makePort(calls: string[], overrides: Partial<ReviewWorkflowPort> = {}):
     artifactDelta: record("artifactDelta", async () => success({ baseline, current: baseline, added: [] })),
     attach: record("attach", async () => success({ attached: true })),
     messageStatus: record("messageStatus", async () => success({ turnCount: 0, assistantTurnCount: 0, completionState: "unknown", generationActive: false, generationSignals: [] })),
-    compose: record("compose", async () => success({})),
-    submit: record("submit", async () => ({ ...success({ submitted: true, turnCount: 1, submissionState: "submitted" }), context: context("https://chatgpt.com/c/review-thread") })),
+    compose: record("compose", async (text: string) => {
+      latestUserText = text;
+      return success({});
+    }),
+    submit: record("submit", async () => ({ ...success({ submitted: true, userTurnText: latestUserText, turnCount: 1, submissionState: "submitted" }), context: context("https://chatgpt.com/c/review-thread") })),
     waitMetadata: record("waitMetadata", async () => success({ complete: true, assistantTurnCount: 1, elapsedMs: 10, responseChars: markdown.length, responseSha256: "abc", responseContent: "metadata" })),
     readFullMarkdown: record("readFullMarkdown", async () => success({ role: "assistant", text: markdown, markdown, format: "markdown" })),
+    readLatestUser: record("readLatestUser", async () => success({ role: "user", text: latestUserText, format: "normalized_text" })),
     downloadFile: record("downloadFile", async (destDir: string, filename: string) => downloaded(destDir, filename, "file-body")),
     downloadImage: record("downloadImage", async (destDir: string, index: number) => downloaded(destDir, `image-${index}.png`, "image-body"))
   };

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { copyFile, link, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, link, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { ReviewArtifact } from "./types.js";
@@ -23,26 +23,37 @@ export async function createReviewArchive(
   const timestamp = now.toISOString().replace(/[:.]/g, "-");
   const suffix = headSha?.slice(0, 12) ?? randomBytes(6).toString("hex");
   const path = join(root, `${timestamp}-${suffix}`);
-  await mkdir(join(path, "context"), { recursive: true });
-  await mkdir(join(path, "artifacts"), { recursive: true });
+  await mkdir(join(path, "context"), { recursive: true, mode: 0o700 });
+  await mkdir(join(path, "artifacts"), { recursive: true, mode: 0o700 });
+  await Promise.all([path, join(path, "context"), join(path, "artifacts")].map(directory => chmod(directory, 0o700)));
   return path;
 }
 
 export async function writeImmutableFile(path: string, data: string | Buffer): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const expected = Buffer.isBuffer(data) ? data : Buffer.from(data);
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
-  await writeFile(temporary, expected, { flag: "wx" });
+  await writeFile(temporary, expected, { flag: "wx", mode: 0o600 });
   try {
     // Hard-linking a complete same-directory temporary file publishes it
     // atomically without POSIX rename's destination-overwrite behavior.
     await link(temporary, path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (["EPERM", "ENOSYS", "EXDEV", "EOPNOTSUPP"].includes(code ?? "")) {
+      try {
+        await copyFile(temporary, path, constants.COPYFILE_EXCL);
+      } catch (copyError) {
+        if ((copyError as NodeJS.ErrnoException).code !== "EEXIST") throw copyError;
+      }
+    } else if (code !== "EEXIST") {
+      throw error;
+    }
     const existing = await readFile(path);
     if (!existing.equals(expected)) {
       throw new Error(`Refusing to replace immutable archive file with different content: ${path}`);
     }
+    await chmod(path, 0o600);
   } finally {
     await rm(temporary, { force: true });
   }
@@ -110,6 +121,7 @@ export async function preserveDownloadedArtifact(
       }
     }
   }
+  await chmod(target, 0o600);
   const saved = await stat(target);
   const artifact: ReviewArtifact = {
     name,
