@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.11
+
+- Enforces canonical conversation and visible-tab affinity across AskPro
+  attachment, submission, polling, complete response capture, Pro verification,
+  and artifact handling, with structured blockers on drift.
+- Requires a unique exact-prompt match when reconciling provisional `WEB:`
+  receipts and uses a persisted tab ID only to disambiguate otherwise identical
+  candidates; exact resumes claim an existing tab instead of opening duplicates.
+- Writes configuration, redacted report, and receipt provenance before the
+  terminal outcome, and makes a late provenance failure authoritative through
+  `archive-commit-failure.json` when that marker can be persisted.
+- Retains packet inventory and all safety exclusions when
+  `includeChangedFiles` disables source snapshots, and narrows generic
+  credential-directory matching so ordinary application source and fixtures
+  remain reviewable while hard-secret filenames and provider stores stay out.
+- Treats a visible, exact login control outside message content as logged out,
+  while authenticated structural account, history, composer, and conversation
+  evidence prevents brittle false negatives.
+
 ## 0.7.10
 
 - Uses Node's OS platform signal and the kernel `SystemRoot` device path for

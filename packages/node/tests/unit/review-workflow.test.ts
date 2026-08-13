@@ -4,14 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { runCodeReviewWithPort, type ReviewWorkflowPort } from "../../src/reviews/code-review.js";
+import {
+  defaultReviewWorkflowPort,
+  runCodeReviewWithPort,
+  type ReviewWorkflowPort
+} from "../../src/reviews/code-review.js";
 import { removeLeaseIfOwnerExitedOrExpired } from "../../src/reviews/review-lease.js";
 import type {
   ArtifactInventoryData,
   CommandResult,
   ConfigurationInspectionData,
   ConfigurationSnapshotData,
-  DownloadedFile
+  BrowserLike,
+  DownloadedFile,
+  PageLike,
+  RuntimeEnv
 } from "../../src/types.js";
 
 const beforeInspection: ConfigurationInspectionData = {
@@ -37,6 +44,119 @@ const snapshot: ConfigurationSnapshotData = {
 const baseline: ArtifactInventoryData = { capturedAt: "before", items: [] };
 
 describe("Pro review state machine", () => {
+  it("exact-claims the archived tab among duplicate conversation tabs without navigating", async () => {
+    const claimed: string[] = [];
+    const navigated: string[] = [];
+    const probe = mutableChatPage("probe", "https://chatgpt.com/", {}, navigated);
+    const preferred = mutableChatPage("preferred", "https://chatgpt.com/c/candidate", {
+      conversations: { candidate: "Exact candidate prompt" }
+    }, navigated);
+    const duplicate = mutableChatPage("duplicate", "https://chatgpt.com/c/candidate", {
+      conversations: { candidate: "Exact candidate prompt" }
+    }, navigated);
+    const pages = new Map([["probe", probe], ["preferred", preferred], ["duplicate", duplicate]]);
+    const browser: BrowserLike = {
+      user: {
+        openTabs: async () => [...pages].map(([id, page]) => ({ id, url: page.url!() as string, title: id })),
+        claimTab: async tab => {
+          const id = typeof tab === "string" ? tab : tab.id;
+          claimed.push(id);
+          return pages.get(id)!;
+        }
+      }
+    };
+    const env: RuntimeEnv = { browser, page: probe, expectedTabId: "probe" };
+
+    const result = await defaultReviewWorkflowPort(env).recoverThread(
+      "Candidate",
+      "Exact candidate prompt",
+      { url: "https://chatgpt.com/c/candidate", conversationId: "candidate", tabId: "preferred" }
+    );
+
+    expect(result).toMatchObject({ ok: true, data: { conversationId: "candidate" }, context: { tabId: "preferred" } });
+    expect(claimed).toEqual(["preferred", "probe", "preferred"]);
+    expect(navigated).toEqual([]);
+  });
+
+  it("blocks a claimed recovery candidate that resolves to a different conversation", async () => {
+    const probe = mutableChatPage("probe", "https://chatgpt.com/", {
+      home: '<a href="/c/candidate"><div>Candidate</div></a>'
+    });
+    const raced = mutableChatPage("candidate-tab", "https://chatgpt.com/c/other", {});
+    const browser: BrowserLike = {
+      user: {
+        openTabs: async () => [
+          { id: "probe", url: "https://chatgpt.com/", title: "Probe" },
+          { id: "candidate-tab", url: "https://chatgpt.com/c/candidate", title: "Candidate" }
+        ],
+        claimTab: async tab => (typeof tab === "string" ? tab : tab.id) === "probe" ? probe : raced
+      }
+    };
+    const env: RuntimeEnv = { browser, page: probe, expectedTabId: "probe" };
+
+    const result = await defaultReviewWorkflowPort(env).recoverThread("Candidate", "Exact candidate prompt");
+
+    expect(result).toMatchObject({ ok: false, blocker: { code: "review_thread_recovery_candidate_drift", resumable: true } });
+  });
+
+  it("blocks duplicate canonical recovery tabs resumably when no archived tab discriminates them", async () => {
+    const created: string[] = [];
+    const probe = mutableChatPage("probe", "https://chatgpt.com/", {
+      home: '<a href="/c/candidate"><div>Candidate</div></a>'
+    });
+    const browser: BrowserLike = {
+      user: {
+        openTabs: async () => [
+          { id: "one", url: "https://chatgpt.com/c/candidate", title: "Candidate" },
+          { id: "two", url: "https://chatgpt.com/c/candidate", title: "Candidate" }
+        ],
+        claimTab: async () => {
+          throw new Error("Ambiguous candidates must not be claimed.");
+        }
+      },
+      tabs: {
+        create: async url => {
+          created.push(url);
+          return mutableChatPage("fresh", url, {});
+        }
+      }
+    };
+    const env: RuntimeEnv = { browser, page: probe, expectedTabId: "probe" };
+    const result = await defaultReviewWorkflowPort(env).recoverThread("Candidate", "Exact candidate prompt");
+
+    expect(result).toMatchObject({
+      ok: false,
+      blocker: { code: "existing_tab_ambiguous", resumable: true }
+    });
+    expect(created).toEqual([]);
+  });
+
+  it("restores its probe after ambiguous recovery and remains ambiguous on retry", async () => {
+    const prompt = "Exact archived prompt for recovery";
+    const original = "https://chatgpt.com/";
+    const page = mutableChatPage("probe", original, {
+      home: [
+        '<a href="/c/one"><div>Recovery Query one</div></a>',
+        '<a href="/c/two"><div>Recovery Query two</div></a>'
+      ].join(""),
+      conversations: { one: prompt, two: prompt }
+    });
+    const browser: BrowserLike = {
+      user: {
+        openTabs: async () => [{ id: "probe", url: await page.url!(), title: "Probe" }],
+        claimTab: async () => page
+      }
+    };
+    const env: RuntimeEnv = { browser, page, expectedTabId: "probe" };
+
+    const first = await defaultReviewWorkflowPort(env).recoverThread("Recovery Query", prompt);
+    expect(first).toMatchObject({ ok: false, blocker: { code: "review_thread_recovery_ambiguous" } });
+    expect(await page.url!()).toBe(original);
+    const second = await defaultReviewWorkflowPort(env).recoverThread("Recovery Query", prompt);
+    expect(second).toMatchObject({ ok: false, blocker: { code: "review_thread_recovery_ambiguous" } });
+    expect(await page.url!()).toBe(original);
+  });
+
   it("sends an ordinary question exactly as written without repository preparation or attachments", async () => {
     const archiveRoot = await mkdtemp(join(tmpdir(), "chatgpt-pro-question-workflow-"));
     const calls: string[] = [];
@@ -53,6 +173,195 @@ describe("Pro review state machine", () => {
     expect(calls).not.toContain("attach");
     expect(result.rawSteps.some(step => step.state === "ATTACH_PACKETS")).toBe(false);
     expect(await readFile(join(result.archiveDirectory!, "prompt.md"), "utf8")).toBe(question);
+  });
+
+  it("keeps legacy workflow ports on the ordinary bootstrap surface", async () => {
+    const archiveRoot = await mkdtemp(join(tmpdir(), "chatgpt-pro-legacy-bootstrap-"));
+    const calls: string[] = [];
+    const port = makePort(calls);
+    delete (port as Partial<ReviewWorkflowPort>).bootstrapRecovery;
+    const result = await runCodeReviewWithPort({
+      request: { additionalInstructions: "Legacy bootstrap compatibility" },
+      output: { archiveRoot }
+    }, port);
+
+    expect(result.status).toBe("completed");
+    expect(calls).toContain("bootstrap");
+    expect(calls).not.toContain("bootstrapRecovery");
+  });
+
+  it("blocks canonical drift before packet attachment, composition, or submission", async () => {
+    const repo = await fixtureRepository();
+    const calls: string[] = [];
+    let pageReads = 0;
+    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort(calls, {
+      pageState: async () => {
+        pageReads += 1;
+        const conversationId = pageReads < 3 ? "review-thread" : "different-thread";
+        return {
+          url: `https://chatgpt.com/c/${conversationId}`,
+          conversationId,
+          visibleText: "Chat history",
+          signedIn: true
+        };
+      }
+    }));
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      submitted: false,
+      blocker: { code: "conversation_binding_lost", resumable: false }
+    });
+    expect(calls).not.toContain("attach");
+    expect(calls).not.toContain("compose");
+    expect(calls).not.toContain("submit");
+  });
+
+  it("blocks poll context drift without rebinding the archived checkpoint or reading the response", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    const checkpointBefore = JSON.parse(await readFile(join(first.archiveDirectory!, "thread-checkpoint.json"), "utf8"));
+    const prompt = await readFile(join(first.archiveDirectory!, "prompt.md"), "utf8");
+    const calls: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls, {
+      readLatestUser: async () => success({ role: "user", text: prompt, format: "normalized_text" }),
+      waitMetadata: async () => ({
+        ...success({ complete: true, assistantTurnCount: 1, elapsedMs: 10, responseContent: "metadata" }),
+        context: { ...context("https://chatgpt.com/c/different-thread"), conversationId: "different-thread" }
+      })
+    }));
+
+    expect(resumed).toMatchObject({ status: "blocked", blocker: { code: "conversation_binding_lost", resumable: true } });
+    expect(calls).not.toContain("readFullMarkdown");
+    const checkpointAfter = JSON.parse(await readFile(join(first.archiveDirectory!, "thread-checkpoint.json"), "utf8"));
+    expect(checkpointAfter.current).toEqual(checkpointBefore.current);
+  });
+
+  it("uses a matching archived tab binding before canonical conversation selection", async () => {
+    const repo = await fixtureRepository();
+    const url = "https://chatgpt.com/c/review-thread";
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      newThread: async () => ({
+        ...success({ url, conversationId: "review-thread" }),
+        context: { ...context(url), conversationId: "review-thread", tabId: "stored-tab" }
+      }),
+      pageState: async () => ({
+        url,
+        conversationId: "review-thread",
+        tabId: "stored-tab",
+        visibleText: "Chat history",
+        signedIn: true
+      }),
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    const prompt = await readFile(join(first.archiveDirectory!, "prompt.md"), "utf8");
+    const targets: unknown[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort([], {
+      bootstrapRecovery: async target => {
+        targets.push(target);
+        return {
+          ...success({}),
+          context: { ...context(url), conversationId: "review-thread", tabId: "stored-tab" }
+        };
+      },
+      pageState: async () => ({
+        url,
+        conversationId: "review-thread",
+        tabId: "stored-tab",
+        visibleText: "Chat history",
+        signedIn: true
+      }),
+      readLatestUser: async () => success({ role: "user", text: prompt, format: "normalized_text" })
+    }));
+
+    expect(resumed.status).toBe("completed");
+    expect(targets).toEqual([{ tabId: "stored-tab" }]);
+  });
+
+  it("does not repurpose a reused archived tab that now shows another conversation", async () => {
+    const repo = await fixtureRepository();
+    const url = "https://chatgpt.com/c/review-thread";
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      newThread: async () => ({
+        ...success({ url, conversationId: "review-thread" }),
+        context: { ...context(url), conversationId: "review-thread", tabId: "stored-tab" }
+      }),
+      pageState: async () => ({
+        url,
+        conversationId: "review-thread",
+        tabId: "stored-tab",
+        visibleText: "Chat history",
+        signedIn: true
+      }),
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    const prompt = await readFile(join(first.archiveDirectory!, "prompt.md"), "utf8");
+    const targets: unknown[] = [];
+    let pageReads = 0;
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort([], {
+      bootstrapRecovery: async target => {
+        targets.push(target);
+        return {
+          ...success({}),
+          context: {
+            ...context("https://chatgpt.com/c/reused"),
+            conversationId: "reused",
+            tabId: "stored-tab"
+          }
+        };
+      },
+      bootstrap: async target => {
+        targets.push(target);
+        return {
+          ...success({}),
+          context: { ...context(url), conversationId: "review-thread", tabId: "canonical-tab" }
+        };
+      },
+      pageState: async () => {
+        pageReads += 1;
+        const reused = pageReads === 1;
+        return {
+          url: reused ? "https://chatgpt.com/c/reused" : url,
+          conversationId: reused ? "reused" : "review-thread",
+          tabId: reused ? "stored-tab" : "canonical-tab",
+          visibleText: "Chat history",
+          signedIn: true
+        };
+      },
+      readLatestUser: async () => success({ role: "user", text: prompt, format: "normalized_text" })
+    }));
+
+    expect(resumed.status).toBe("completed");
+    expect(targets).toEqual([
+      { tabId: "stored-tab" },
+      { url, conversationId: "review-thread" }
+    ]);
   });
 
   it("submits a follow-up once in an existing canonical Pro thread", async () => {
@@ -80,6 +389,10 @@ describe("Pro review state machine", () => {
       waitMetadata: async () => ({
         ...success({ complete: true, assistantTurnCount: 1, elapsedMs: 20, responseChars: 400, responseSha256: "abc", responseContent: "metadata" }),
         context: { ...context(), url: `https://chatgpt.com/c/${conversationId}`, conversationId }
+      }),
+      submit: async (prompt: string) => ({
+        ...success({ submitted: true, userTurnText: prompt, turnCount: 1, submissionState: "submitted" }),
+        context: { ...context(`https://chatgpt.com/c/${conversationId}`), conversationId }
       })
     }));
 
@@ -90,6 +403,41 @@ describe("Pro review state machine", () => {
     expect(calls).not.toContain("newThread");
     expect(calls.filter(call => call === "submit")).toHaveLength(1);
     expect(await readFile(join(result.archiveDirectory!, "prompt.md"), "utf8")).toBe("Now express the same idea in exactly five words.");
+  });
+
+  it("records a post-click submit-context drift without rebinding an explicit canonical thread", async () => {
+    const archiveRoot = await mkdtemp(join(tmpdir(), "chatgpt-pro-follow-up-drift-"));
+    const calls: string[] = [];
+    const conversationId = "existing-pro-thread";
+    const result = await runCodeReviewWithPort({
+      thread: { url: `https://chatgpt.com/c/${conversationId}`, id: conversationId },
+      request: { additionalInstructions: "Continue exactly once." },
+      output: { archiveRoot }
+    }, makePort(calls, {
+      pageState: async () => ({
+        url: `https://chatgpt.com/c/${conversationId}`,
+        conversationId,
+        visibleText: "Chat history",
+        signedIn: true
+      }),
+      submit: async (prompt: string) => ({
+        ...success({ submitted: true, userTurnText: prompt, turnCount: 2, submissionState: "submitted_generating" }),
+        context: { ...context("https://chatgpt.com/c/different-thread"), conversationId: "different-thread" }
+      }),
+      readLatestUser: async () => success({ role: "user", text: "Continue exactly once.", format: "normalized_text" })
+    }));
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      submitted: true,
+      blocker: { code: "conversation_binding_lost", resumable: true },
+      thread: { id: conversationId }
+    });
+    expect(JSON.parse(await readFile(join(result.archiveDirectory!, "submission.json"), "utf8"))).toMatchObject({
+      state: "ambiguous",
+      thread: { id: conversationId }
+    });
+    expect(calls.filter(call => call === "submit")).toHaveLength(1);
   });
 
   it("does not interact with the Pro control when the configuration snapshot already verifies Pro", async () => {
@@ -475,6 +823,17 @@ describe("Pro review state machine", () => {
     }, makePort([], {
       waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
     }));
+    await writeFile(join(first.archiveDirectory!, "terminal-outcome.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      finalizedAt: "2026-08-11T12:00:00.000Z",
+      status: "blocked",
+      ok: false,
+      submitted: true,
+      resubmitAllowed: false,
+      blocker: { kind: "unknown", code: "synthetic_terminal", message: "synthetic", resumable: false },
+      warnings: [],
+      thread: { url: "https://chatgpt.com/c/review-thread", id: "review-thread" }
+    }, null, 2)}\n`);
     await writeFile(join(first.archiveDirectory!, "context", "manifest.upload.json"), "{}\n");
     const calls: string[] = [];
 
@@ -510,9 +869,23 @@ describe("Pro review state machine", () => {
     }, makePort(calls));
 
     expect(result.status).toBe("blocked");
-    expect(result.blocker?.code).toBe("resume_thread_mismatch");
+    expect(result.blocker).toMatchObject({ code: "resume_thread_mismatch", resumable: true });
+    expect(result).toMatchObject({ submitted: true, thread: { id: "review-thread" } });
     expect(calls).not.toContain("bootstrap");
     expect(calls).not.toContain("submit");
+    await expect(readFile(join(first.archiveDirectory!, "terminal-outcome.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+
+    const archivedPrompt = await readFile(join(first.archiveDirectory!, "prompt.md"), "utf8");
+    const retryCalls: string[] = [];
+    const retried = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(retryCalls, {
+      readLatestUser: async () => success({ role: "user", text: archivedPrompt, format: "normalized_text" })
+    }));
+    expect(retried.status).toBe("completed");
+    expect(retryCalls).not.toContain("submit");
   });
 
   it("returns an explicit index while preserving the complete archived response", async () => {
@@ -580,14 +953,15 @@ describe("Pro review state machine", () => {
     expect(outcome).toMatchObject({ state: "failed", submitted: false, resubmitAllowed: false });
   });
 
-  it("records ambiguous post-click evidence and never proceeds to polling", async () => {
+  it("records ambiguous post-click conversation drift without rebinding or polling", async () => {
     const repo = await fixtureRepository();
     const calls: string[] = [];
     let statusCalls = 0;
-    let pageStateCalls = 0;
+    let clicked = false;
     const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort(calls, {
       newThread: async () => success({ url: "https://chatgpt.com/c/WEB:provisional", conversationId: "WEB:provisional" }),
       submit: async () => {
+        clicked = true;
         throw new Error("transport ended after click");
       },
       messageStatus: async () => {
@@ -597,28 +971,96 @@ describe("Pro review state machine", () => {
           : { turnCount: 1, assistantTurnCount: 0, completionState: "generating", generationActive: true, generationSignals: ["stop-answering"] });
       },
       readLatestUser: async () => success({ role: "user", text: "unverified rendered text", format: "normalized_text" }),
-      pageState: async () => {
-        pageStateCalls += 1;
-        return pageStateCalls < 4
-          ? { url: "https://chatgpt.com/c/WEB:provisional", conversationId: "WEB:provisional", visibleText: "New chat Search chats", signedIn: true }
-          : { url: "https://chatgpt.com/c/canonical-thread", conversationId: "canonical-thread", visibleText: "Stop generating", signedIn: true };
-      }
+      pageState: async () => clicked
+        ? { url: "https://chatgpt.com/c/canonical-thread", conversationId: "canonical-thread", visibleText: "Stop generating", signedIn: true }
+        : { url: "https://chatgpt.com/c/WEB:provisional", conversationId: "WEB:provisional", visibleText: "New chat Search chats", signedIn: true }
     }));
 
     expect(result).toMatchObject({
-      status: "in_progress",
+      status: "blocked",
       submitted: true,
       resubmitAllowed: false,
-      nextAction: "poll_same_thread"
+      blocker: { code: "conversation_binding_lost", resumable: true }
     });
-    expect(result.blocker).toBeUndefined();
-    expect(result.warnings).toEqual(expect.arrayContaining([expect.stringContaining("Resume this archive")]));
     expect(calls).not.toContain("waitMetadata");
     expect(JSON.parse(await readFile(join(result.archiveDirectory!, "submission.json"), "utf8"))).toMatchObject({
       state: "ambiguous",
       submitted: true,
       resubmitAllowed: false,
-      thread: { url: "https://chatgpt.com/c/canonical-thread", id: "canonical-thread" }
+      thread: { url: "https://chatgpt.com/c/WEB:provisional", id: "WEB:provisional" }
+    });
+  });
+
+  it("confirms a same-tab provisional to canonical transition when submit context still carries the WEB route", async () => {
+    const repo = await fixtureRepository();
+    const provisionalUrl = "https://chatgpt.com/c/WEB:submit-route";
+    const canonicalUrl = "https://chatgpt.com/c/canonical-after-submit";
+    let submittedPrompt = "";
+    let clicked = false;
+    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([], {
+      bootstrap: async () => ({ ...success({}), context: { ...context(), tabId: "bound-tab" } }),
+      newThread: async () => ({
+        ...success({ url: provisionalUrl, conversationId: "WEB:submit-route" }),
+        context: { ...context(provisionalUrl), conversationId: "WEB:submit-route", tabId: "bound-tab" }
+      }),
+      submit: async (prompt: string) => {
+        submittedPrompt = prompt;
+        clicked = true;
+        return {
+          ...success({ submitted: true, userTurnText: prompt, turnCount: 2, submissionState: "submitted_generating" }),
+          context: { ...context(provisionalUrl), conversationId: "WEB:submit-route", tabId: "bound-tab" }
+        };
+      },
+      messageStatus: async () => success(clicked
+        ? { turnCount: 1, assistantTurnCount: 0, completionState: "generating", generationActive: true, generationSignals: ["stop-answering"] }
+        : { turnCount: 0, assistantTurnCount: 0, completionState: "unknown", generationActive: false, generationSignals: [] }),
+      readLatestUser: async () => success({ role: "user", text: submittedPrompt, format: "normalized_text" }),
+      pageState: async () => clicked
+        ? { url: canonicalUrl, conversationId: "canonical-after-submit", tabId: "bound-tab", visibleText: "Stop generating", signedIn: true }
+        : { url: provisionalUrl, conversationId: "WEB:submit-route", tabId: "bound-tab", visibleText: "Chat history", signedIn: true }
+    }));
+
+    expect(result.status).toBe("completed");
+    expect(result.thread).toEqual({ url: canonicalUrl, id: "canonical-after-submit" });
+    expect(JSON.parse(await readFile(join(result.archiveDirectory!, "submission.json"), "utf8"))).toMatchObject({
+      state: "confirmed",
+      thread: { url: canonicalUrl, id: "canonical-after-submit", tabId: "bound-tab" }
+    });
+  });
+
+  it("does not let a provisional submit-context exception hide a conflicting browser tab", async () => {
+    const repo = await fixtureRepository();
+    const provisionalUrl = "https://chatgpt.com/c/WEB:submit-tab-route";
+    const canonicalUrl = "https://chatgpt.com/c/canonical-submit-tab-route";
+    let submittedPrompt = "";
+    let clicked = false;
+    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([], {
+      bootstrap: async () => ({ ...success({}), context: { ...context(), tabId: "bound-tab" } }),
+      newThread: async () => ({
+        ...success({ url: provisionalUrl, conversationId: "WEB:submit-tab-route" }),
+        context: { ...context(provisionalUrl), conversationId: "WEB:submit-tab-route", tabId: "bound-tab" }
+      }),
+      submit: async (prompt: string) => {
+        submittedPrompt = prompt;
+        clicked = true;
+        return {
+          ...success({ submitted: true, userTurnText: prompt, turnCount: 1, submissionState: "submitted" }),
+          context: { ...context(provisionalUrl), conversationId: "WEB:submit-tab-route", tabId: "other-tab" }
+        };
+      },
+      messageStatus: async () => success(clicked
+        ? { turnCount: 1, assistantTurnCount: 0, completionState: "generating", generationActive: true, generationSignals: ["stop-answering"] }
+        : { turnCount: 0, assistantTurnCount: 0, completionState: "unknown", generationActive: false, generationSignals: [] }),
+      readLatestUser: async () => success({ role: "user", text: submittedPrompt, format: "normalized_text" }),
+      pageState: async () => clicked
+        ? { url: canonicalUrl, conversationId: "canonical-submit-tab-route", tabId: "bound-tab", visibleText: "Chat history", signedIn: true }
+        : { url: provisionalUrl, conversationId: "WEB:submit-tab-route", tabId: "bound-tab", visibleText: "Chat history", signedIn: true }
+    }));
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      submitted: true,
+      blocker: { code: "conversation_tab_affinity_lost", resumable: true }
     });
   });
 
@@ -744,7 +1186,7 @@ describe("Pro review state machine", () => {
     expect(calls).not.toContain("submit");
   });
 
-  it("claims the visible prompt-identical thread for a provisional ambiguous receipt", async () => {
+  it("recovers the unique prompt-identical thread for a provisional ambiguous receipt", async () => {
     const repo = await fixtureRepository();
     let submittedPrompt = "";
     const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([], {
@@ -769,13 +1211,22 @@ describe("Pro review state machine", () => {
       baseRef: "HEAD",
       resume: { archiveDirectory: first.archiveDirectory! }
     }, makePort(calls, {
-      bootstrap: async target => {
+      bootstrapRecovery: async target => {
         expect(target).toBeUndefined();
         return success({});
       },
-      recoverThread: async () => success({
+      recoverThread: async () => ({
+        ...success({
+          url: "https://chatgpt.com/c/canonical-thread",
+          conversationId: "canonical-thread"
+        }),
+        warnings: ["Recovered the archived review from a uniquely prompt-identical conversation in visible Chat history."]
+      }),
+      pageState: async () => ({
         url: "https://chatgpt.com/c/canonical-thread",
-        conversationId: "canonical-thread"
+        conversationId: "canonical-thread",
+        visibleText: "Chat history",
+        signedIn: true
       }),
       readLatestUser: async () => success({
         role: "user",
@@ -785,11 +1236,88 @@ describe("Pro review state machine", () => {
     }));
 
     expect(resumed.status).toBe("completed_with_warnings");
-    expect(resumed.warnings).toContain("Recovered the archived review from the already-visible prompt-identical Chat conversation.");
+    expect(resumed.warnings).toContain("Recovered the archived review from a uniquely prompt-identical conversation in visible Chat history.");
     expect(calls).toContain("pageState");
-    expect(calls).not.toContain("recoverThread");
+    expect(calls).toContain("recoverThread");
     expect(calls).not.toContain("openThread");
     expect(calls).not.toContain("submit");
+  });
+
+  it("does not canonically confirm a provisional recovery with a later identical turn", async () => {
+    const repo = await fixtureRepository();
+    let submittedPrompt = "";
+    const provisionalUrl = "https://chatgpt.com/c/WEB:later-identical";
+    const canonicalUrl = "https://chatgpt.com/c/canonical-later-identical";
+    const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([], {
+      newThread: async () => success({ url: provisionalUrl, conversationId: "WEB:later-identical" }),
+      submit: async prompt => {
+        submittedPrompt = prompt;
+        return success({ submitted: true, userTurnText: "render pending", turnCount: 1, submissionState: "submitted_generating" });
+      },
+      readLatestUser: async () => success({ role: "user", text: "render pending", format: "normalized_text" }),
+      pageState: async () => ({ url: provisionalUrl, conversationId: "WEB:later-identical", visibleText: "Stop generating", signedIn: true })
+    }));
+    const checkpointPath = join(first.archiveDirectory!, "thread-checkpoint.json");
+    const checkpointBefore = JSON.parse(await readFile(checkpointPath, "utf8"));
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort([], {
+      recoverThread: async () => success({ url: canonicalUrl, conversationId: "canonical-later-identical" }),
+      pageState: async () => ({ url: canonicalUrl, conversationId: "canonical-later-identical", visibleText: "Chat history", signedIn: true }),
+      readLatestUser: async () => success({ role: "user", text: submittedPrompt, format: "normalized_text" }),
+      messageStatus: async () => success({ turnCount: 3, assistantTurnCount: 2, completionState: "complete", generationActive: false, generationSignals: [] })
+    }));
+
+    expect(resumed).toMatchObject({ blocker: { code: "resume_conversation_turn_ambiguous", resumable: true } });
+    await expect(readFile(join(first.archiveDirectory!, "submission-confirmation.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(JSON.parse(await readFile(checkpointPath, "utf8")).current).toEqual(checkpointBefore.current);
+  });
+
+  it("does not confirm provisional recovery evidence from a drifting status context", async () => {
+    const repo = await fixtureRepository();
+    let submittedPrompt = "";
+    let messageStatusCalls = 0;
+    const provisionalUrl = "https://chatgpt.com/c/WEB:status-drift";
+    const canonicalUrl = "https://chatgpt.com/c/canonical-status-drift";
+    const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([], {
+      newThread: async () => success({ url: provisionalUrl, conversationId: "WEB:status-drift" }),
+      submit: async prompt => {
+        submittedPrompt = prompt;
+        return success({ submitted: true, userTurnText: "render pending", turnCount: 1, submissionState: "submitted_generating" });
+      },
+      readLatestUser: async () => success({ role: "user", text: "render pending", format: "normalized_text" }),
+      pageState: async () => ({ url: provisionalUrl, conversationId: "WEB:status-drift", visibleText: "Stop generating", signedIn: true })
+    }));
+    const checkpointPath = join(first.archiveDirectory!, "thread-checkpoint.json");
+    const checkpointBefore = JSON.parse(await readFile(checkpointPath, "utf8"));
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort([], {
+      recoverThread: async () => success({ url: canonicalUrl, conversationId: "canonical-status-drift" }),
+      pageState: async () => ({ url: canonicalUrl, conversationId: "canonical-status-drift", visibleText: "Chat history", signedIn: true }),
+      readLatestUser: async () => ({
+        ...success({ role: "user" as const, text: submittedPrompt, format: "normalized_text" as const }),
+        context: { ...context(canonicalUrl), conversationId: "canonical-status-drift" }
+      }),
+      messageStatus: async () => {
+        messageStatusCalls += 1;
+        return {
+          ...success({ turnCount: 1, assistantTurnCount: 0, completionState: "generating" as const, generationActive: true, generationSignals: ["stop-answering"] }),
+          context: { ...context("https://chatgpt.com/c/other"), conversationId: "other" }
+        };
+      }
+    }));
+
+    expect(resumed).toMatchObject({ blocker: { code: "conversation_binding_lost", resumable: true } });
+    expect(messageStatusCalls).toBe(1);
+    await expect(readFile(join(first.archiveDirectory!, "submission-confirmation.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(JSON.parse(await readFile(checkpointPath, "utf8")).current).toEqual(checkpointBefore.current);
   });
 
   it("canonicalizes a confirmed provisional receipt on resume without resubmitting", async () => {
@@ -850,8 +1378,8 @@ describe("Pro review state machine", () => {
       resume: { archiveDirectory: first.archiveDirectory! }
     }, makePort(mismatchedCalls, {
       pageState: async () => ({
-        url: provisionalUrl,
-        conversationId: "WEB:confirmed-fixture",
+        url: canonicalUrl,
+        conversationId: "canonical-fixture",
         visibleText: "Chat history",
         signedIn: true
       }),
@@ -859,10 +1387,13 @@ describe("Pro review state machine", () => {
         url: canonicalUrl,
         conversationId: "canonical-fixture"
       }),
-      readLatestUser: async () => success({
-        role: "user",
-        text: "A different visible prompt",
-        format: "normalized_text"
+      readLatestUser: async () => ({
+        ...success({
+          role: "user" as const,
+          text: "A different visible prompt",
+          format: "normalized_text" as const
+        }),
+        context: { ...context(canonicalUrl), conversationId: "canonical-fixture" }
       })
     }));
 
@@ -879,10 +1410,14 @@ describe("Pro review state machine", () => {
       baseRef: "HEAD",
       resume: { archiveDirectory: first.archiveDirectory! }
     }, makePort(calls, {
-      bootstrap: async target => {
+      bootstrapRecovery: async target => {
         expect(target).toBeUndefined();
         return success({});
       },
+      recoverThread: async () => success({
+        url: canonicalUrl,
+        conversationId: "canonical-fixture"
+      }),
       pageState: async () => ({
         url: canonicalUrl,
         conversationId: "canonical-fixture",
@@ -897,13 +1432,38 @@ describe("Pro review state machine", () => {
       })
     }));
 
-    expect(resumed.status).toBe("completed_with_warnings");
+    expect(resumed.status).toBe("completed");
     expect(resumed.thread).toEqual({ url: canonicalUrl, id: "canonical-fixture" });
     expect(calls).toContain("pageState");
-    expect(calls).not.toContain("recoverThread");
+    expect(calls).toContain("recoverThread");
     expect(calls).not.toContain("openThread");
     expect(calls).not.toContain("submit");
     expect(JSON.parse(await readFile(join(first.archiveDirectory!, "thread-checkpoint.json"), "utf8"))).toMatchObject({
+      current: { url: canonicalUrl, id: "canonical-fixture" }
+    });
+
+    const checkpointPath = join(first.archiveDirectory!, "thread-checkpoint.json");
+    const staleCheckpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+    staleCheckpoint.current = { url: provisionalUrl, id: "WEB:confirmed-fixture" };
+    await writeFile(checkpointPath, `${JSON.stringify(staleCheckpoint, null, 2)}\n`);
+    const crashRetryCalls: string[] = [];
+    const crashRetried = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(crashRetryCalls, {
+      pageState: async () => ({
+        url: canonicalUrl,
+        conversationId: "canonical-fixture",
+        title: "Canonical fixture",
+        visibleText: "Chat history",
+        signedIn: true
+      }),
+      readLatestUser: async () => success({ role: "user", text: archivedPrompt, format: "normalized_text" })
+    }));
+    expect(crashRetried.status).toBe("completed");
+    expect(crashRetryCalls).not.toContain("submit");
+    expect(JSON.parse(await readFile(checkpointPath, "utf8"))).toMatchObject({
       current: { url: canonicalUrl, id: "canonical-fixture" }
     });
   });
@@ -931,6 +1491,102 @@ describe("Pro review state machine", () => {
     expect(calls).not.toContain("waitMetadata");
     expect(calls).not.toContain("readFullMarkdown");
     expect(calls).not.toContain("submit");
+  });
+
+  it("rejects a later identical user turn using archived turn-count ownership", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    const archivedPrompt = await readFile(join(first.archiveDirectory!, "prompt.md"), "utf8");
+    const calls: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls, {
+      readLatestUser: async () => success({ role: "user", text: archivedPrompt, format: "normalized_text" }),
+      messageStatus: async () => success({
+        turnCount: 3,
+        assistantTurnCount: 2,
+        completionState: "complete",
+        generationActive: false,
+        generationSignals: []
+      })
+    }));
+
+    expect(resumed).toMatchObject({
+      status: "blocked",
+      blocker: { code: "resume_conversation_turn_ambiguous", resumable: true }
+    });
+    expect(calls).not.toContain("waitMetadata");
+    expect(calls).not.toContain("readFullMarkdown");
+    expect(calls).not.toContain("submit");
+  });
+
+  it("rechecks ownership after polling before accepting a later identical response", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    const archivedPrompt = await readFile(join(first.archiveDirectory!, "prompt.md"), "utf8");
+    let statusCalls = 0;
+    const calls: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls, {
+      readLatestUser: async () => success({ role: "user", text: archivedPrompt, format: "normalized_text" }),
+      messageStatus: async () => {
+        statusCalls += 1;
+        return success(statusCalls === 1
+          ? { turnCount: 1, assistantTurnCount: 0, completionState: "generating", generationActive: true, generationSignals: ["stop-answering"] }
+          : { turnCount: 3, assistantTurnCount: 2, completionState: "complete", generationActive: false, generationSignals: [] });
+      }
+    }));
+
+    expect(resumed).toMatchObject({
+      status: "blocked",
+      blocker: { code: "resume_conversation_turn_ambiguous", resumable: true }
+    });
+    expect(calls).toContain("waitMetadata");
+    expect(calls).not.toContain("readFullMarkdown");
+  });
+
+  it("fences a repeated identical turn during the first invocation too", async () => {
+    const repo = await fixtureRepository();
+    let statusCalls = 0;
+    const calls: string[] = [];
+    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort(calls, {
+      messageStatus: async () => {
+        statusCalls += 1;
+        if (statusCalls === 1) {
+          return success({ turnCount: 0, assistantTurnCount: 0, completionState: "unknown", generationActive: false, generationSignals: [] });
+        }
+        if (statusCalls === 2) {
+          return success({ turnCount: 1, assistantTurnCount: 0, completionState: "generating", generationActive: true, generationSignals: ["stop-answering"] });
+        }
+        return success({ turnCount: 3, assistantTurnCount: 2, completionState: "complete", generationActive: false, generationSignals: [] });
+      }
+    }));
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      submitted: true,
+      blocker: { code: "resume_conversation_turn_ambiguous", resumable: true }
+    });
+    expect(calls).toContain("waitMetadata");
+    expect(calls).not.toContain("readFullMarkdown");
+    await expect(readFile(join(result.archiveDirectory!, "response.md"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("reconciles a durable intent after receipt loss without resubmitting", async () => {
@@ -992,6 +1648,31 @@ describe("Pro review state machine", () => {
     expect(calls).not.toContain("bootstrap");
   });
 
+  it("rejects a malformed archived recovery tab id before opening a browser", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    const checkpointPath = join(first.archiveDirectory!, "thread-checkpoint.json");
+    const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+    checkpoint.current.tabId = { unexpected: true };
+    await writeFile(checkpointPath, `${JSON.stringify(checkpoint, null, 2)}\n`);
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls));
+
+    expect(resumed).toMatchObject({ status: "blocked", blocker: { code: "resume_checkpoint_invalid" } });
+    expect(calls).not.toContain("bootstrap");
+  });
+
   it("requires the original configuration snapshot on resume", async () => {
     const repo = await fixtureRepository();
     const first = await runCodeReviewWithPort({
@@ -1015,6 +1696,156 @@ describe("Pro review state machine", () => {
       blocker: { kind: "configuration_restore_failed", code: "resume_configuration_snapshot_invalid" }
     });
     expect(calls).not.toContain("bootstrap");
+  });
+
+  it("publishes terminal outcome only after provenance and makes a late archive commit failure authoritative", async () => {
+    const repo = await fixtureRepository();
+    let sabotagedArchive: string | undefined;
+    const result = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD"
+    }, makePort([], {
+      inspectConfiguration: async () => {
+        const archiveRoot = join(repo, ".codex", "pro-reviews");
+        const archives = await readdir(archiveRoot);
+        sabotagedArchive = join(archiveRoot, archives[0]!);
+        await mkdir(join(sabotagedArchive, "receipt.json"));
+        return success(beforeInspection);
+      }
+    }));
+
+    expect(result).toMatchObject({
+      status: "failed",
+      submitted: true,
+      blocker: { code: "archive_terminal_commit_failed", resumable: false }
+    });
+    await expect(readFile(join(sabotagedArchive!, "terminal-outcome.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(JSON.parse(await readFile(join(sabotagedArchive!, "archive-commit-failure.json"), "utf8"))).toMatchObject({
+      status: "failed",
+      submitted: true,
+      blocker: { code: "archive_terminal_commit_failed", resumable: false }
+    });
+
+    const calls: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: sabotagedArchive! }
+    }, makePort(calls));
+    expect(resumed).toMatchObject({ status: "failed", blocker: { code: "archive_terminal_commit_failed", resumable: false } });
+    expect(calls).toEqual([]);
+  });
+
+  it("replays an authoritative pre-submit terminal outcome after archive integrity checks", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([], {
+      applyPro: async () => success({
+        requested: { intelligence: "Pro" },
+        selected: [{ axis: "intelligence", requested: "Pro", selected: "Instant" }],
+        before: beforeInspection,
+        after: beforeInspection,
+        verified: false
+      })
+    }));
+    expect(first).toMatchObject({
+      status: "blocked",
+      submitted: false,
+      blocker: { code: "pro_precondition_unverified", resumable: false }
+    });
+    await expect(readFile(join(first.archiveDirectory!, "submission.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+
+    const calls: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      safeguards: { restorePreviousConfiguration: true },
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls));
+    expect(resumed).toMatchObject({
+      status: "blocked",
+      submitted: false,
+      blocker: { code: "pro_precondition_unverified", resumable: false }
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("replays a pre-snapshot terminal marker without requiring configuration.before.json", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([], {
+      newThread: async () => ({
+        ok: false,
+        status: "blocked",
+        warnings: [],
+        blocker: { kind: "selector_drift", code: "pre_snapshot_open_failed", message: "Open failed before snapshot.", resumable: false },
+        context: context()
+      })
+    }));
+    expect(first).toMatchObject({ submitted: false, blocker: { code: "pre_snapshot_open_failed", resumable: false } });
+    await expect(readFile(join(first.archiveDirectory!, "configuration.before.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+
+    const calls: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls));
+    expect(resumed).toMatchObject({ submitted: false, blocker: { code: "pre_snapshot_open_failed", resumable: false } });
+    expect(calls).toEqual([]);
+  });
+
+  it("reports a corrupt terminal marker structurally without opening a browser", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    await writeFile(join(first.archiveDirectory!, "terminal-outcome.json"), "{not-json\n");
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls));
+    expect(resumed).toMatchObject({
+      status: "blocked",
+      submitted: true,
+      blocker: { code: "resume_terminal_outcome_invalid", resumable: false }
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects a resumable terminal marker as non-authoritative", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    await writeFile(join(first.archiveDirectory!, "terminal-outcome.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      finalizedAt: "2026-08-11T12:00:00.000Z",
+      status: "blocked",
+      ok: false,
+      submitted: true,
+      resubmitAllowed: false,
+      blocker: { kind: "unknown", code: "synthetic_resumable", message: "retry", resumable: true },
+      warnings: [],
+      thread: { url: "https://chatgpt.com/c/review-thread", id: "review-thread" }
+    }, null, 2)}\n`);
+    const calls: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls));
+    expect(resumed).toMatchObject({ blocker: { code: "resume_terminal_outcome_invalid", resumable: false } });
+    expect(calls).toEqual([]);
   });
 
   it("allows only one concurrent owner of a review archive", async () => {
@@ -1248,6 +2079,7 @@ function makePort(calls: string[], overrides: Partial<ReviewWorkflowPort> = {}):
   const defaults: ReviewWorkflowPort = {
     now: () => new Date(1786459200000 + tick++),
     bootstrap: record("bootstrap", async () => success({})),
+    bootstrapRecovery: record("bootstrapRecovery", async () => success({})),
     openChat: record("openChat", async () => success({})),
     newThread: record("newThread", async () => success({ url: "https://chatgpt.com/", title: "New chat" })),
     openThread: record("openThread", async target => success({
@@ -1295,6 +2127,36 @@ function failure<T>(status: CommandResult<T>["status"], data: T): CommandResult<
 
 function context(url = "https://chatgpt.com/") {
   return { timestamp: "2026-08-11T12:00:00.000Z", url };
+}
+
+function mutableChatPage(
+  id: string,
+  initialUrl: string,
+  fixture: { home?: string; conversations?: Record<string, string> },
+  navigated: string[] = []
+): PageLike {
+  let currentUrl = initialUrl;
+  return {
+    id,
+    tabId: id,
+    url: () => currentUrl,
+    goto: async url => {
+      currentUrl = url;
+      navigated.push(url);
+    },
+    title: async () => currentUrl === "https://chatgpt.com/" ? "ChatGPT" : "Recovery candidate",
+    content: async () => {
+      const conversationId = /\/c\/([^/?#]+)/.exec(currentUrl)?.[1];
+      const prompt = conversationId === undefined ? undefined : fixture.conversations?.[conversationId];
+      if (prompt !== undefined) {
+        return `<main>New chat Search chats Chat with ChatGPT<div data-message-author-role="user">${prompt}</div><div data-message-author-role="assistant">response</div></main>`;
+      }
+      return `<main>New chat Search chats Chat with ChatGPT${fixture.home ?? ""}</main>`;
+    },
+    locator: () => ({ count: async () => 0 }),
+    waitForTimeout: async () => undefined,
+    waitForEvent: async () => ({})
+  };
 }
 
 async function fixtureRepository(): Promise<string> {

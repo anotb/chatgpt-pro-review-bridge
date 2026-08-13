@@ -1,6 +1,6 @@
 ---
 title: Release Process
-date: 2026-08-12
+date: 2026-08-13
 type: runbook
 status: stable
 ---
@@ -52,6 +52,14 @@ question, a repository-backed request, a bounded resume, and a same-thread
 follow-up. Pro requests can run for more than an hour; resume the same archive
 instead of resending the prompt.
 
+For the bounded resume, confirm the invocation remains on the archived
+canonical conversation and stable browser tab through polling and final
+capture, with no duplicate visible user turn. Include deterministic regressions
+for provisional `WEB:` to canonical recovery, multiple prompt-identical
+candidates, current authenticated/logged-out DOM fixtures, terminal provenance
+write failure, packet exclusions with source snapshots disabled, and delayed
+Python backend exit diagnostics.
+
 Use a fast Chat setting for repetitive artifact and interruption checks when
 the behavior does not depend on Pro. Record the exact installed plugin version
 and archive used by the live qualification.
@@ -79,9 +87,13 @@ package together with the release-equivalent Python wheel.
 Create a tag that exactly matches the package version:
 
 ```bash
-git tag v0.7.2
-git push origin v0.7.2
+VERSION="<version>"
+git tag "v${VERSION}"
+git push origin "v${VERSION}"
 ```
+
+Replace `<version>` with the already-validated package version before running
+the commands; do not copy an older release number from this runbook.
 
 The release workflow reruns the complete preflight and clean-package smoke on
 macOS, then creates the stable GitHub release. When npm publishing is enabled,
@@ -95,7 +107,8 @@ npm run release:verify-published
 Finally, install the tag as a user would:
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.2
+VERSION="<version>"
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref "v${VERSION}"
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 

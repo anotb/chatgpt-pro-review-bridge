@@ -16,22 +16,26 @@ const DEFAULT_PACKET_BYTES = 1_500_000;
 const DEFAULT_TOTAL_BYTES = 12_000_000;
 const DEFAULT_SOURCE_BYTES = 750_000;
 const PUBLIC_ENV_TEMPLATE_PATTERN = /(^|\/)\.env\.(?:example|sample|template)$/i;
-const SECRET_PATH_PATTERNS = [
-  /(^|\/)\.env(?:\.|$)/i,
-  /(^|\/)(?:credentials?|secrets?)\//i,
-  /(^|\/)\.?(?:credentials?|secrets?|tokens?)(?:[._-](?:local|private|production|prod|development|dev|test))?(?:\.(?:json|ya?ml|toml|ini|txt))?$/i,
-  /(^|\/)(?:service-account[^/]*|application_default_credentials|auth)\.json$/i,
-  /(^|\/)(?:\.npmrc|\.pypirc|\.netrc|\.git-credentials)$/i,
+const PUBLIC_AUTH_FIXTURE_PATTERN = /(^|\/)(?:test|tests|__tests__)\/fixtures\/auth\.json$/i;
+const ROOT_SECRET_DIRECTORY_PATTERN = /^(?:credentials?|secrets?)\//i;
+const AUTH_JSON_PATTERN = /(^|\/)auth\.json$/i;
+const HARD_SECRET_STORE_ANCESTRY_PATTERNS = [
   /(^|\/)\.aws\//i,
   /(^|\/)\.azure\//i,
   /(^|\/)\.config\/gcloud\//i,
+  /(^|\/)Local Storage\//i
+];
+const HARD_SECRET_PATH_PATTERNS = [
+  /(^|\/)\.env(?:\.|$)/i,
+  /(^|\/)\.?(?:credentials?|secrets?|tokens?)(?:[._-](?:local|private|production|prod|development|dev|test))?(?:\.(?:json|ya?ml|toml|ini|txt))?$/i,
+  /(^|\/)(?:service-account[^/]*|application_default_credentials)\.json$/i,
+  /(^|\/)(?:\.npmrc|\.pypirc|\.netrc|\.git-credentials)$/i,
   /(^|\/)\.docker\/config\.json$/i,
   /(^|\/)\.kube\/config$/i,
   /(^|\/)\.m2\/settings\.xml$/i,
   /(^|\/)(?:id_rsa|id_ed25519|id_ecdsa)(?:\.|$)/i,
   /\.(?:pem|p12|pfx|key|keystore)$/i,
-  /(^|\/)Cookies(?:-journal)?$/i,
-  /(^|\/)Local Storage\//i
+  /(^|\/)Cookies(?:-journal)?$/i
 ];
 const GENERATED_DIRECTORY_PATTERN = /(^|\/)(?:node_modules|dist|build|coverage|vendor|target|\.next|\.cache)\//i;
 const GENERATED_PLUGIN_RUNTIME_PATTERN = /^plugins\/[^/]+\/runtime\/node\/[^/]+\.mjs$/i;
@@ -67,12 +71,14 @@ type RepositoryRoots = { canonical: string; lexical: string };
 type GitStatusEntry = { code: string; paths: string[] };
 type GitNameStatusEntry = { code: string; paths: string[] };
 type GitTreeEntry = { mode: string; oid: string; sizeBytes?: number };
-type ReadableCandidate = {
+type SafetyCandidate = {
   path: string;
   category: string;
-  sizeBytes: number;
   overlay: boolean;
-  oid?: string;
+  includeSourceSnapshot: boolean;
+  baseEntry: GitTreeEntry | undefined;
+  headEntry: GitTreeEntry | undefined;
+  indexEntry: GitTreeEntry | undefined;
 };
 
 export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Date()): Promise<PreparedReviewContext> {
@@ -121,6 +127,7 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
   const emptyTreeSha = reviewScope === "repository"
     ? await gitRequired(repositoryRoot, ["hash-object", "-t", "tree", "--stdin"], "empty_tree_unresolved")
     : undefined;
+  const comparisonBaseSha = reviewScope === "repository" ? emptyTreeSha! : mergeBaseSha!;
   if (includeWorkingTree && headSha !== checkedOutHeadSha) {
     throw new ReviewPreparationError(
       "Working-tree evidence can only overlay the checked-out HEAD. Set includeWorkingTree to false or check out the requested headRef.",
@@ -139,11 +146,28 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
     const dirty = packetStatus.visible.length > 0;
     const availableFiles = await snapshotFiles(repositoryRoot, headSha, includeWorkingTree, archivePathPrefix);
     const committedEntries = headSha === undefined ? new Map<string, GitTreeEntry>() : await treeEntries(repositoryRoot, headSha);
+    const comparisonEntries = reviewScope === "changes"
+      ? await treeEntries(repositoryRoot, comparisonBaseSha)
+      : new Map<string, GitTreeEntry>();
+    // An unborn repository has no HEAD tree. Its packet contains two separate
+    // evidence channels: empty-tree -> index and index -> working tree. Keep
+    // the staged side independently so a safe worktree replacement cannot
+    // mask an unsafe blob or mode that is still present in the index diff.
+    const stagedEntries = unbornHead && includeWorkingTree
+      ? await indexEntries(repositoryRoot)
+      : new Map<string, GitTreeEntry>();
+    const renameEntries = await reviewRenameEntries(
+      repositoryRoot,
+      comparisonBaseSha,
+      headSha,
+      includeWorkingTree
+    );
+    const unsafeRenamePaths = unsafeRenameClosure(renameEntries, path => isPacketExcludedPath(path, archivePathPrefix));
     const changedAll = reviewScope === "repository"
       ? availableFiles
       : await changedFiles(repositoryRoot, mergeBaseSha!, headSha!, includeWorkingTree, archivePathPrefix);
-    const excludedChanged = changedAll.filter(path => isPacketExcludedPath(path, archivePathPrefix));
-    const changed = changedAll.filter(path => !isPacketExcludedPath(path, archivePathPrefix));
+    const excludedChanged = changedAll.filter(path => isPacketExcludedPath(path, archivePathPrefix) || unsafeRenamePaths.has(path));
+    const changed = changedAll.filter(path => !isPacketExcludedPath(path, archivePathPrefix) && !unsafeRenamePaths.has(path));
     const overlayPaths = includeWorkingTree
       ? await workingTreePaths(repositoryRoot, archivePathPrefix)
       : new Set<string>();
@@ -157,17 +181,19 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
       path,
       category: reviewScope === "repository" ? "repository-file" : "changed-file",
       status: "excluded" as const,
-      reason: excludedPathReason(path, archivePathPrefix)
+      reason: unsafeRenamePaths.has(path) && !isPacketExcludedPath(path, archivePathPrefix)
+        ? "unsafe_rename_pair"
+        : excludedPathReason(path, archivePathPrefix)
     })));
     const sourceSections: Section[] = [];
     const dependencies = new Map<string, Set<string>>();
     const maxSourceBytes = positiveInteger(args.context?.maxSourceFileBytes, DEFAULT_SOURCE_BYTES);
-    const readableCandidates: ReadableCandidate[] = [];
+    const safetyCandidates: SafetyCandidate[] = [];
 
     const candidates = collectCandidateFiles(availableFiles, changed, args, reviewScope);
     for (const candidate of candidates) {
       const normalized = normalizeRepoPath(candidate.path);
-      if (isSecretPath(normalized)) {
+      if (isHardSecretPath(normalized)) {
         fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "secret_path_policy" });
         continue;
       }
@@ -183,69 +209,107 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
         });
         continue;
       }
-      if (!overlayPaths.has(normalized)) {
-        const mode = committedEntries.get(normalized)?.mode;
-        if (mode === "120000" || mode === "160000") {
-          fileRecords.push({
-            path: normalized,
-            category: candidate.category,
-            status: "excluded",
-            reason: mode === "120000" ? "committed_symlink" : "gitlink"
-          });
+      const overlay = includeWorkingTree && overlayPaths.has(normalized);
+      const baseEntry = comparisonEntries.get(normalized);
+      const headEntry = committedEntries.get(normalized);
+      const indexEntry = stagedEntries.get(normalized);
+      const gitSides = [baseEntry, headEntry, indexEntry].filter((entry): entry is GitTreeEntry => entry !== undefined);
+      const unsafeMode = gitSides.find(entry => entry.mode === "120000" || entry.mode === "160000")?.mode;
+      if (unsafeMode !== undefined) {
+        fileRecords.push({
+          path: normalized,
+          category: candidate.category,
+          status: "excluded",
+          reason: unsafeMode === "120000" ? "committed_symlink" : "gitlink"
+        });
+        continue;
+      }
+      const oversizedGitSide = gitSides.find(entry => (entry.sizeBytes ?? Number.POSITIVE_INFINITY) > maxSourceBytes);
+      if (oversizedGitSide !== undefined) {
+        fileRecords.push({
+          path: normalized,
+          category: candidate.category,
+          status: "oversized",
+          reason: "max_source_file_bytes",
+          ...(oversizedGitSide.sizeBytes === undefined ? {} : { sizeBytes: oversizedGitSide.sizeBytes })
+        });
+        continue;
+      }
+      if (overlay) {
+        const overlaySize = await candidateSize(repositoryRoot, normalized, true, overlayPaths, committedEntries).catch(() => undefined);
+        if (overlaySize === undefined) {
+          fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "working_tree_not_regular" });
+          continue;
+        }
+        if (overlaySize > maxSourceBytes) {
+          fileRecords.push({ path: normalized, category: candidate.category, status: "oversized", reason: "max_source_file_bytes", sizeBytes: overlaySize });
           continue;
         }
       }
-      let sizeBytes: number;
-      try {
-        sizeBytes = await candidateSize(repositoryRoot, normalized, includeWorkingTree, overlayPaths, committedEntries);
-      } catch {
+      if (!overlay && headEntry === undefined && baseEntry === undefined && indexEntry === undefined) {
         fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "not_present_at_head_or_worktree" });
         continue;
       }
-      if (sizeBytes > maxSourceBytes) {
-        fileRecords.push({ path: normalized, category: candidate.category, status: "oversized", reason: "max_source_file_bytes", sizeBytes });
-        continue;
-      }
-      const overlay = includeWorkingTree && overlayPaths.has(normalized);
-      const oid = overlay ? undefined : committedEntries.get(normalized)?.oid;
-      if (!overlay && oid === undefined) {
-        fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "not_present_at_head_or_worktree" });
-        continue;
-      }
-      readableCandidates.push({
+      safetyCandidates.push({
         path: normalized,
         category: candidate.category,
-        sizeBytes,
         overlay,
-        ...(oid === undefined ? {} : { oid })
+        includeSourceSnapshot: candidate.includeSourceSnapshot,
+        baseEntry,
+        headEntry,
+        indexEntry
       });
     }
 
-    const committedBlobs = await readGitBlobs(repositoryRoot, readableCandidates
-      .filter(candidate => !candidate.overlay && candidate.oid !== undefined)
-      .map(candidate => ({ oid: candidate.oid!, sizeBytes: candidate.sizeBytes })));
-    for (const candidate of readableCandidates) {
-      let bytes: Buffer;
+    const committedBlobs = await readGitBlobs(repositoryRoot, safetyCandidates
+      .flatMap(candidate => [candidate.baseEntry, candidate.headEntry, candidate.indexEntry])
+      .filter((entry): entry is GitTreeEntry & { sizeBytes: number } => entry?.sizeBytes !== undefined)
+      .map(entry => ({ oid: entry.oid, sizeBytes: entry.sizeBytes })));
+    for (const candidate of safetyCandidates) {
+      let overlayBytes: Buffer | undefined;
       try {
-        bytes = candidate.overlay
-          ? await readWorkingTreeCandidate(repositoryRoot, candidate.path)
-          : committedBlobs.get(candidate.oid!)!;
-        if (bytes === undefined) throw new Error("Git blob was not returned by the batch reader.");
+        overlayBytes = candidate.overlay ? await readWorkingTreeCandidate(repositoryRoot, candidate.path) : undefined;
       } catch {
+        fileRecords.push({ path: candidate.path, category: candidate.category, status: "excluded", reason: "working_tree_not_regular" });
+        continue;
+      }
+      if (overlayBytes !== undefined && overlayBytes.length > maxSourceBytes) {
+        fileRecords.push({ path: candidate.path, category: candidate.category, status: "oversized", reason: "max_source_file_bytes", sizeBytes: overlayBytes.length });
+        continue;
+      }
+      const committedSideBytes = [candidate.baseEntry, candidate.headEntry, candidate.indexEntry]
+        .filter((entry): entry is GitTreeEntry => entry !== undefined)
+        .map(entry => committedBlobs.get(entry.oid))
+        .filter((bytes): bytes is Buffer => bytes !== undefined);
+      const missingCommittedSide = [candidate.baseEntry, candidate.headEntry, candidate.indexEntry]
+        .filter((entry): entry is GitTreeEntry => entry !== undefined)
+        .some(entry => !committedBlobs.has(entry.oid));
+      if (missingCommittedSide) {
+        fileRecords.push({ path: candidate.path, category: candidate.category, status: "excluded", reason: "git_blob_unavailable" });
+        continue;
+      }
+      const binarySide = [...committedSideBytes, ...(overlayBytes === undefined ? [] : [overlayBytes])].find(isBinary);
+      if (binarySide !== undefined) {
+        fileRecords.push({ path: candidate.path, category: candidate.category, status: "binary", sizeBytes: binarySide.length, sha256: hash(binarySide) });
+        continue;
+      }
+      const bytes = overlayBytes
+        ?? (candidate.headEntry === undefined ? undefined : committedBlobs.get(candidate.headEntry.oid))
+        ?? (candidate.indexEntry === undefined ? undefined : committedBlobs.get(candidate.indexEntry.oid))
+        ?? (candidate.baseEntry === undefined ? undefined : committedBlobs.get(candidate.baseEntry.oid));
+      if (bytes === undefined) {
         fileRecords.push({ path: candidate.path, category: candidate.category, status: "excluded", reason: "not_present_at_head_or_worktree" });
         continue;
       }
-      if (isBinary(bytes)) {
-        fileRecords.push({ path: candidate.path, category: candidate.category, status: "binary", sizeBytes: bytes.length, sha256: hash(bytes) });
-        continue;
-      }
       const text = bytes.toString("utf8");
-      const numbered = lineNumber(text);
-      sourceSections.push({
-        title: `Source snapshot: ${displayGitPath(candidate.path)}`,
-        body: `Path: ${displayGitPath(candidate.path)}\nCategory: ${candidate.category}\nSHA-256: ${hash(bytes)}\n\n${fencedBlock("text", numbered)}`,
-        files: [candidate.path]
-      });
+      if (candidate.includeSourceSnapshot) {
+        const numbered = lineNumber(text);
+        sourceSections.push({
+          title: `Source snapshot: ${displayGitPath(candidate.path)}`,
+          body: `Path: ${displayGitPath(candidate.path)}\nCategory: ${candidate.category}\nSHA-256: ${hash(bytes)}\n\n${fencedBlock("text", numbered)}`,
+          files: [candidate.path]
+        });
+      }
       fileRecords.push({ path: candidate.path, category: candidate.category, status: "included", sizeBytes: bytes.length, sha256: hash(bytes) });
       for (const symbol of exportedSymbols(text)) {
         const paths = dependencies.get(symbol) ?? new Set<string>();
@@ -256,9 +320,11 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
 
     const evidenceExcluded = [...new Set([
       ...excludedChanged,
+      ...unsafeRenamePaths,
       ...fileRecords.filter(record => record.status !== "included").map(record => record.path)
     ])];
-    const comparisonBaseSha = reviewScope === "repository" ? emptyTreeSha! : mergeBaseSha!;
+    const uploadSafeStatus = filterEvidenceStatus(packetStatus.visible, evidenceExcluded);
+    const uploadSafeChanged = changed.filter(path => !unsafeRenamePaths.has(normalizeRepoPath(path)));
     const diff = await buildDiff(repositoryRoot, comparisonBaseSha, headSha, includeWorkingTree, evidenceExcluded, archivePathPrefix);
 
     const nameStatus = await buildNameStatus(repositoryRoot, comparisonBaseSha, headSha, includeWorkingTree, evidenceExcluded, archivePathPrefix);
@@ -286,20 +352,21 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
           "",
           ...(includeWorkingTree ? [
             "git status --porcelain:",
-            fencedBlock("text", renderStatusEntries(packetStatus.visible))
+            fencedBlock("text", renderStatusEntries(uploadSafeStatus))
           ] : ["Working-tree status and filenames: not uploaded"]),
           `Excluded untracked local Codex state paths: ${packetStatus.excluded.filter(item => item.reason === "untracked_local_codex_state").length}`,
-          `Excluded archive or sensitive paths: ${packetStatus.excluded.filter(item => item.reason !== "untracked_local_codex_state").length}`
+          `Excluded archive or sensitive paths: ${packetStatus.excluded.filter(item => item.reason !== "untracked_local_codex_state").length}`,
+          `Excluded unsafe file-class status entries: ${packetStatus.visible.length - uploadSafeStatus.length}`
         ].join("\n")
       },
       {
         title: reviewScope === "repository" ? "Repository paths and status evidence" : "Changed paths and rename evidence",
-        files: changed,
+        files: uploadSafeChanged,
         body: fencedBlock("text", nameStatus.trimEnd())
       },
       {
         title: reviewScope === "repository" ? "Tracked repository diff from the empty tree" : "Line-numbered unified diff",
-        files: changed,
+        files: uploadSafeChanged,
         body: fencedBlock("diff", diff.trimEnd())
       },
       { title: "Deterministic caller/reference evidence", files: [], body: callers },
@@ -511,6 +578,73 @@ async function changedFiles(
   return [...new Set([...committed, ...unstaged, ...untracked].map(normalizeRepoPath))].sort();
 }
 
+async function reviewRenameEntries(
+  root: string,
+  comparisonBase: string,
+  headSha: string | undefined,
+  includeWorkingTree: boolean
+): Promise<GitNameStatusEntry[]> {
+  const entries: GitNameStatusEntry[] = [];
+  if (headSha !== undefined) {
+    entries.push(...await gitNameStatusEntries(
+      root,
+      ["diff", "--name-status", "-z", "--find-renames", comparisonBase, headSha],
+      "git_diff_name_status_failed"
+    ));
+  }
+  if (!includeWorkingTree) return entries;
+  if (headSha === undefined) {
+    entries.push(...await gitNameStatusEntries(
+      root,
+      ["diff", "--cached", "--name-status", "-z", "--find-renames", comparisonBase],
+      "git_worktree_name_status_failed"
+    ));
+    entries.push(...await gitNameStatusEntries(
+      root,
+      ["diff", "--name-status", "-z", "--find-renames"],
+      "git_worktree_name_status_failed"
+    ));
+  } else {
+    entries.push(...await gitNameStatusEntries(
+      root,
+      ["diff", "--cached", "--name-status", "-z", "--find-renames", "HEAD"],
+      "git_worktree_name_status_failed"
+    ));
+    entries.push(...await gitNameStatusEntries(
+      root,
+      ["diff", "--name-status", "-z", "--find-renames"],
+      "git_worktree_name_status_failed"
+    ));
+  }
+  return entries;
+}
+
+function unsafeRenameClosure(
+  entries: GitNameStatusEntry[],
+  isUnsafe: (path: string) => boolean
+): Set<string> {
+  const pairs = entries
+    .filter(entry => /^R/.test(entry.code) && entry.paths.length === 2)
+    .map(entry => [normalizeRepoPath(entry.paths[0]!), normalizeRepoPath(entry.paths[1]!)] as const);
+  const unsafe = new Set(pairs.flatMap(([from, to]) => [from, to]).filter(isUnsafe));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [from, to] of pairs) {
+      if (!unsafe.has(from) && !unsafe.has(to)) continue;
+      if (!unsafe.has(from)) {
+        unsafe.add(from);
+        changed = true;
+      }
+      if (!unsafe.has(to)) {
+        unsafe.add(to);
+        changed = true;
+      }
+    }
+  }
+  return unsafe;
+}
+
 async function snapshotFiles(
   root: string,
   headSha: string | undefined,
@@ -541,6 +675,11 @@ function filterPacketStatus(value: GitStatusEntry[], archivePathPrefix: string |
     return false;
   });
   return { visible, excluded };
+}
+
+function filterEvidenceStatus(value: GitStatusEntry[], excludedPaths: string[]): GitStatusEntry[] {
+  const excluded = new Set(excludedPaths.map(normalizeRepoPath));
+  return value.filter(entry => entry.paths.every(path => !excluded.has(normalizeRepoPath(path))));
 }
 
 async function workingTreePaths(root: string, archivePathPrefix: string | undefined): Promise<Set<string>> {
@@ -648,28 +787,33 @@ function collectCandidateFiles(
   changed: string[],
   args: ProCodeReviewArgs,
   reviewScope: ReviewScope
-): Array<{ path: string; category: string }> {
-  const records = new Map<string, string>();
-  if (args.context?.includeChangedFiles !== false) {
-    for (const path of changed) {
-      records.set(path, reviewScope === "repository"
+): Array<{ path: string; category: string; includeSourceSnapshot: boolean }> {
+  const records = new Map<string, { category: string; includeSourceSnapshot: boolean }>();
+  for (const path of changed) {
+    records.set(path, {
+      category: reviewScope === "repository"
         ? (TEST_PATTERN.test(path) ? "repository-test" : "repository-file")
-        : (TEST_PATTERN.test(path) ? "changed-test" : "changed-file"));
-    }
+        : (TEST_PATTERN.test(path) ? "changed-test" : "changed-file"),
+      includeSourceSnapshot: args.context?.includeChangedFiles !== false
+    });
   }
   if (args.context?.includeInstructions === true) {
-    for (const path of governingInstructions(availableFiles, changed)) records.set(path, "instructions");
+    for (const path of governingInstructions(availableFiles, changed)) records.set(path, { category: "instructions", includeSourceSnapshot: true });
   }
   for (const path of availableFiles.filter(path => MANIFEST_PATTERN.test(path))) {
-    if (changed.includes(path) || affectsChangedPath(path, changed)) records.set(path, "manifest-interface");
+    if (changed.includes(path) || affectsChangedPath(path, changed)) records.set(path, { category: "manifest-interface", includeSourceSnapshot: true });
   }
   if (args.context?.includeRelatedTests === true) {
     const stems = new Set(changed.map(path => relatedFileStem(path)));
     for (const path of availableFiles.filter(path => TEST_PATTERN.test(path))) {
-      if (changed.includes(path) || [...stems].some(stem => stem.length > 2 && relatedFileStem(path) === stem)) records.set(path, "related-test");
+      if (changed.includes(path) || [...stems].some(stem => stem.length > 2 && relatedFileStem(path) === stem)) {
+        records.set(path, { category: "related-test", includeSourceSnapshot: true });
+      }
     }
   }
-  return [...records.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([path, category]) => ({ path, category }));
+  return [...records.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([path, record]) => ({ path, ...record }));
 }
 
 function governingInstructions(tracked: string[], changed: string[]): string[] {
@@ -718,6 +862,7 @@ async function buildNameStatus(
   excludedPaths: string[],
   archivePathPrefix: string | undefined
 ): Promise<string> {
+  const excluded = new Set(excludedPaths.map(normalizeRepoPath));
   const pathspec = ["--", ".", ...packetExcludePathspec(excludedPaths, archivePathPrefix)];
   const committed = headSha === undefined
     ? []
@@ -730,7 +875,9 @@ async function buildNameStatus(
       ]
     : await gitNameStatusEntries(root, ["diff", "--name-status", "-z", "--find-renames", "HEAD", ...pathspec], "git_worktree_name_status_failed");
   const untracked = (await gitPathList(root, ["ls-files", "-z", "--others", "--exclude-standard"], "git_untracked_list_failed"))
-    .filter(path => !LOCAL_CODEX_STATE_PATTERN.test(path) && !isPacketExcludedPath(path, archivePathPrefix))
+    .filter(path => !LOCAL_CODEX_STATE_PATTERN.test(path)
+      && !isPacketExcludedPath(path, archivePathPrefix)
+      && !excluded.has(normalizeRepoPath(path)))
     .map(path => ({ code: "?", paths: [path] }));
   return renderNameStatusEntries([...committed, ...working, ...untracked]);
 }
@@ -1015,6 +1162,56 @@ async function treeEntries(root: string, headSha: string): Promise<Map<string, G
   return entries;
 }
 
+async function indexEntries(root: string): Promise<Map<string, GitTreeEntry>> {
+  const result = await runGitBuffer(root, ["ls-files", "--stage", "-z"]);
+  if (result.code !== 0) {
+    throw new ReviewPreparationError(result.stderr.toString("utf8").trim() || "Unable to inspect staged index entries.", "git_index_tree_failed");
+  }
+  const entries = new Map<string, GitTreeEntry>();
+  for (const record of splitNul(result.stdout)) {
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    const [mode, oid, stage] = record.slice(0, tab).trim().split(/\s+/);
+    const path = normalizeRepoPath(record.slice(tab + 1));
+    if (mode === undefined || oid === undefined || stage !== "0" || path.length === 0) continue;
+    entries.set(path, { mode, oid });
+  }
+
+  const regularEntries = [...entries.values()].filter(entry => entry.mode !== "120000" && entry.mode !== "160000");
+  const sizes = await gitBlobSizes(root, regularEntries.map(entry => entry.oid));
+  for (const entry of regularEntries) {
+    const sizeBytes = sizes.get(entry.oid);
+    if (sizeBytes === undefined) {
+      throw new ReviewPreparationError(`No staged Git blob metadata is available for ${entry.oid}.`, "git_index_tree_failed");
+    }
+    entry.sizeBytes = sizeBytes;
+  }
+  return entries;
+}
+
+async function gitBlobSizes(root: string, objectIds: string[]): Promise<Map<string, number>> {
+  const ordered = [...new Set(objectIds)];
+  if (ordered.length === 0) return new Map();
+  const result = await runGitBuffer(root, ["cat-file", "--batch-check"], Buffer.from(`${ordered.join("\n")}\n`, "utf8"));
+  if (result.code !== 0) {
+    throw new ReviewPreparationError(result.stderr.toString("utf8").trim() || "Unable to inspect staged Git blobs.", "git_index_tree_failed");
+  }
+  const lines = result.stdout.toString("utf8").split(/\r?\n/).filter(Boolean);
+  if (lines.length !== ordered.length) {
+    throw new ReviewPreparationError("Git batch metadata output did not match the staged index.", "git_index_tree_failed");
+  }
+  const sizes = new Map<string, number>();
+  for (const [index, expectedOid] of ordered.entries()) {
+    const [oid, type, sizeText] = lines[index]!.trim().split(/\s+/);
+    const size = Number(sizeText);
+    if (oid !== expectedOid || type !== "blob" || !Number.isSafeInteger(size) || size < 0) {
+      throw new ReviewPreparationError(`Unexpected staged Git object metadata: ${lines[index]}`, "git_index_tree_failed");
+    }
+    sizes.set(oid, size);
+  }
+  return sizes;
+}
+
 function splitNul(value: Buffer): string[] {
   const fields: string[] = [];
   let start = 0;
@@ -1102,10 +1299,20 @@ function normalizeRepoPath(value: string): string {
   return value.replace(/^\.\//, "");
 }
 
-function isSecretPath(value: string): boolean {
+function isHardSecretPath(value: string): boolean {
   const normalized = normalizeRepoPath(value);
+  // Provider and browser stores are unsafe by ancestry. A familiar fixture or
+  // template leaf must never turn one of those stores into upload evidence.
+  if (ROOT_SECRET_DIRECTORY_PATTERN.test(normalized)
+    || HARD_SECRET_STORE_ANCESTRY_PATTERNS.some(pattern => pattern.test(normalized))) return true;
   if (PUBLIC_ENV_TEMPLATE_PATTERN.test(normalized)) return false;
-  return SECRET_PATH_PATTERNS.some(pattern => pattern.test(normalized));
+  if (HARD_SECRET_PATH_PATTERNS.some(pattern => pattern.test(normalized))) return true;
+  if (PUBLIC_AUTH_FIXTURE_PATTERN.test(normalized)) return false;
+  if (AUTH_JSON_PATTERN.test(normalized)) return true;
+  // Nested directories with these names are commonly application source and
+  // are not secrets merely because of their path spelling. Root stores were
+  // handled above, before any public fixture/template exception.
+  return false;
 }
 
 function repositoryRelativeArchivePrefix(root: string, archiveRoot: string): string | undefined {
@@ -1117,7 +1324,7 @@ function repositoryRelativeArchivePrefix(root: string, archiveRoot: string): str
 
 function isPacketExcludedPath(path: string, archivePathPrefix: string | undefined): boolean {
   const normalized = normalizeRepoPath(path);
-  return isSecretPath(normalized)
+  return isHardSecretPath(normalized)
     || (archivePathPrefix !== undefined && (normalized === archivePathPrefix || normalized.startsWith(`${archivePathPrefix}/`)));
 }
 
@@ -1137,6 +1344,7 @@ function generatedPathReason(path: string): string | undefined {
 
 function isPrivateExclusionReason(reason: string | undefined): boolean {
   return reason === "secret_path_policy"
+    || reason === "unsafe_rename_pair"
     || reason === "untracked_local_codex_state"
     || reason === "review_archive_path";
 }

@@ -3162,9 +3162,10 @@ async function readPageState(page) {
   const fullPageBlocker = classifyVisibleText(visibleText);
   const classifiedBlocker = blockerSurface.hasConversationMessages ? classifyVisibleText(blockerSurface.text) : classifyVisibleText(blockerSurface.text) ?? fullPageBlocker;
   const structurallySignedIn = isStructurallySignedIn(snapshot.authenticationSurface);
-  const loginWall = classifiedBlocker?.kind === "login_required" && isLikelyLoginWall(visibleText) && !structurallySignedIn;
+  const explicitLoginWall = snapshot.authenticationSurface.loginControl && !structurallySignedIn;
+  const loginWall = !structurallySignedIn && (explicitLoginWall || classifiedBlocker?.kind === "login_required" && isLikelyLoginWall(visibleText));
   const signedIn = (isLikelySignedIn(visibleText) || structurallySignedIn) && !loginWall;
-  const blocker = classifiedBlocker?.kind === "login_required" && signedIn ? void 0 : classifiedBlocker;
+  const blocker = explicitLoginWall && classifiedBlocker === void 0 ? loginRequiredBlocker(visibleText) : classifiedBlocker?.kind === "login_required" && signedIn ? void 0 : classifiedBlocker;
   const conversationId = parseConversationId(url);
   const state = {
     url,
@@ -3192,7 +3193,7 @@ function isLikelySignedIn(visibleText) {
 async function readPageSnapshot(page) {
   if (typeof page.evaluate === "function") {
     try {
-      const value = await withTimeout(page.evaluate(() => {
+      const value = await withTimeout(page.evaluate((loginLabels) => {
         const messageSelector = "[data-message-author-role], [data-testid^='conversation-turn']";
         const systemSelector = [
           "[role='alert']",
@@ -3224,22 +3225,41 @@ async function readPageSnapshot(page) {
           "[contenteditable='true'][data-testid*='composer' i]",
           "[contenteditable='true'][aria-label*='ChatGPT' i]"
         ].join(", ");
-        const hasConversationMessages = document.querySelector(messageSelector) !== null;
+        const isVisible = (element) => {
+          if (element.closest("[hidden], [aria-hidden='true']") !== null) return false;
+          const style = window.getComputedStyle(element);
+          return style.display !== "none" && style.visibility !== "hidden" && style.visibility !== "collapse" && element.getClientRects().length > 0;
+        };
+        const normalizedLoginLabels = new Set(loginLabels.map((label) => label.trim().toLocaleLowerCase()));
+        const loginControl = Array.from(document.querySelectorAll("button, a, [role='button'], input[type='button'], input[type='submit']")).filter((element) => element.closest(messageSelector) === null).filter(isVisible).some((element) => {
+          const names = [
+            element.getAttribute("aria-label"),
+            element.getAttribute("value"),
+            element instanceof HTMLElement ? element.innerText : element.textContent
+          ];
+          return names.some((name) => typeof name === "string" && normalizedLoginLabels.has(name.replace(/\s+/g, " ").trim().toLocaleLowerCase()));
+        });
+        const hasConversationMessages = Array.from(document.querySelectorAll(messageSelector)).some(isVisible);
         const text = Array.from(document.querySelectorAll(systemSelector)).filter((element) => element.closest(messageSelector) === null).map((element) => (element.textContent ?? "") + " " + (element.getAttribute("aria-label") ?? "")).join(" ");
         return {
           visibleText: document.body?.innerText ?? "",
           blockerSurface: { text, hasConversationMessages },
           authenticationSurface: {
-            accountControl: document.querySelector(accountControlSelector) !== null,
-            conversationLinkCount: document.querySelectorAll(conversationLinkSelector).length,
-            hasComposer: document.querySelector(composerSelector) !== null,
-            hasConversationMessages
+            accountControl: Array.from(document.querySelectorAll(accountControlSelector)).some(isVisible),
+            conversationLinkCount: Array.from(document.querySelectorAll(conversationLinkSelector)).filter(isVisible).length,
+            hasComposer: Array.from(document.querySelectorAll(composerSelector)).some(isVisible),
+            hasConversationMessages,
+            loginControl
           }
         };
-      }), 1e3, "Timed out while reading the visible ChatGPT page state.");
+      }, [...localeLabels.loginBlocker]), 1e3, "Timed out while reading the visible ChatGPT page state.");
       const normalized = normalizePageDomSnapshot(value);
       if (normalized !== void 0) {
         if (typeof value === "string") {
+          const htmlSnapshot = await readHtmlPageSnapshot(page);
+          if (htmlSnapshot !== void 0) {
+            return { ...htmlSnapshot, visibleText: value };
+          }
           normalized.blockerSurface = await readLegacyBlockerSurface(page);
         }
         return normalized;
@@ -3248,14 +3268,18 @@ async function readPageSnapshot(page) {
     }
   }
   if (typeof page.content === "function") {
-    try {
-      const html = await withTimeout(page.content(), 1e3, "Timed out while reading page content.");
-      return snapshotFromHtml(html);
-    } catch {
-      return emptyPageDomSnapshot();
-    }
+    return await readHtmlPageSnapshot(page) ?? emptyPageDomSnapshot();
   }
   return emptyPageDomSnapshot();
+}
+async function readHtmlPageSnapshot(page) {
+  if (typeof page.content !== "function") return void 0;
+  try {
+    const html = await withTimeout(page.content(), 1e3, "Timed out while reading page content.");
+    return snapshotFromHtml(html);
+  } catch {
+    return void 0;
+  }
 }
 function normalizePageDomSnapshot(value) {
   if (typeof value === "string") {
@@ -3268,11 +3292,18 @@ function normalizePageDomSnapshot(value) {
   if (typeof value !== "object" || value === null) return void 0;
   const snapshot = value;
   const blockerSurface = snapshot.blockerSurface;
-  const authenticationSurface = snapshot.authenticationSurface;
-  if (typeof snapshot.visibleText !== "string" || typeof blockerSurface !== "object" || blockerSurface === null || typeof blockerSurface.text !== "string" || typeof blockerSurface.hasConversationMessages !== "boolean" || !isAuthenticationSurface(authenticationSurface)) {
+  const authenticationSurface = normalizeAuthenticationSurface(snapshot.authenticationSurface);
+  if (typeof snapshot.visibleText !== "string" || typeof blockerSurface !== "object" || blockerSurface === null || typeof blockerSurface.text !== "string" || typeof blockerSurface.hasConversationMessages !== "boolean" || authenticationSurface === void 0) {
     return void 0;
   }
-  return snapshot;
+  return {
+    visibleText: snapshot.visibleText,
+    blockerSurface: {
+      text: blockerSurface.text,
+      hasConversationMessages: blockerSurface.hasConversationMessages
+    },
+    authenticationSurface
+  };
 }
 async function readLegacyBlockerSurface(page) {
   if (typeof page.evaluate !== "function") return { text: "", hasConversationMessages: false };
@@ -3300,30 +3331,141 @@ async function readLegacyBlockerSurface(page) {
   return { text: "", hasConversationMessages: false };
 }
 function snapshotFromHtml(html) {
+  const visibleHtml = htmlWithoutHiddenSubtrees(html);
   const messageSelectorPattern = /data-message-author-role=|data-testid=["']conversation-turn/i;
-  const hasConversationMessages = messageSelectorPattern.test(html);
-  const withoutMessages = html.replace(
+  const openingTags = visibleHtml.match(/<[a-z0-9-]+\b[^>]*>/gi) ?? [];
+  const visibleOpeningTags = openingTags.filter((tag) => !htmlControlIsHidden(tag));
+  const hasConversationMessages = visibleOpeningTags.some((tag) => messageSelectorPattern.test(tag));
+  const withoutMessages = visibleHtml.replace(
     /<([a-z0-9-]+)\b[^>]*(?:data-message-author-role|data-testid=["']conversation-turn)[^>]*>[\s\S]*?<\/\1>/gi,
     " "
   );
-  const conversationLinkCount = Array.from(html.matchAll(
-    /<a\b[^>]*href=["'](?:https:\/\/(?:www\.)?chatgpt\.com)?\/c\/[^"']+/gi
-  )).length;
-  const buttonLikeTags = html.match(/<(?:button\b[^>]*|[a-z0-9-]+\b(?=[^>]*\brole=["']button["'])[^>]*)>/gi) ?? [];
-  const accountControl = buttonLikeTags.some(
+  const conversationLinkCount = visibleOpeningTags.filter((tag) => {
+    if (!/^<a\b/i.test(tag)) return false;
+    const href = htmlAttribute(tag, "href");
+    return typeof href === "string" && /^(?:https:\/\/(?:www\.)?chatgpt\.com)?\/c\//i.test(href);
+  }).length;
+  const buttonLikeTags = visibleHtml.match(/<(?:button\b[^>]*|[a-z0-9-]+\b(?=[^>]*\brole=["']button["'])[^>]*)>/gi) ?? [];
+  const accountControl = buttonLikeTags.filter((tag) => !htmlControlIsHidden(tag)).some(
     (tag) => /data-testid=["'][^"']*(?:profile|account)[^"']*["']/i.test(tag) || /aria-haspopup=["']menu["']/i.test(tag) && /aria-label=["'][^"']*(?:profile|account)[^"']*["']/i.test(tag)
-  ) || /<button\b[^>]*aria-haspopup=["']menu["'][^>]*>[\s\S]{0,1000}?<img\b/i.test(html);
-  const hasComposer = /\bid=["']prompt-textarea["']/i.test(html) || /\bdata-testid=["'][^"']*composer[^"']*["']/i.test(html) || /contenteditable=["']true["'][^>]*(?:aria-label=["'][^"']*ChatGPT|role=["']textbox)/i.test(html);
+  ) || Array.from(visibleHtml.matchAll(/<button\b([^>]*)>[\s\S]{0,1000}?<img\b[\s\S]*?<\/button>/gi)).some((match) => !htmlControlIsHidden(match[1] ?? "") && /aria-haspopup=["']menu["']/i.test(match[1] ?? ""));
+  const hasComposer = visibleOpeningTags.some(
+    (tag) => /\bid=["']prompt-textarea["']/i.test(tag) || /\bdata-testid=["'][^"']*composer[^"']*["']/i.test(tag) || /contenteditable=["']true["']/i.test(tag) && /(?:aria-label=["'][^"']*ChatGPT|role=["']textbox)/i.test(tag)
+  );
   return {
-    visibleText: htmlToText(html),
+    visibleText: htmlToText(visibleHtml),
     blockerSurface: { text: htmlToText(withoutMessages), hasConversationMessages },
     authenticationSurface: {
       accountControl,
       conversationLinkCount,
       hasComposer,
-      hasConversationMessages
+      hasConversationMessages,
+      loginControl: hasVisibleLoginControlInHtml(withoutMessages)
     }
   };
+}
+function htmlWithoutHiddenSubtrees(html) {
+  const voidElements = /* @__PURE__ */ new Set([
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "param",
+    "source",
+    "track",
+    "wbr"
+  ]);
+  const ancestors = [];
+  const visibleParts = [];
+  const tagPattern = /<!--[\s\S]*?-->|<![^>]*>|<\/?([a-z][a-z0-9-]*)\b[^>]*>/gi;
+  let hiddenDepth = 0;
+  let cursor = 0;
+  for (const match of html.matchAll(tagPattern)) {
+    const token = match[0];
+    const tokenIndex = match.index;
+    if (hiddenDepth === 0) visibleParts.push(html.slice(cursor, tokenIndex));
+    const rawTagName = match[1];
+    if (rawTagName === void 0) {
+      cursor = tokenIndex + token.length;
+      continue;
+    }
+    const tagName = rawTagName.toLocaleLowerCase();
+    if (/^<\//.test(token)) {
+      const hiddenDepthBeforeClose = hiddenDepth;
+      let matchingAncestor = -1;
+      for (let index = ancestors.length - 1; index >= 0; index -= 1) {
+        if (ancestors[index]?.tagName === tagName) {
+          matchingAncestor = index;
+          break;
+        }
+      }
+      if (matchingAncestor >= 0) {
+        for (let index = ancestors.length - 1; index >= matchingAncestor; index -= 1) {
+          if (ancestors[index]?.startsHiddenSubtree) hiddenDepth -= 1;
+        }
+        ancestors.length = matchingAncestor;
+      }
+      if (hiddenDepthBeforeClose === 0 && hiddenDepth === 0) visibleParts.push(token);
+    } else {
+      const startsHiddenSubtree = isInertHtmlSubtree(tagName) || htmlControlIsHidden(token);
+      if (hiddenDepth === 0 && !startsHiddenSubtree) visibleParts.push(token);
+      const selfClosing = /\/\s*>$/.test(token) || voidElements.has(tagName);
+      if (!selfClosing) {
+        ancestors.push({ tagName, startsHiddenSubtree });
+        if (startsHiddenSubtree) hiddenDepth += 1;
+      }
+    }
+    cursor = tokenIndex + token.length;
+  }
+  if (hiddenDepth === 0) visibleParts.push(html.slice(cursor));
+  return visibleParts.join("");
+}
+function isInertHtmlSubtree(tagName) {
+  return tagName === "script" || tagName === "style" || tagName === "template" || tagName === "noscript";
+}
+function hasVisibleLoginControlInHtml(html) {
+  const loginLabels = new Set(localeLabels.loginBlocker.map(normalizeControlName));
+  const pairedControls = html.matchAll(
+    /<(button|a)\b([^>]*)>([\s\S]*?)<\/\1>|<([a-z][a-z0-9-]*)\b([^>]*\brole=["']button["'][^>]*)>([\s\S]*?)<\/\4>/gi
+  );
+  for (const match of pairedControls) {
+    const attributes = match[2] ?? match[5] ?? "";
+    const contents = match[3] ?? match[6] ?? "";
+    if (htmlControlIsHidden(attributes)) continue;
+    if (htmlControlNames(attributes, contents).some((name) => loginLabels.has(normalizeControlName(name)))) {
+      return true;
+    }
+  }
+  for (const match of html.matchAll(/<input\b([^>]*)>/gi)) {
+    const attributes = match[1] ?? "";
+    if (htmlControlIsHidden(attributes)) continue;
+    const type = htmlAttribute(attributes, "type")?.toLocaleLowerCase();
+    if (type !== "button" && type !== "submit") continue;
+    if (htmlControlNames(attributes, "").some((name) => loginLabels.has(normalizeControlName(name)))) {
+      return true;
+    }
+  }
+  return false;
+}
+function htmlControlNames(attributes, contents) {
+  return [htmlAttribute(attributes, "aria-label"), htmlAttribute(attributes, "value"), htmlToText(contents)].filter((name) => typeof name === "string" && name.trim().length > 0);
+}
+function htmlControlIsHidden(attributes) {
+  const attributeNamesOnly = attributes.replace(/"[^"]*"|'[^']*'/g, '""');
+  return /(?:^|[\s<])hidden(?=[\s=/>]|$)/i.test(attributeNamesOnly) || /\baria-hidden\s*=\s*["']true["']/i.test(attributes) || /\bstyle\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse))/i.test(attributes);
+}
+function htmlAttribute(attributes, name) {
+  const match = attributes.match(new RegExp("\\b" + escapeRegExp(name) + `\\s*=\\s*([\\"'])(.*?)\\1`, "i"));
+  return match?.[2];
+}
+function normalizeControlName(value) {
+  return value.replace(/\s+/g, " ").trim().toLocaleLowerCase();
 }
 function emptyPageDomSnapshot() {
   return {
@@ -3337,13 +3479,25 @@ function emptyAuthenticationSurface() {
     accountControl: false,
     conversationLinkCount: 0,
     hasComposer: false,
-    hasConversationMessages: false
+    hasConversationMessages: false,
+    loginControl: false
   };
 }
-function isAuthenticationSurface(value) {
-  if (typeof value !== "object" || value === null) return false;
+function normalizeAuthenticationSurface(value) {
+  if (typeof value !== "object" || value === null) return void 0;
   const surface = value;
-  return typeof surface.accountControl === "boolean" && typeof surface.conversationLinkCount === "number" && Number.isInteger(surface.conversationLinkCount) && surface.conversationLinkCount >= 0 && typeof surface.hasComposer === "boolean" && typeof surface.hasConversationMessages === "boolean";
+  const hasLoginControl = Object.prototype.hasOwnProperty.call(surface, "loginControl");
+  if (hasLoginControl && typeof surface.loginControl !== "boolean") return void 0;
+  if (!(typeof surface.accountControl === "boolean" && typeof surface.conversationLinkCount === "number" && Number.isInteger(surface.conversationLinkCount) && surface.conversationLinkCount >= 0 && typeof surface.hasComposer === "boolean" && typeof surface.hasConversationMessages === "boolean")) {
+    return void 0;
+  }
+  return {
+    accountControl: surface.accountControl,
+    conversationLinkCount: surface.conversationLinkCount,
+    hasComposer: surface.hasComposer,
+    hasConversationMessages: surface.hasConversationMessages,
+    loginControl: hasLoginControl ? surface.loginControl : false
+  };
 }
 function isStructurallySignedIn(surface) {
   return surface.accountControl || surface.conversationLinkCount > 0 && (surface.hasComposer || surface.hasConversationMessages);
@@ -3352,6 +3506,13 @@ function isLikelyLoginWall(visibleText) {
   const labels = localeLabels.loginBlocker.map(escapeRegExp).join("|");
   const matches = visibleText.match(new RegExp("(?:" + labels + ")", "gi")) ?? [];
   return matches.length >= 2 || /\bsign\s?up\b|\bcreate (?:an )?account\b/i.test(visibleText);
+}
+function loginRequiredBlocker(visibleText) {
+  return {
+    kind: "login_required",
+    message: "ChatGPT requires the user to sign in before continuing.",
+    visibleText: compactVisibleText(visibleText)
+  };
 }
 
 // src/browser/attach.ts
@@ -14401,22 +14562,26 @@ var DEFAULT_PACKET_BYTES = 15e5;
 var DEFAULT_TOTAL_BYTES = 12e6;
 var DEFAULT_SOURCE_BYTES = 75e4;
 var PUBLIC_ENV_TEMPLATE_PATTERN = /(^|\/)\.env\.(?:example|sample|template)$/i;
-var SECRET_PATH_PATTERNS = [
-  /(^|\/)\.env(?:\.|$)/i,
-  /(^|\/)(?:credentials?|secrets?)\//i,
-  /(^|\/)\.?(?:credentials?|secrets?|tokens?)(?:[._-](?:local|private|production|prod|development|dev|test))?(?:\.(?:json|ya?ml|toml|ini|txt))?$/i,
-  /(^|\/)(?:service-account[^/]*|application_default_credentials|auth)\.json$/i,
-  /(^|\/)(?:\.npmrc|\.pypirc|\.netrc|\.git-credentials)$/i,
+var PUBLIC_AUTH_FIXTURE_PATTERN = /(^|\/)(?:test|tests|__tests__)\/fixtures\/auth\.json$/i;
+var ROOT_SECRET_DIRECTORY_PATTERN = /^(?:credentials?|secrets?)\//i;
+var AUTH_JSON_PATTERN = /(^|\/)auth\.json$/i;
+var HARD_SECRET_STORE_ANCESTRY_PATTERNS = [
   /(^|\/)\.aws\//i,
   /(^|\/)\.azure\//i,
   /(^|\/)\.config\/gcloud\//i,
+  /(^|\/)Local Storage\//i
+];
+var HARD_SECRET_PATH_PATTERNS = [
+  /(^|\/)\.env(?:\.|$)/i,
+  /(^|\/)\.?(?:credentials?|secrets?|tokens?)(?:[._-](?:local|private|production|prod|development|dev|test))?(?:\.(?:json|ya?ml|toml|ini|txt))?$/i,
+  /(^|\/)(?:service-account[^/]*|application_default_credentials)\.json$/i,
+  /(^|\/)(?:\.npmrc|\.pypirc|\.netrc|\.git-credentials)$/i,
   /(^|\/)\.docker\/config\.json$/i,
   /(^|\/)\.kube\/config$/i,
   /(^|\/)\.m2\/settings\.xml$/i,
   /(^|\/)(?:id_rsa|id_ed25519|id_ecdsa)(?:\.|$)/i,
   /\.(?:pem|p12|pfx|key|keystore)$/i,
-  /(^|\/)Cookies(?:-journal)?$/i,
-  /(^|\/)Local Storage\//i
+  /(^|\/)Cookies(?:-journal)?$/i
 ];
 var GENERATED_DIRECTORY_PATTERN = /(^|\/)(?:node_modules|dist|build|coverage|vendor|target|\.next|\.cache)\//i;
 var GENERATED_PLUGIN_RUNTIME_PATTERN = /^plugins\/[^/]+\/runtime\/node\/[^/]+\.mjs$/i;
@@ -14484,6 +14649,7 @@ async function prepareReviewContext(args, now = /* @__PURE__ */ new Date()) {
   const baseSha = reviewScope === "changes" ? await gitRequired(repositoryRoot, ["rev-parse", "--verify", `${baseRef}^{commit}`], "base_ref_unresolved") : void 0;
   const mergeBaseSha = reviewScope === "changes" ? await gitRequired(repositoryRoot, ["merge-base", baseSha, headSha], "merge_base_unresolved") : void 0;
   const emptyTreeSha = reviewScope === "repository" ? await gitRequired(repositoryRoot, ["hash-object", "-t", "tree", "--stdin"], "empty_tree_unresolved") : void 0;
+  const comparisonBaseSha = reviewScope === "repository" ? emptyTreeSha : mergeBaseSha;
   if (includeWorkingTree && headSha !== checkedOutHeadSha) {
     throw new ReviewPreparationError(
       "Working-tree evidence can only overlay the checked-out HEAD. Set includeWorkingTree to false or check out the requested headRef.",
@@ -14501,9 +14667,18 @@ async function prepareReviewContext(args, now = /* @__PURE__ */ new Date()) {
     const dirty = packetStatus.visible.length > 0;
     const availableFiles = await snapshotFiles(repositoryRoot, headSha, includeWorkingTree, archivePathPrefix);
     const committedEntries = headSha === void 0 ? /* @__PURE__ */ new Map() : await treeEntries(repositoryRoot, headSha);
+    const comparisonEntries = reviewScope === "changes" ? await treeEntries(repositoryRoot, comparisonBaseSha) : /* @__PURE__ */ new Map();
+    const stagedEntries = unbornHead && includeWorkingTree ? await indexEntries(repositoryRoot) : /* @__PURE__ */ new Map();
+    const renameEntries = await reviewRenameEntries(
+      repositoryRoot,
+      comparisonBaseSha,
+      headSha,
+      includeWorkingTree
+    );
+    const unsafeRenamePaths = unsafeRenameClosure(renameEntries, (path3) => isPacketExcludedPath(path3, archivePathPrefix));
     const changedAll = reviewScope === "repository" ? availableFiles : await changedFiles(repositoryRoot, mergeBaseSha, headSha, includeWorkingTree, archivePathPrefix);
-    const excludedChanged = changedAll.filter((path3) => isPacketExcludedPath(path3, archivePathPrefix));
-    const changed = changedAll.filter((path3) => !isPacketExcludedPath(path3, archivePathPrefix));
+    const excludedChanged = changedAll.filter((path3) => isPacketExcludedPath(path3, archivePathPrefix) || unsafeRenamePaths.has(path3));
+    const changed = changedAll.filter((path3) => !isPacketExcludedPath(path3, archivePathPrefix) && !unsafeRenamePaths.has(path3));
     const overlayPaths = includeWorkingTree ? await workingTreePaths(repositoryRoot, archivePathPrefix) : /* @__PURE__ */ new Set();
     let validation = await validationOutput(args, repositoryRoot, repositoryRoots.lexical);
     const fileRecords = packetStatus.excluded.map((item) => ({
@@ -14515,16 +14690,16 @@ async function prepareReviewContext(args, now = /* @__PURE__ */ new Date()) {
       path: path3,
       category: reviewScope === "repository" ? "repository-file" : "changed-file",
       status: "excluded",
-      reason: excludedPathReason(path3, archivePathPrefix)
+      reason: unsafeRenamePaths.has(path3) && !isPacketExcludedPath(path3, archivePathPrefix) ? "unsafe_rename_pair" : excludedPathReason(path3, archivePathPrefix)
     })));
     const sourceSections = [];
     const dependencies = /* @__PURE__ */ new Map();
     const maxSourceBytes = positiveInteger(args.context?.maxSourceFileBytes, DEFAULT_SOURCE_BYTES);
-    const readableCandidates = [];
+    const safetyCandidates = [];
     const candidates = collectCandidateFiles(availableFiles, changed, args, reviewScope);
     for (const candidate of candidates) {
       const normalized = normalizeRepoPath(candidate.path);
-      if (isSecretPath(normalized)) {
+      if (isHardSecretPath(normalized)) {
         fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "secret_path_policy" });
         continue;
       }
@@ -14540,68 +14715,99 @@ async function prepareReviewContext(args, now = /* @__PURE__ */ new Date()) {
         });
         continue;
       }
-      if (!overlayPaths.has(normalized)) {
-        const mode = committedEntries.get(normalized)?.mode;
-        if (mode === "120000" || mode === "160000") {
-          fileRecords.push({
-            path: normalized,
-            category: candidate.category,
-            status: "excluded",
-            reason: mode === "120000" ? "committed_symlink" : "gitlink"
-          });
+      const overlay = includeWorkingTree && overlayPaths.has(normalized);
+      const baseEntry = comparisonEntries.get(normalized);
+      const headEntry = committedEntries.get(normalized);
+      const indexEntry = stagedEntries.get(normalized);
+      const gitSides = [baseEntry, headEntry, indexEntry].filter((entry) => entry !== void 0);
+      const unsafeMode = gitSides.find((entry) => entry.mode === "120000" || entry.mode === "160000")?.mode;
+      if (unsafeMode !== void 0) {
+        fileRecords.push({
+          path: normalized,
+          category: candidate.category,
+          status: "excluded",
+          reason: unsafeMode === "120000" ? "committed_symlink" : "gitlink"
+        });
+        continue;
+      }
+      const oversizedGitSide = gitSides.find((entry) => (entry.sizeBytes ?? Number.POSITIVE_INFINITY) > maxSourceBytes);
+      if (oversizedGitSide !== void 0) {
+        fileRecords.push({
+          path: normalized,
+          category: candidate.category,
+          status: "oversized",
+          reason: "max_source_file_bytes",
+          ...oversizedGitSide.sizeBytes === void 0 ? {} : { sizeBytes: oversizedGitSide.sizeBytes }
+        });
+        continue;
+      }
+      if (overlay) {
+        const overlaySize = await candidateSize(repositoryRoot, normalized, true, overlayPaths, committedEntries).catch(() => void 0);
+        if (overlaySize === void 0) {
+          fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "working_tree_not_regular" });
+          continue;
+        }
+        if (overlaySize > maxSourceBytes) {
+          fileRecords.push({ path: normalized, category: candidate.category, status: "oversized", reason: "max_source_file_bytes", sizeBytes: overlaySize });
           continue;
         }
       }
-      let sizeBytes;
-      try {
-        sizeBytes = await candidateSize(repositoryRoot, normalized, includeWorkingTree, overlayPaths, committedEntries);
-      } catch {
+      if (!overlay && headEntry === void 0 && baseEntry === void 0 && indexEntry === void 0) {
         fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "not_present_at_head_or_worktree" });
         continue;
       }
-      if (sizeBytes > maxSourceBytes) {
-        fileRecords.push({ path: normalized, category: candidate.category, status: "oversized", reason: "max_source_file_bytes", sizeBytes });
-        continue;
-      }
-      const overlay = includeWorkingTree && overlayPaths.has(normalized);
-      const oid = overlay ? void 0 : committedEntries.get(normalized)?.oid;
-      if (!overlay && oid === void 0) {
-        fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "not_present_at_head_or_worktree" });
-        continue;
-      }
-      readableCandidates.push({
+      safetyCandidates.push({
         path: normalized,
         category: candidate.category,
-        sizeBytes,
         overlay,
-        ...oid === void 0 ? {} : { oid }
+        includeSourceSnapshot: candidate.includeSourceSnapshot,
+        baseEntry,
+        headEntry,
+        indexEntry
       });
     }
-    const committedBlobs = await readGitBlobs(repositoryRoot, readableCandidates.filter((candidate) => !candidate.overlay && candidate.oid !== void 0).map((candidate) => ({ oid: candidate.oid, sizeBytes: candidate.sizeBytes })));
-    for (const candidate of readableCandidates) {
-      let bytes;
+    const committedBlobs = await readGitBlobs(repositoryRoot, safetyCandidates.flatMap((candidate) => [candidate.baseEntry, candidate.headEntry, candidate.indexEntry]).filter((entry) => entry?.sizeBytes !== void 0).map((entry) => ({ oid: entry.oid, sizeBytes: entry.sizeBytes })));
+    for (const candidate of safetyCandidates) {
+      let overlayBytes;
       try {
-        bytes = candidate.overlay ? await readWorkingTreeCandidate(repositoryRoot, candidate.path) : committedBlobs.get(candidate.oid);
-        if (bytes === void 0) throw new Error("Git blob was not returned by the batch reader.");
+        overlayBytes = candidate.overlay ? await readWorkingTreeCandidate(repositoryRoot, candidate.path) : void 0;
       } catch {
+        fileRecords.push({ path: candidate.path, category: candidate.category, status: "excluded", reason: "working_tree_not_regular" });
+        continue;
+      }
+      if (overlayBytes !== void 0 && overlayBytes.length > maxSourceBytes) {
+        fileRecords.push({ path: candidate.path, category: candidate.category, status: "oversized", reason: "max_source_file_bytes", sizeBytes: overlayBytes.length });
+        continue;
+      }
+      const committedSideBytes = [candidate.baseEntry, candidate.headEntry, candidate.indexEntry].filter((entry) => entry !== void 0).map((entry) => committedBlobs.get(entry.oid)).filter((bytes2) => bytes2 !== void 0);
+      const missingCommittedSide = [candidate.baseEntry, candidate.headEntry, candidate.indexEntry].filter((entry) => entry !== void 0).some((entry) => !committedBlobs.has(entry.oid));
+      if (missingCommittedSide) {
+        fileRecords.push({ path: candidate.path, category: candidate.category, status: "excluded", reason: "git_blob_unavailable" });
+        continue;
+      }
+      const binarySide = [...committedSideBytes, ...overlayBytes === void 0 ? [] : [overlayBytes]].find(isBinary);
+      if (binarySide !== void 0) {
+        fileRecords.push({ path: candidate.path, category: candidate.category, status: "binary", sizeBytes: binarySide.length, sha256: hash(binarySide) });
+        continue;
+      }
+      const bytes = overlayBytes ?? (candidate.headEntry === void 0 ? void 0 : committedBlobs.get(candidate.headEntry.oid)) ?? (candidate.indexEntry === void 0 ? void 0 : committedBlobs.get(candidate.indexEntry.oid)) ?? (candidate.baseEntry === void 0 ? void 0 : committedBlobs.get(candidate.baseEntry.oid));
+      if (bytes === void 0) {
         fileRecords.push({ path: candidate.path, category: candidate.category, status: "excluded", reason: "not_present_at_head_or_worktree" });
         continue;
       }
-      if (isBinary(bytes)) {
-        fileRecords.push({ path: candidate.path, category: candidate.category, status: "binary", sizeBytes: bytes.length, sha256: hash(bytes) });
-        continue;
-      }
       const text = bytes.toString("utf8");
-      const numbered = lineNumber(text);
-      sourceSections.push({
-        title: `Source snapshot: ${displayGitPath(candidate.path)}`,
-        body: `Path: ${displayGitPath(candidate.path)}
+      if (candidate.includeSourceSnapshot) {
+        const numbered = lineNumber(text);
+        sourceSections.push({
+          title: `Source snapshot: ${displayGitPath(candidate.path)}`,
+          body: `Path: ${displayGitPath(candidate.path)}
 Category: ${candidate.category}
 SHA-256: ${hash(bytes)}
 
 ${fencedBlock("text", numbered)}`,
-        files: [candidate.path]
-      });
+          files: [candidate.path]
+        });
+      }
       fileRecords.push({ path: candidate.path, category: candidate.category, status: "included", sizeBytes: bytes.length, sha256: hash(bytes) });
       for (const symbol of exportedSymbols(text)) {
         const paths = dependencies.get(symbol) ?? /* @__PURE__ */ new Set();
@@ -14611,9 +14817,11 @@ ${fencedBlock("text", numbered)}`,
     }
     const evidenceExcluded = [.../* @__PURE__ */ new Set([
       ...excludedChanged,
+      ...unsafeRenamePaths,
       ...fileRecords.filter((record) => record.status !== "included").map((record) => record.path)
     ])];
-    const comparisonBaseSha = reviewScope === "repository" ? emptyTreeSha : mergeBaseSha;
+    const uploadSafeStatus = filterEvidenceStatus(packetStatus.visible, evidenceExcluded);
+    const uploadSafeChanged = changed.filter((path3) => !unsafeRenamePaths.has(normalizeRepoPath(path3)));
     const diff = await buildDiff(repositoryRoot, comparisonBaseSha, headSha, includeWorkingTree, evidenceExcluded, archivePathPrefix);
     const nameStatus = await buildNameStatus(repositoryRoot, comparisonBaseSha, headSha, includeWorkingTree, evidenceExcluded, archivePathPrefix);
     const callers = args.context?.includeRelevantCallers === true ? await callerEvidence(repositoryRoot, headSha, includeWorkingTree, dependencies, changed, archivePathPrefix) : "Caller/reference search not requested.";
@@ -14636,20 +14844,21 @@ ${fencedBlock("text", numbered)}`,
           "",
           ...includeWorkingTree ? [
             "git status --porcelain:",
-            fencedBlock("text", renderStatusEntries(packetStatus.visible))
+            fencedBlock("text", renderStatusEntries(uploadSafeStatus))
           ] : ["Working-tree status and filenames: not uploaded"],
           `Excluded untracked local Codex state paths: ${packetStatus.excluded.filter((item) => item.reason === "untracked_local_codex_state").length}`,
-          `Excluded archive or sensitive paths: ${packetStatus.excluded.filter((item) => item.reason !== "untracked_local_codex_state").length}`
+          `Excluded archive or sensitive paths: ${packetStatus.excluded.filter((item) => item.reason !== "untracked_local_codex_state").length}`,
+          `Excluded unsafe file-class status entries: ${packetStatus.visible.length - uploadSafeStatus.length}`
         ].join("\n")
       },
       {
         title: reviewScope === "repository" ? "Repository paths and status evidence" : "Changed paths and rename evidence",
-        files: changed,
+        files: uploadSafeChanged,
         body: fencedBlock("text", nameStatus.trimEnd())
       },
       {
         title: reviewScope === "repository" ? "Tracked repository diff from the empty tree" : "Line-numbered unified diff",
-        files: changed,
+        files: uploadSafeChanged,
         body: fencedBlock("diff", diff.trimEnd())
       },
       { title: "Deterministic caller/reference evidence", files: [], body: callers },
@@ -14841,6 +15050,61 @@ async function changedFiles(root, mergeBase, headSha, includeWorkingTree, archiv
   const untracked = (await gitPathList(root, ["ls-files", "-z", "--others", "--exclude-standard"], "git_untracked_list_failed")).filter((path3) => !LOCAL_CODEX_STATE_PATTERN.test(path3) && !isPacketExcludedPath(path3, archivePathPrefix));
   return [...new Set([...committed, ...unstaged, ...untracked].map(normalizeRepoPath))].sort();
 }
+async function reviewRenameEntries(root, comparisonBase, headSha, includeWorkingTree) {
+  const entries = [];
+  if (headSha !== void 0) {
+    entries.push(...await gitNameStatusEntries(
+      root,
+      ["diff", "--name-status", "-z", "--find-renames", comparisonBase, headSha],
+      "git_diff_name_status_failed"
+    ));
+  }
+  if (!includeWorkingTree) return entries;
+  if (headSha === void 0) {
+    entries.push(...await gitNameStatusEntries(
+      root,
+      ["diff", "--cached", "--name-status", "-z", "--find-renames", comparisonBase],
+      "git_worktree_name_status_failed"
+    ));
+    entries.push(...await gitNameStatusEntries(
+      root,
+      ["diff", "--name-status", "-z", "--find-renames"],
+      "git_worktree_name_status_failed"
+    ));
+  } else {
+    entries.push(...await gitNameStatusEntries(
+      root,
+      ["diff", "--cached", "--name-status", "-z", "--find-renames", "HEAD"],
+      "git_worktree_name_status_failed"
+    ));
+    entries.push(...await gitNameStatusEntries(
+      root,
+      ["diff", "--name-status", "-z", "--find-renames"],
+      "git_worktree_name_status_failed"
+    ));
+  }
+  return entries;
+}
+function unsafeRenameClosure(entries, isUnsafe) {
+  const pairs = entries.filter((entry) => /^R/.test(entry.code) && entry.paths.length === 2).map((entry) => [normalizeRepoPath(entry.paths[0]), normalizeRepoPath(entry.paths[1])]);
+  const unsafe = new Set(pairs.flatMap(([from, to]) => [from, to]).filter(isUnsafe));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [from, to] of pairs) {
+      if (!unsafe.has(from) && !unsafe.has(to)) continue;
+      if (!unsafe.has(from)) {
+        unsafe.add(from);
+        changed = true;
+      }
+      if (!unsafe.has(to)) {
+        unsafe.add(to);
+        changed = true;
+      }
+    }
+  }
+  return unsafe;
+}
 async function snapshotFiles(root, headSha, includeWorkingTree, archivePathPrefix) {
   const committed = headSha === void 0 ? [] : await gitPathList(root, ["ls-tree", "-r", "-z", "--name-only", headSha], "git_head_tree_failed");
   if (!includeWorkingTree) return [...new Set(committed)].sort();
@@ -14859,6 +15123,10 @@ function filterPacketStatus(value, archivePathPrefix) {
     return false;
   });
   return { visible, excluded };
+}
+function filterEvidenceStatus(value, excludedPaths) {
+  const excluded = new Set(excludedPaths.map(normalizeRepoPath));
+  return value.filter((entry) => entry.paths.every((path3) => !excluded.has(normalizeRepoPath(path3))));
 }
 async function workingTreePaths(root, archivePathPrefix) {
   const status = await gitStatus(root);
@@ -14940,24 +15208,27 @@ function packetExcludePathspec(excludedPaths, archivePathPrefix) {
 }
 function collectCandidateFiles(availableFiles, changed, args, reviewScope) {
   const records = /* @__PURE__ */ new Map();
-  if (args.context?.includeChangedFiles !== false) {
-    for (const path3 of changed) {
-      records.set(path3, reviewScope === "repository" ? TEST_PATTERN.test(path3) ? "repository-test" : "repository-file" : TEST_PATTERN.test(path3) ? "changed-test" : "changed-file");
-    }
+  for (const path3 of changed) {
+    records.set(path3, {
+      category: reviewScope === "repository" ? TEST_PATTERN.test(path3) ? "repository-test" : "repository-file" : TEST_PATTERN.test(path3) ? "changed-test" : "changed-file",
+      includeSourceSnapshot: args.context?.includeChangedFiles !== false
+    });
   }
   if (args.context?.includeInstructions === true) {
-    for (const path3 of governingInstructions(availableFiles, changed)) records.set(path3, "instructions");
+    for (const path3 of governingInstructions(availableFiles, changed)) records.set(path3, { category: "instructions", includeSourceSnapshot: true });
   }
   for (const path3 of availableFiles.filter((path4) => MANIFEST_PATTERN.test(path4))) {
-    if (changed.includes(path3) || affectsChangedPath(path3, changed)) records.set(path3, "manifest-interface");
+    if (changed.includes(path3) || affectsChangedPath(path3, changed)) records.set(path3, { category: "manifest-interface", includeSourceSnapshot: true });
   }
   if (args.context?.includeRelatedTests === true) {
     const stems = new Set(changed.map((path3) => relatedFileStem(path3)));
     for (const path3 of availableFiles.filter((path4) => TEST_PATTERN.test(path4))) {
-      if (changed.includes(path3) || [...stems].some((stem) => stem.length > 2 && relatedFileStem(path3) === stem)) records.set(path3, "related-test");
+      if (changed.includes(path3) || [...stems].some((stem) => stem.length > 2 && relatedFileStem(path3) === stem)) {
+        records.set(path3, { category: "related-test", includeSourceSnapshot: true });
+      }
     }
   }
-  return [...records.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([path3, category]) => ({ path: path3, category }));
+  return [...records.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([path3, record]) => ({ path: path3, ...record }));
 }
 function governingInstructions(tracked, changed) {
   const instructions = tracked.filter((path3) => basename4(path3).toLocaleUpperCase() === "AGENTS.MD");
@@ -14991,6 +15262,7 @@ ${unstaged}` : ""
   ].join("");
 }
 async function buildNameStatus(root, comparisonBase, headSha, includeWorkingTree, excludedPaths, archivePathPrefix) {
+  const excluded = new Set(excludedPaths.map(normalizeRepoPath));
   const pathspec = ["--", ".", ...packetExcludePathspec(excludedPaths, archivePathPrefix)];
   const committed = headSha === void 0 ? [] : await gitNameStatusEntries(root, ["diff", "--name-status", "-z", "--find-renames", comparisonBase, headSha, ...pathspec], "git_diff_name_status_failed");
   if (!includeWorkingTree) return renderNameStatusEntries(committed);
@@ -14998,7 +15270,7 @@ async function buildNameStatus(root, comparisonBase, headSha, includeWorkingTree
     ...await gitNameStatusEntries(root, ["diff", "--cached", "--name-status", "-z", "--find-renames", comparisonBase, ...pathspec], "git_worktree_name_status_failed"),
     ...await gitNameStatusEntries(root, ["diff", "--name-status", "-z", "--find-renames", ...pathspec], "git_worktree_name_status_failed")
   ] : await gitNameStatusEntries(root, ["diff", "--name-status", "-z", "--find-renames", "HEAD", ...pathspec], "git_worktree_name_status_failed");
-  const untracked = (await gitPathList(root, ["ls-files", "-z", "--others", "--exclude-standard"], "git_untracked_list_failed")).filter((path3) => !LOCAL_CODEX_STATE_PATTERN.test(path3) && !isPacketExcludedPath(path3, archivePathPrefix)).map((path3) => ({ code: "?", paths: [path3] }));
+  const untracked = (await gitPathList(root, ["ls-files", "-z", "--others", "--exclude-standard"], "git_untracked_list_failed")).filter((path3) => !LOCAL_CODEX_STATE_PATTERN.test(path3) && !isPacketExcludedPath(path3, archivePathPrefix) && !excluded.has(normalizeRepoPath(path3))).map((path3) => ({ code: "?", paths: [path3] }));
   return renderNameStatusEntries([...committed, ...working, ...untracked]);
 }
 async function callerEvidence(root, headSha, includeWorkingTree, symbols, changed, archivePathPrefix) {
@@ -15250,6 +15522,54 @@ async function treeEntries(root, headSha) {
   }
   return entries;
 }
+async function indexEntries(root) {
+  const result = await runGitBuffer(root, ["ls-files", "--stage", "-z"]);
+  if (result.code !== 0) {
+    throw new ReviewPreparationError(result.stderr.toString("utf8").trim() || "Unable to inspect staged index entries.", "git_index_tree_failed");
+  }
+  const entries = /* @__PURE__ */ new Map();
+  for (const record of splitNul(result.stdout)) {
+    const tab = record.indexOf("	");
+    if (tab < 0) continue;
+    const [mode, oid, stage] = record.slice(0, tab).trim().split(/\s+/);
+    const path3 = normalizeRepoPath(record.slice(tab + 1));
+    if (mode === void 0 || oid === void 0 || stage !== "0" || path3.length === 0) continue;
+    entries.set(path3, { mode, oid });
+  }
+  const regularEntries = [...entries.values()].filter((entry) => entry.mode !== "120000" && entry.mode !== "160000");
+  const sizes = await gitBlobSizes(root, regularEntries.map((entry) => entry.oid));
+  for (const entry of regularEntries) {
+    const sizeBytes = sizes.get(entry.oid);
+    if (sizeBytes === void 0) {
+      throw new ReviewPreparationError(`No staged Git blob metadata is available for ${entry.oid}.`, "git_index_tree_failed");
+    }
+    entry.sizeBytes = sizeBytes;
+  }
+  return entries;
+}
+async function gitBlobSizes(root, objectIds) {
+  const ordered = [...new Set(objectIds)];
+  if (ordered.length === 0) return /* @__PURE__ */ new Map();
+  const result = await runGitBuffer(root, ["cat-file", "--batch-check"], Buffer.from(`${ordered.join("\n")}
+`, "utf8"));
+  if (result.code !== 0) {
+    throw new ReviewPreparationError(result.stderr.toString("utf8").trim() || "Unable to inspect staged Git blobs.", "git_index_tree_failed");
+  }
+  const lines = result.stdout.toString("utf8").split(/\r?\n/).filter(Boolean);
+  if (lines.length !== ordered.length) {
+    throw new ReviewPreparationError("Git batch metadata output did not match the staged index.", "git_index_tree_failed");
+  }
+  const sizes = /* @__PURE__ */ new Map();
+  for (const [index, expectedOid] of ordered.entries()) {
+    const [oid, type, sizeText] = lines[index].trim().split(/\s+/);
+    const size = Number(sizeText);
+    if (oid !== expectedOid || type !== "blob" || !Number.isSafeInteger(size) || size < 0) {
+      throw new ReviewPreparationError(`Unexpected staged Git object metadata: ${lines[index]}`, "git_index_tree_failed");
+    }
+    sizes.set(oid, size);
+  }
+  return sizes;
+}
 function splitNul(value) {
   const fields = [];
   let start = 0;
@@ -15326,10 +15646,14 @@ function hash(value) {
 function normalizeRepoPath(value) {
   return value.replace(/^\.\//, "");
 }
-function isSecretPath(value) {
+function isHardSecretPath(value) {
   const normalized = normalizeRepoPath(value);
+  if (ROOT_SECRET_DIRECTORY_PATTERN.test(normalized) || HARD_SECRET_STORE_ANCESTRY_PATTERNS.some((pattern) => pattern.test(normalized))) return true;
   if (PUBLIC_ENV_TEMPLATE_PATTERN.test(normalized)) return false;
-  return SECRET_PATH_PATTERNS.some((pattern) => pattern.test(normalized));
+  if (HARD_SECRET_PATH_PATTERNS.some((pattern) => pattern.test(normalized))) return true;
+  if (PUBLIC_AUTH_FIXTURE_PATTERN.test(normalized)) return false;
+  if (AUTH_JSON_PATTERN.test(normalized)) return true;
+  return false;
 }
 function repositoryRelativeArchivePrefix(root, archiveRoot) {
   const absolute = isAbsolute2(archiveRoot) ? resolve5(archiveRoot) : resolve5(root, archiveRoot);
@@ -15339,7 +15663,7 @@ function repositoryRelativeArchivePrefix(root, archiveRoot) {
 }
 function isPacketExcludedPath(path3, archivePathPrefix) {
   const normalized = normalizeRepoPath(path3);
-  return isSecretPath(normalized) || archivePathPrefix !== void 0 && (normalized === archivePathPrefix || normalized.startsWith(`${archivePathPrefix}/`));
+  return isHardSecretPath(normalized) || archivePathPrefix !== void 0 && (normalized === archivePathPrefix || normalized.startsWith(`${archivePathPrefix}/`));
 }
 function excludedPathReason(path3, archivePathPrefix) {
   const normalized = normalizeRepoPath(path3);
@@ -15354,7 +15678,7 @@ function generatedPathReason(path3) {
   return void 0;
 }
 function isPrivateExclusionReason(reason) {
-  return reason === "secret_path_policy" || reason === "untracked_local_codex_state" || reason === "review_archive_path";
+  return reason === "secret_path_policy" || reason === "unsafe_rename_pair" || reason === "untracked_local_codex_state" || reason === "review_archive_path";
 }
 function assertInside(root, target) {
   if (isInside(root, target)) return;
@@ -15720,6 +16044,8 @@ async function waitForLeaseTurnover(leasePath, timeoutMs = 3e3) {
 }
 
 // src/reviews/code-review.ts
+var MAX_RECOVERY_CANDIDATES = 6;
+var RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS = 6e3;
 var ReviewWorkflowError = class extends Error {
   constructor(result, state) {
     super(result.blocker?.message ?? result.error?.message ?? `Review workflow failed during ${state}.`);
@@ -15772,7 +16098,10 @@ async function runCodeReviewWithPort(args, port) {
   let recoveryQuery;
   let releaseLease;
   let archivedSubmission;
+  let resumedMessageStatus;
   let terminalOutcomeAlreadyFinal = false;
+  const affinity = { canonicalId: void 0, routeId: void 0, invocationTabId: void 0 };
+  let recoveryHint;
   const runStep = async (state, operation) => {
     const startedAt = port.now().toISOString();
     try {
@@ -15816,15 +16145,37 @@ async function runCodeReviewWithPort(args, port) {
   try {
     validateRequestedThread(args);
     if (args.resume === void 0) {
+      const requestedThreadId = args.thread?.id ?? conversationIdFromUrl(args.thread?.url);
+      if (requestedThreadId !== void 0) {
+        affinity.canonicalId = requestedThreadId;
+        affinity.routeId = requestedThreadId;
+      }
       prepared = await runStep("PREPARE_CONTEXT", () => prepareReviewContext(args, port.now()));
       archiveDirectory = prepared.archiveDirectory;
       releaseLease = await acquireReviewLease(archiveDirectory);
     } else {
       archiveDirectory = args.resume.archiveDirectory;
       releaseLease = await acquireReviewLease(archiveDirectory);
+      terminalOutcomeAlreadyFinal = await archivedFinalMarkerExists(args.resume.archiveDirectory);
       prepared = await readArchivedPreparedContext(args.resume.archiveDirectory);
-      terminalOutcomeAlreadyFinal = await stat8(join8(args.resume.archiveDirectory, "terminal-outcome.json")).then(() => true).catch(() => false);
-      const terminalOutcome = await readArchivedTerminalOutcome(args.resume.archiveDirectory);
+      let archiveCommitFailure;
+      let terminalOutcome;
+      let terminalMarkerError;
+      try {
+        archiveCommitFailure = await readArchivedCommitFailure(args.resume.archiveDirectory);
+        terminalOutcome = await readArchivedTerminalOutcome(args.resume.archiveDirectory);
+      } catch (error) {
+        terminalMarkerError = error;
+      }
+      const archivedFinalOutcome = archiveCommitFailure ?? (terminalOutcome?.blocker.resumable === false ? terminalOutcome : void 0);
+      const submissionRecordExists = await archivedSubmissionRecordExists(args.resume.archiveDirectory);
+      if (!submissionRecordExists) {
+        if (terminalMarkerError !== void 0) throw terminalMarkerError;
+        if (archivedFinalOutcome !== void 0 && archivedFinalOutcome.submitted === false) {
+          await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, void 0);
+          throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
+        }
+      }
       try {
         configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
       } catch (error) {
@@ -15833,45 +16184,84 @@ async function runCodeReviewWithPort(args, port) {
           "resume_configuration_snapshot_invalid"
         );
       }
-      if (terminalOutcome !== void 0 && terminalOutcome.blocker.resumable === false) {
-        if (terminalOutcome.submitted) {
-          archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
+      try {
+        archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
+      } catch (error) {
+        const missingSubmission = error instanceof ReviewPreparationError && error.code === "resume_submission_unverified";
+        if (!missingSubmission || submissionRecordExists) throw error;
+        if (terminalMarkerError !== void 0) throw terminalMarkerError;
+        if (archivedFinalOutcome !== void 0 && archivedFinalOutcome.submitted === false && missingSubmission) {
+          await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, void 0);
+          throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
         }
-        throw new ArchivedTerminalOutcomeError(terminalOutcome);
+        throw error;
       }
-      archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
+      if (terminalMarkerError !== void 0) throw terminalMarkerError;
+      submitted = archivedSubmission.submitted;
+      if (archivedFinalOutcome !== void 0) {
+        await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, archivedSubmission);
+        throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
+      }
       const checkpoint = await readOptionalThreadCheckpoint(args.resume.archiveDirectory);
       validateThreadCheckpoint(checkpoint, archivedSubmission, prepared);
       const receiptThreadId = archivedSubmission.thread.id ?? conversationIdFromUrl(archivedSubmission.thread.url);
       const receiptIsProvisional = isProvisionalConversationId(receiptThreadId);
-      const archivedTarget = checkpoint !== void 0 && (archivedSubmission.state !== "confirmed" || receiptIsProvisional) ? checkpoint.current : archivedSubmission.thread;
-      const archivedThreadId = archivedTarget.id ?? conversationIdFromUrl(archivedTarget.url);
       const suppliedUrlId = conversationIdFromUrl(threadUrl);
       if (threadId !== void 0 && suppliedUrlId !== void 0 && threadId !== suppliedUrlId) {
         throw new ReviewPreparationError("resume.conversationId and resume.threadUrl refer to different Chat conversations.", "resume_thread_mismatch");
       }
       const suppliedThreadId = threadId ?? suppliedUrlId;
-      if (!receiptIsProvisional && suppliedThreadId !== void 0 && archivedThreadId !== void 0 && suppliedThreadId !== archivedThreadId) {
+      if (!receiptIsProvisional && suppliedThreadId !== void 0 && receiptThreadId !== void 0 && suppliedThreadId !== receiptThreadId) {
         throw new ReviewPreparationError("The caller-supplied resume thread does not match the immutable archived submission receipt.", "resume_thread_mismatch");
       }
-      if (receiptIsProvisional && archivedThreadId !== void 0 && !isProvisionalConversationId(archivedThreadId) && suppliedThreadId !== void 0 && suppliedThreadId !== archivedThreadId) {
-        throw new ReviewPreparationError("The caller-supplied resume thread does not match the prompt-verified canonical thread checkpoint.", "resume_thread_mismatch");
+      if (receiptIsProvisional) {
+        const checkpointId = checkpoint?.current.id ?? conversationIdFromUrl(checkpoint?.current.url);
+        const candidateId = suppliedThreadId !== void 0 && !isProvisionalConversationId(suppliedThreadId) ? suppliedThreadId : checkpointId !== void 0 && !isProvisionalConversationId(checkpointId) ? checkpointId : void 0;
+        const recoveryTabId = checkpoint?.current.tabId ?? archivedSubmission.thread.tabId;
+        recoveryHint = {
+          ...candidateId === void 0 ? {} : { conversationId: candidateId },
+          ...candidateId !== void 0 && suppliedUrlId === candidateId && threadUrl !== void 0 ? { url: threadUrl } : candidateId !== void 0 && checkpointId === candidateId && checkpoint?.current.url !== void 0 ? { url: checkpoint.current.url } : {},
+          ...recoveryTabId === void 0 ? {} : { tabId: recoveryTabId }
+        };
+        threadId = receiptThreadId;
+        threadUrl = archivedSubmission.thread.url;
+        affinity.routeId = receiptThreadId;
+      } else {
+        threadId = receiptThreadId ?? suppliedThreadId;
+        threadUrl = archivedSubmission.thread.url ?? threadUrl;
+        affinity.canonicalId = receiptThreadId;
+        affinity.routeId = receiptThreadId;
+        recoveryHint = archivedSubmission.thread.tabId === void 0 ? void 0 : { tabId: archivedSubmission.thread.tabId };
       }
-      const useSuppliedCanonicalTarget = receiptIsProvisional && suppliedThreadId !== void 0 && !isProvisionalConversationId(suppliedThreadId);
-      threadId = useSuppliedCanonicalTarget ? suppliedThreadId : archivedThreadId ?? suppliedThreadId;
-      threadUrl = useSuppliedCanonicalTarget ? suppliedUrlId === suppliedThreadId ? threadUrl : void 0 : archivedTarget.url ?? threadUrl;
       if (args.resume.artifactBaseline !== void 0 && sha256Text2(JSON.stringify(args.resume.artifactBaseline)) !== sha256Text2(JSON.stringify(archivedSubmission.artifactBaseline))) {
         throw new ReviewPreparationError("resume.artifactBaseline does not match the immutable archived submission baseline.", "resume_artifact_baseline_mismatch");
       }
       artifactBaseline = archivedSubmission.artifactBaseline;
       recoveryQuery = checkpoint?.recoveryQuery ?? recoveryQueryFromPrepared(prepared);
-      submitted = true;
     }
-    const bootstrapTarget = args.resume === void 0 && args.thread === void 0 || isProvisionalConversationId(threadId) ? void 0 : {
+    const needsProvisionalRecovery = args.resume !== void 0 && (isProvisionalConversationId(threadId) || archivedSubmission !== void 0 && archivedSubmission.state !== "confirmed" && affinity.canonicalId === void 0);
+    const archivedTabTarget = args.resume === void 0 ? void 0 : recoveryHint?.tabId;
+    const ordinaryBootstrapTarget = needsProvisionalRecovery ? void 0 : args.resume === void 0 && args.thread === void 0 ? void 0 : {
       ...threadUrl === void 0 ? {} : { url: threadUrl },
       ...threadId === void 0 ? {} : { conversationId: threadId }
     };
-    requireOk(await runStep("PREFLIGHT_BROWSER", () => port.bootstrap(bootstrapTarget)), "PREFLIGHT_BROWSER");
+    const boot2 = requireOk(await runStep("PREFLIGHT_BROWSER", async () => {
+      const useRecoveryBootstrap = args.resume !== void 0 && (needsProvisionalRecovery || archivedTabTarget !== void 0) && port.bootstrapRecovery !== void 0;
+      const first = makeExistingTabRetryResumable(
+        await (useRecoveryBootstrap ? port.bootstrapRecovery(archivedTabTarget === void 0 ? void 0 : { tabId: archivedTabTarget }) : port.bootstrap(ordinaryBootstrapTarget)),
+        args.resume !== void 0
+      );
+      if (first.ok && archivedTabTarget !== void 0 && !needsProvisionalRecovery && affinity.canonicalId !== void 0) {
+        const claimed = await port.pageState().catch(() => void 0);
+        const claimedId = claimed?.conversationId ?? conversationIdFromUrl(claimed?.url);
+        if (claimedId !== affinity.canonicalId) {
+          return makeExistingTabRetryResumable(await port.bootstrap(ordinaryBootstrapTarget), true);
+        }
+      }
+      if (first.ok || archivedTabTarget === void 0 || first.blocker?.code !== "existing_tab_not_found") return first;
+      return makeExistingTabRetryResumable(await port.bootstrap(ordinaryBootstrapTarget), true);
+    }), "PREFLIGHT_BROWSER");
+    affinity.invocationTabId = boot2.context.tabId;
     requireOk(await runStep("OPEN_CHAT", () => port.openChat()), "OPEN_CHAT");
     if (args.resume === void 0) {
       const opened = requireData(await runStep("OPEN_CHAT", () => args.thread === void 0 ? port.newThread() : port.openThread({
@@ -15880,10 +16270,16 @@ async function runCodeReviewWithPort(args, port) {
       })), "OPEN_CHAT");
       threadUrl = opened.data.url || opened.context.url;
       threadId = opened.data.conversationId ?? opened.context.conversationId;
+      affinity.invocationTabId = opened.context.tabId ?? affinity.invocationTabId;
+      const openedThreadId = threadId ?? conversationIdFromUrl(threadUrl);
+      affinity.routeId = openedThreadId;
+      if (openedThreadId !== void 0 && !isProvisionalConversationId(openedThreadId)) affinity.canonicalId = openedThreadId;
+      const openedPage = await establishConversationAffinity(port, affinity, "OPEN_CHAT", false);
+      threadUrl = openedPage.url ?? threadUrl;
+      threadId = affinity.canonicalId ?? affinity.routeId ?? threadId;
     } else {
-      const needsThreadRecovery = isProvisionalConversationId(threadId) || archivedSubmission !== void 0 && archivedSubmission.state !== "confirmed" && threadId === void 0;
-      const visibleRecovery = needsThreadRecovery ? await recoverCurrentVisibleThread(port, prepared.prompt) : void 0;
-      const openResult = needsThreadRecovery ? await runStep("RECOVER_THREAD", () => visibleRecovery === void 0 ? port.recoverThread(recoveryQuery, prepared.prompt) : Promise.resolve(visibleRecovery)) : await runStep("OPEN_CHAT", () => port.openThread({
+      const needsThreadRecovery = needsProvisionalRecovery;
+      const openResult = needsThreadRecovery ? await runStep("RECOVER_THREAD", () => port.recoverThread(recoveryQuery, prepared.prompt, recoveryHint)) : await runStep("OPEN_CHAT", () => port.openThread({
         ...threadId === void 0 ? {} : { conversationId: threadId },
         ...threadUrl === void 0 ? {} : { url: threadUrl }
       }));
@@ -15893,9 +16289,29 @@ async function runCodeReviewWithPort(args, port) {
       if (expectedThreadId !== void 0 && openedThreadId !== void 0 && !isProvisionalConversationId(expectedThreadId) && openedThreadId !== expectedThreadId) {
         throw new ReviewPreparationError("The visible opened thread does not match the immutable submission receipt.", "resume_opened_thread_mismatch");
       }
-      threadUrl = opened.data.url || opened.context.url || threadUrl;
-      threadId = opened.data.conversationId ?? opened.context.conversationId;
+      const openedThreadUrl = opened.data.url || opened.context.url || threadUrl;
+      affinity.invocationTabId = opened.context.tabId ?? affinity.invocationTabId;
+      if (needsThreadRecovery) {
+        if (openedThreadId === void 0 || isProvisionalConversationId(openedThreadId)) {
+          throw resumableConversationBlocker(
+            "resume_recovered_thread_not_canonical",
+            "The prompt-identical recovered Chat conversation did not expose a canonical conversation ID.",
+            "RECOVER_THREAD",
+            openedThreadUrl
+          );
+        }
+        affinity.canonicalId = openedThreadId;
+        affinity.routeId = openedThreadId;
+        threadUrl = openedThreadUrl;
+        threadId = openedThreadId;
+        await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
+      } else {
+        threadUrl = openedThreadUrl;
+        threadId = openedThreadId;
+        await assertConversationAffinity(port, affinity, "OPEN_CHAT", true);
+      }
       const latestUser = requireData(await port.readLatestUser(), "POLL_METADATA");
+      assertCommandContextAffinity(latestUser.context, affinity, "RECOVER_THREAD", true);
       const observedUserSha256 = sha256Text2(normalizeVisiblePrompt(latestUser.data.text));
       const visiblePromptProven = archivedSubmission?.userTurnSha256 !== void 0 ? observedUserSha256 === archivedSubmission.userTurnSha256 || visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared.prompt) : visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared.prompt);
       if (!visiblePromptProven) {
@@ -15916,8 +16332,15 @@ async function runCodeReviewWithPort(args, port) {
         }
         throw new ReviewPreparationError(message, "resume_user_turn_mismatch");
       }
-      await persistThreadCheckpoint(archiveDirectory, prepared, threadUrl, threadId, port.now());
-      if (archivedSubmission !== void 0 && archivedSubmission.state !== "confirmed" && archiveDirectory !== void 0) {
+      await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
+      const recoveryStatus = requireData(await port.messageStatus(), "POLL_METADATA");
+      assertCommandContextAffinity(recoveryStatus.context, affinity, "POLL_METADATA", true);
+      resumedMessageStatus = recoveryStatus.data;
+      assertSubmittedTurnOwnership(archivedSubmission, resumedMessageStatus, threadUrl);
+      await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
+      await persistThreadCheckpoint(archiveDirectory, prepared, threadUrl, threadId, affinity.invocationTabId, port.now());
+      const receiptNeedsConfirmation = archivedSubmission !== void 0 && (archivedSubmission.state !== "confirmed" || isProvisionalConversationId(expectedThreadId));
+      if (archivedSubmission !== void 0 && receiptNeedsConfirmation && archiveDirectory !== void 0) {
         await writeImmutableJson(join8(archiveDirectory, "submission-confirmation.json"), {
           schemaVersion: archivedSubmission.schemaVersion === 3 ? 3 : 2,
           state: "confirmed",
@@ -15926,7 +16349,7 @@ async function runCodeReviewWithPort(args, port) {
           submittedAt: port.now().toISOString(),
           promptSha256: sha256Text2(normalizePrompt(prepared.prompt)),
           userTurnSha256: sha256Text2(normalizeVisiblePrompt(prepared.prompt)),
-          thread: { url: threadUrl, id: threadId },
+          thread: { url: threadUrl, id: threadId, ...affinity.invocationTabId === void 0 ? {} : { tabId: affinity.invocationTabId } },
           baselineTurnCount: archivedSubmission.baselineTurnCount,
           baselineAssistantCount: archivedSubmission.baselineAssistantCount,
           artifactBaseline: archivedSubmission.artifactBaseline,
@@ -15938,11 +16361,15 @@ async function runCodeReviewWithPort(args, port) {
           state: "confirmed",
           submitted: true,
           userTurnSha256: observedUserSha256,
-          thread: { ...threadUrl === void 0 ? {} : { url: threadUrl }, ...threadId === void 0 ? {} : { id: threadId } }
+          thread: {
+            ...threadUrl === void 0 ? {} : { url: threadUrl },
+            ...threadId === void 0 ? {} : { id: threadId },
+            ...affinity.invocationTabId === void 0 ? {} : { tabId: affinity.invocationTabId }
+          }
         };
       }
     }
-    await assertPageSafe(port, "PREFLIGHT_BROWSER");
+    await assertConversationAffinity(port, affinity, "PREFLIGHT_BROWSER", args.resume !== void 0);
     if (args.resume !== void 0 && archiveDirectory !== void 0 && configurationBefore === void 0) {
       try {
         configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
@@ -15986,7 +16413,7 @@ async function runCodeReviewWithPort(args, port) {
     verifiedBeforeSubmit = appliedData.verified && configurationMatchesSelection(appliedData.after, { intelligence: "Pro" });
     if (!verifiedBeforeSubmit) throw workflowBlocker("model_fallback", "pro_precondition_unverified", "The visible Chat setting did not strictly verify Pro before submission.", "VERIFY_PRO_BEFORE_SUBMIT");
     await runStep("VERIFY_PRO_BEFORE_SUBMIT", async () => {
-      await assertPageSafe(port, "VERIFY_PRO_BEFORE_SUBMIT");
+      await assertConversationAffinity(port, affinity, "VERIFY_PRO_BEFORE_SUBMIT", args.resume !== void 0);
       return { verified: true, active: appliedData.after.active };
     });
     if (artifactBaseline === void 0) {
@@ -16001,12 +16428,15 @@ async function runCodeReviewWithPort(args, port) {
     if (args.resume === void 0) {
       if (prepared.mode === "review-packets") {
         const attachments = [prepared.uploadManifestPath, ...prepared.packetPaths];
+        await assertConversationAffinity(port, affinity, "ATTACH_PACKETS", false);
         requireOk(await runStep("ATTACH_PACKETS", () => port.attach(attachments)), "ATTACH_PACKETS");
       }
+      await assertConversationAffinity(port, affinity, "SUBMIT_ONCE", false);
       const beforeMessage = requireData(await port.messageStatus(), "SUBMIT_ONCE");
       baselineAssistantCount = beforeMessage.data.assistantTurnCount;
+      await assertConversationAffinity(port, affinity, "SUBMIT_ONCE", false);
       requireOk(await port.compose(prepared.prompt), "SUBMIT_ONCE");
-      await assertPageSafe(port, "VERIFY_PRO_BEFORE_SUBMIT");
+      await assertConversationAffinity(port, affinity, "VERIFY_PRO_BEFORE_SUBMIT", false);
       const submissionIntegrity = archiveDirectory === void 0 ? void 0 : await createSubmissionIntegrity(prepared, archiveDirectory, configurationBefore, artifactBaseline);
       if (archiveDirectory !== void 0) {
         await writeImmutableJson(join8(archiveDirectory, "submission-intent.json"), {
@@ -16015,8 +16445,12 @@ async function runCodeReviewWithPort(args, port) {
           resubmitAllowed: false,
           createdAt: port.now().toISOString(),
           promptSha256: sha256Text2(normalizePrompt(prepared.prompt)),
-          thread: { url: threadUrl, id: threadId },
-          baselineTurnCount: beforeMessage.data.turnCount,
+          thread: {
+            ...threadUrl === void 0 ? {} : { url: threadUrl },
+            ...threadId === void 0 ? {} : { id: threadId },
+            ...affinity.invocationTabId === void 0 ? {} : { tabId: affinity.invocationTabId }
+          },
+          ...beforeMessage.data.turnCount === void 0 ? {} : { baselineTurnCount: beforeMessage.data.turnCount },
           baselineAssistantCount,
           artifactBaseline,
           ...submissionIntegrity
@@ -16029,24 +16463,44 @@ async function runCodeReviewWithPort(args, port) {
       } catch (error) {
         submitError = error;
       }
-      threadUrl = submitResult?.context.url ?? threadUrl;
-      threadId = submitResult?.context.conversationId ?? threadId;
       const afterMessage = await port.messageStatus().catch(() => void 0);
       const latestUser = await port.readLatestUser().catch(() => void 0);
       const visiblePage = await port.pageState().catch(() => void 0);
       const visibleConversationId = visiblePage?.conversationId ?? conversationIdFromUrl(visiblePage?.url);
-      if (visiblePage !== void 0 && visibleConversationId !== void 0 && !isProvisionalConversationId(visibleConversationId)) {
-        threadUrl = visiblePage.url;
-        threadId = visibleConversationId;
-      }
       const latestUserText = latestUser?.ok === true ? latestUser.data?.text : void 0;
       const exactUserTurn = latestUserText !== void 0 && visibleUserTurnContainsExactPrompt(latestUserText, prepared.prompt);
       const pageAdvanced = afterMessage?.ok === true && (beforeMessage.data.turnCount !== void 0 && afterMessage.data?.turnCount !== void 0 && afterMessage.data.turnCount > beforeMessage.data.turnCount || afterMessage.data?.generationActive === true);
       const submitReported = submitResult?.ok === true && submitResult.data?.submitted === true;
-      const submissionState = exactUserTurn ? "confirmed" : submitReported || pageAdvanced ? "ambiguous" : "failed";
+      const submitConversationId = submitResult?.context.conversationId ?? conversationIdFromUrl(submitResult?.context.url);
+      const candidateOnBoundTab = visiblePage?.tabId === void 0 || affinity.invocationTabId === void 0 || visiblePage.tabId === affinity.invocationTabId;
+      const canonicalTransitionProven = exactUserTurn && candidateOnBoundTab && (pageAdvanced || submitReported) && (submitConversationId === void 0 || submitConversationId === affinity.routeId || submitConversationId === visibleConversationId);
+      const preSubmitRouteId = affinity.routeId;
+      if (canonicalTransitionProven && affinity.canonicalId === void 0 && visibleConversationId !== void 0 && !isProvisionalConversationId(visibleConversationId)) {
+        affinity.canonicalId = visibleConversationId;
+        affinity.routeId = visibleConversationId;
+        threadId = visibleConversationId;
+        threadUrl = visiblePage?.url ?? threadUrl;
+      }
+      let postSubmitAffinityError;
+      try {
+        const acceptedProvisionalContext = canonicalTransitionProven && isProvisionalConversationId(preSubmitRouteId) && submitConversationId === preSubmitRouteId;
+        if (submitResult !== void 0) {
+          assertCommandContextAffinity(
+            submitResult.context,
+            affinity,
+            "SUBMIT_ONCE",
+            true,
+            acceptedProvisionalContext ? preSubmitRouteId : void 0
+          );
+        }
+        await assertConversationAffinity(port, affinity, "SUBMIT_ONCE", true);
+      } catch (error) {
+        postSubmitAffinityError = error;
+      }
+      const submissionState = postSubmitAffinityError === void 0 && exactUserTurn ? "confirmed" : submitReported || pageAdvanced || postSubmitAffinityError !== void 0 ? "ambiguous" : "failed";
       submitted = submissionState !== "failed";
       if (archiveDirectory !== void 0) {
-        await writeImmutableJson(join8(archiveDirectory, "submission.json"), {
+        const archivedSubmissionRecord = {
           schemaVersion: 3,
           state: submissionState,
           submitted,
@@ -16054,15 +16508,22 @@ async function runCodeReviewWithPort(args, port) {
           submittedAt: port.now().toISOString(),
           promptSha256: sha256Text2(normalizePrompt(prepared.prompt)),
           ...exactUserTurn ? { userTurnSha256: sha256Text2(normalizeVisiblePrompt(prepared.prompt)) } : {},
-          thread: { url: threadUrl, id: threadId },
-          baselineTurnCount: beforeMessage.data.turnCount,
+          thread: {
+            ...threadUrl === void 0 ? {} : { url: threadUrl },
+            ...threadId === void 0 ? {} : { id: threadId },
+            ...affinity.invocationTabId === void 0 ? {} : { tabId: affinity.invocationTabId }
+          },
+          ...beforeMessage.data.turnCount === void 0 ? {} : { baselineTurnCount: beforeMessage.data.turnCount },
           baselineAssistantCount,
           artifactBaseline,
           ...submissionIntegrity,
           result: redactReportValue(submitResult ?? { error: submitError instanceof Error ? { name: submitError.name, message: submitError.message } : String(submitError) })
-        });
-        await persistThreadCheckpoint(archiveDirectory, prepared, threadUrl, threadId, port.now());
+        };
+        await writeImmutableJson(join8(archiveDirectory, "submission.json"), archivedSubmissionRecord);
+        archivedSubmission = archivedSubmissionRecord;
+        await persistThreadCheckpoint(archiveDirectory, prepared, threadUrl, threadId, affinity.invocationTabId, port.now());
       }
+      if (postSubmitAffinityError !== void 0) throw postSubmitAffinityError;
       if (submissionState !== "confirmed") {
         if (submissionState === "ambiguous") {
           warnings.push("Chat advanced after the single submit attempt, but the exact rendered user turn is not yet provable. Resume this archive to reconcile the visible prompt; do not resend it.");
@@ -16079,8 +16540,8 @@ async function runCodeReviewWithPort(args, port) {
         warnings.push(`Submit transport reported an error after the exact visible user turn was confirmed: ${submitError instanceof Error ? submitError.message : String(submitError)}`);
       }
     } else {
-      const current = requireData(await port.messageStatus(), "POLL_METADATA");
-      baselineAssistantCount = archivedSubmission?.baselineAssistantCount ?? Math.max(0, current.data.assistantTurnCount - (current.data.assistantTurnCount > 0 ? 1 : 0));
+      const current = resumedMessageStatus === void 0 ? requireData(await port.messageStatus(), "POLL_METADATA").data : resumedMessageStatus;
+      baselineAssistantCount = archivedSubmission?.baselineAssistantCount ?? Math.max(0, current.assistantTurnCount - (current.assistantTurnCount > 0 ? 1 : 0));
     }
     const callTimeoutMs = positive(args.polling?.callTimeoutMs, 2e4);
     const totalTimeoutMs = positive(args.polling?.totalTimeoutMs, 18e5);
@@ -16093,13 +16554,13 @@ async function runCodeReviewWithPort(args, port) {
     let complete = false;
     for (let call = 0; call < maxCalls; call += 1) {
       const wait = await runStep("POLL_METADATA", () => port.waitMetadata(baselineAssistantCount, callTimeoutMs, stableMs, pollMs));
-      const polledThreadId = wait.context.conversationId ?? conversationIdFromUrl(wait.context.url);
-      if (polledThreadId !== void 0) {
-        threadUrl = wait.context.url ?? threadUrl;
-        threadId = polledThreadId;
+      assertCommandContextAffinity(wait.context, affinity, "POLL_METADATA", true);
+      const polledPage = await assertConversationAffinity(port, affinity, "POLL_METADATA", true);
+      threadUrl = polledPage.url ?? threadUrl;
+      threadId = affinity.canonicalId ?? affinity.routeId ?? threadId;
+      if (archiveDirectory !== void 0) {
+        await persistThreadCheckpoint(archiveDirectory, prepared, threadUrl, threadId, affinity.invocationTabId, port.now());
       }
-      if (archiveDirectory !== void 0) await persistThreadCheckpoint(archiveDirectory, prepared, threadUrl, threadId, port.now());
-      await assertPageSafe(port, "POLL_METADATA");
       if (wait.ok && wait.data?.complete === true) {
         complete = true;
         break;
@@ -16108,6 +16569,20 @@ async function runCodeReviewWithPort(args, port) {
       if (!resumablePoll) requireOk(wait, "POLL_METADATA");
     }
     if (!complete) throw new ReviewInProgress();
+    if (submitted) {
+      const finalOwnership = requireData(await port.messageStatus(), "READ_FULL_MARKDOWN_ONCE").data;
+      assertSubmittedTurnOwnership(archivedSubmission, finalOwnership, threadUrl);
+    }
+    await assertConversationAffinity(port, affinity, "READ_FULL_MARKDOWN_ONCE", true);
+    const finalUser = requireData(await port.readLatestUser(), "READ_FULL_MARKDOWN_ONCE");
+    if (!visibleUserTurnContainsExactPrompt(finalUser.data.text, prepared.prompt)) {
+      throw resumableConversationBlocker(
+        "conversation_prompt_affinity_lost",
+        "The latest visible user turn no longer matches the archived submitted prompt. The response and artifacts were not read.",
+        "READ_FULL_MARKDOWN_ONCE",
+        threadUrl
+      );
+    }
     const archivedResponse = archiveDirectory === void 0 ? void 0 : await readFile6(join8(archiveDirectory, "response.md"), "utf8").catch(() => void 0);
     if (archivedResponse !== void 0) {
       responseMarkdown = archivedResponse;
@@ -16121,22 +16596,31 @@ async function runCodeReviewWithPort(args, port) {
         data: { bytes: Buffer.byteLength(responseMarkdown), sha256: responseSha256 }
       });
     } else {
+      await assertConversationAffinity(port, affinity, "READ_FULL_MARKDOWN_ONCE", true);
       const read = requireData(await runStep("READ_FULL_MARKDOWN_ONCE", () => port.readFullMarkdown()), "READ_FULL_MARKDOWN_ONCE");
+      await assertConversationAffinity(port, affinity, "READ_FULL_MARKDOWN_ONCE", true);
       responseMarkdown = read.data.markdown ?? read.data.text;
       responseSha256 = sha256Text2(responseMarkdown);
+      if (submitted) {
+        const postReadOwnership = requireData(await port.messageStatus(), "READ_FULL_MARKDOWN_ONCE").data;
+        assertSubmittedTurnOwnership(archivedSubmission, postReadOwnership, threadUrl);
+      }
       if (archiveDirectory !== void 0) await writeImmutableFile(join8(archiveDirectory, "response.md"), responseMarkdown);
     }
+    await assertConversationAffinity(port, affinity, "VERIFY_PRO_AFTER_COMPLETION", true);
     const after = requireData(await runStep("VERIFY_PRO_AFTER_COMPLETION", () => port.inspectConfiguration()), "VERIFY_PRO_AFTER_COMPLETION");
-    await assertPageSafe(port, "VERIFY_PRO_AFTER_COMPLETION");
+    await assertConversationAffinity(port, affinity, "VERIFY_PRO_AFTER_COMPLETION", true);
     verifiedAfterCompletion = after.data.verified && configurationMatchesSelection(after.data, { intelligence: "Pro" });
     if (!verifiedAfterCompletion) throw workflowBlocker("model_fallback", "pro_postcondition_unverified", "The visible Chat setting no longer strictly verifies Pro after completion; the response is archived but is not accepted as a verified Pro review.", "VERIFY_PRO_AFTER_COMPLETION");
     const finalizedArtifacts = archiveDirectory === void 0 ? void 0 : await readFinalizedArtifactManifest(archiveDirectory);
+    await assertConversationAffinity(port, affinity, "ENUMERATE_NEW_ARTIFACTS", true);
     const delta = finalizedArtifacts === void 0 ? requireData(await runStep("ENUMERATE_NEW_ARTIFACTS", () => port.artifactDelta(artifactBaseline)), "ENUMERATE_NEW_ARTIFACTS").data : await runStep("ENUMERATE_NEW_ARTIFACTS", async () => ({
       baseline: artifactBaseline,
       current: artifactBaseline,
       added: [],
       finalizedArchive: true
     }));
+    await assertConversationAffinity(port, affinity, "ENUMERATE_NEW_ARTIFACTS", true);
     if (finalizedArtifacts !== void 0) {
       artifacts.push(...finalizedArtifacts);
       await runStep("DOWNLOAD_AND_HASH_ARTIFACTS", async () => ({
@@ -16148,6 +16632,7 @@ async function runCodeReviewWithPort(args, port) {
     } else if ((args.output?.downloadArtifacts ?? "all") === "all" && archiveDirectory !== void 0) {
       const artifactArchiveDirectory = archiveDirectory;
       await runStep("DOWNLOAD_AND_HASH_ARTIFACTS", async () => {
+        await assertConversationAffinity(port, affinity, "DOWNLOAD_AND_HASH_ARTIFACTS", true);
         const staging = await mkdtemp(join8(tmpdir(), "chatgpt-pro-review-artifacts-"));
         const checkpointArtifacts = await readArtifactDownloadCheckpoint(artifactArchiveDirectory);
         artifacts.push(...checkpointArtifacts);
@@ -16155,6 +16640,7 @@ async function runCodeReviewWithPort(args, port) {
         const used = new Set(checkpointArtifacts.map((artifact) => artifact.name.toLocaleLowerCase()));
         try {
           for (const item of delta.added) {
+            await assertConversationAffinity(port, affinity, "DOWNLOAD_AND_HASH_ARTIFACTS", true);
             if (artifacts.some((artifact) => artifactMatchesInventoryItem(artifact, item))) continue;
             let downloaded;
             let desiredName;
@@ -16189,6 +16675,7 @@ async function runCodeReviewWithPort(args, port) {
         } finally {
           await rm2(staging, { recursive: true, force: true });
         }
+        await assertConversationAffinity(port, affinity, "DOWNLOAD_AND_HASH_ARTIFACTS", true);
         return { downloaded: artifacts.length - checkpointCount, reused: checkpointCount, total: artifacts.length };
       });
     } else if (delta.added.length > 0) {
@@ -16198,6 +16685,7 @@ async function runCodeReviewWithPort(args, port) {
       const completedArchiveDirectory = archiveDirectory;
       const archivedResponse2 = responseMarkdown;
       await runStep("ARCHIVE_RUN", async () => {
+        await assertConversationAffinity(port, affinity, "ARCHIVE_RUN", true);
         await writeImmutableJson(join8(completedArchiveDirectory, "artifacts", "manifest.json"), artifacts);
         return { responseSha256, responseBytes: Buffer.byteLength(archivedResponse2), artifacts: artifacts.length };
       });
@@ -16218,12 +16706,17 @@ async function runCodeReviewWithPort(args, port) {
       terminalStatus = "in_progress";
     } else if (error instanceof ReviewPreparationError) {
       archiveDirectory = error.archiveDirectory ?? archiveDirectory;
+      if (archivedSubmission !== void 0) {
+        submitted = archivedSubmission.submitted;
+        threadUrl = archivedSubmission.thread.url ?? threadUrl;
+        threadId = archivedSubmission.thread.id ?? conversationIdFromUrl(archivedSubmission.thread.url) ?? threadId;
+      }
       terminalStatus = "blocked";
       blocker = {
         kind: error.code.includes("configuration_snapshot") ? "configuration_restore_failed" : "unknown",
         code: error.code,
         message: error.message,
-        resumable: error.code === "review_archive_locked"
+        resumable: isCorrectableResumePreparationError(error.code)
       };
     } else if (error instanceof ReviewWorkflowError) {
       terminalStatus = error.result.status === "blocked" || error.result.status === "needs_confirmation" ? "blocked" : "failed";
@@ -16234,7 +16727,7 @@ async function runCodeReviewWithPort(args, port) {
       warnings.push(error instanceof Error ? error.message : String(error));
     }
   } finally {
-    if (terminalStatus !== "in_progress" && configurationBefore !== void 0 && args.safeguards?.restorePreviousConfiguration === true) {
+    if (!terminalOutcomeAlreadyFinal && terminalStatus !== "in_progress" && configurationBefore !== void 0 && args.safeguards?.restorePreviousConfiguration === true) {
       try {
         const restore = await runStep("RESTORE_PREVIOUS_CONFIGURATION", () => port.restoreConfiguration(configurationBefore));
         restored = restore.data?.restored === true;
@@ -16334,6 +16827,9 @@ async function runCodeReviewWithPort(args, port) {
         primaryError: primaryError instanceof Error ? { name: primaryError.name, message: primaryError.message } : void 0
       };
       try {
+        await writeJsonReplacing(join8(archiveDirectory, "configuration.json"), configurationRecord);
+        await writeJsonReplacing(join8(archiveDirectory, "run-report.redacted.json"), redactReportValue(receipt));
+        await writeJsonReplacing(join8(archiveDirectory, "receipt.json"), receipt);
         if (result.blocker?.resumable === false && result.status !== "in_progress") {
           const terminalOutcome = {
             schemaVersion: 1,
@@ -16349,9 +16845,6 @@ async function runCodeReviewWithPort(args, port) {
           };
           await writeImmutableJson(join8(archiveDirectory, "terminal-outcome.json"), terminalOutcome);
         }
-        await writeJsonReplacing(join8(archiveDirectory, "configuration.json"), configurationRecord);
-        await writeJsonReplacing(join8(archiveDirectory, "run-report.redacted.json"), redactReportValue(receipt));
-        await writeJsonReplacing(join8(archiveDirectory, "receipt.json"), receipt);
       } catch (error) {
         const message = `Required terminal provenance could not be committed: ${error instanceof Error ? error.message : String(error)}`;
         result.ok = false;
@@ -16363,6 +16856,23 @@ async function runCodeReviewWithPort(args, port) {
           message,
           resumable: false
         };
+        const archiveCommitFailure = {
+          schemaVersion: 1,
+          finalizedAt: port.now().toISOString(),
+          status: "failed",
+          ok: false,
+          submitted: result.submitted,
+          resubmitAllowed: false,
+          blocker: result.blocker,
+          warnings: result.warnings,
+          ...result.thread === void 0 ? {} : { thread: result.thread },
+          ...responseMarkdown === void 0 || responseSha256 === void 0 ? {} : { response: { bytes: Buffer.byteLength(responseMarkdown), sha256: responseSha256 } }
+        };
+        try {
+          await writeImmutableJson(join8(archiveDirectory, "archive-commit-failure.json"), archiveCommitFailure);
+        } catch (markerError) {
+          result.warnings.push(`The authoritative archive commit failure marker could not be written: ${markerError instanceof Error ? markerError.message : String(markerError)}`);
+        }
       }
     }
     steps.push({ state: "RETURN_FULL_RESULT", startedAt: port.now().toISOString(), endedAt: port.now().toISOString(), ok: result.ok, status: result.status });
@@ -16378,21 +16888,32 @@ function defaultReviewWorkflowPort(env) {
       existingTab: {
         target: target.conversationId === void 0 ? { type: "url", url: target.url } : { type: "conversationId", conversationId: target.conversationId },
         ifMissing: "open",
-        ifMultiple: "first",
+        ifMultiple: "block",
         requireChatGPT: true
       }
+    }),
+    bootstrapRecovery: (target) => bootstrap(env, target?.tabId === void 0 ? { preferExistingTab: false } : {
+      existingTab: {
+        target: { type: "tabId", tabId: target.tabId },
+        ifMissing: "block",
+        ifMultiple: "block",
+        requireChatGPT: true
+      },
+      preferExistingTab: false
     }),
     openChat: () => openExperience(env, { experience: "chat" }),
     newThread: () => newThread(env),
     openThread: (target) => openThread(env, { ...target, timeoutMs: 12e3 }),
-    recoverThread: (query, expectedPrompt) => recoverReviewThread(env, query, expectedPrompt),
+    recoverThread: (query, expectedPrompt, preferred) => recoverReviewThread(env, query, expectedPrompt, preferred),
     snapshotConfiguration: () => snapshotConfiguration(env, { experience: "chat" }),
     applyPro: () => applyConfiguration(env, { experience: "chat", desired: { intelligence: "Pro" }, strict: true }),
     inspectConfiguration: () => inspectConfiguration(env, { experience: "chat", includeOptions: false }),
     restoreConfiguration: (snapshot) => restoreConfiguration(env, { snapshot, strict: true }),
     pageState: async () => {
       if (env.page === void 0) throw new Error("No visible ChatGPT page is attached.");
-      return readPageState(env.page);
+      const state = await readPageState(env.page);
+      const tabId = tabIdFromPage(env.page);
+      return tabId === void 0 ? state : { ...state, tabId };
     },
     artifactBaseline: () => captureArtifactBaseline(env),
     artifactDelta: (baseline) => captureArtifactDelta(env, { baseline }),
@@ -16422,17 +16943,118 @@ function defaultReviewWorkflowPort(env) {
     })
   };
 }
-async function assertPageSafe(port, state) {
+async function assertConversationAffinity(port, affinity, state, resumable) {
   const page = await port.pageState();
+  return assertConversationAffinityAgainstPage(port, affinity, state, resumable, page);
+}
+async function establishConversationAffinity(port, affinity, state, resumable) {
+  const page = await port.pageState();
+  const observedId = page.conversationId ?? conversationIdFromUrl(page.url);
+  if (affinity.invocationTabId === void 0 && page.tabId !== void 0) affinity.invocationTabId = page.tabId;
+  if (affinity.routeId === void 0 && observedId !== void 0) {
+    affinity.routeId = observedId;
+    if (!isProvisionalConversationId(observedId)) affinity.canonicalId = observedId;
+  }
+  return assertConversationAffinityAgainstPage(port, affinity, state, resumable, page);
+}
+function assertConversationAffinityAgainstPage(port, affinity, state, resumable, page) {
   if (page.blocker !== void 0 && page.blocker.kind !== "modal") {
     throw new ReviewWorkflowError({
       ok: false,
       status: "blocked",
       warnings: [],
       blocker: { ...page.blocker, resumable: page.blocker.kind !== "model_fallback" && page.blocker.kind !== "model_unavailable" },
-      context: { timestamp: port.now().toISOString(), url: page.url }
+      context: { timestamp: port.now().toISOString(), url: page.url, ...page.tabId === void 0 ? {} : { tabId: page.tabId } }
     }, state);
   }
+  const observedId = page.conversationId ?? conversationIdFromUrl(page.url);
+  const expectedId = affinity.canonicalId ?? affinity.routeId;
+  if (expectedId !== void 0 && observedId !== expectedId) {
+    throw conversationAffinityBlocker(
+      "conversation_binding_lost",
+      `The visible Chat conversation changed from ${expectedId} to ${observedId ?? "an unverifiable target"}. The archived conversation binding was not changed.`,
+      state,
+      resumable,
+      page
+    );
+  }
+  if (expectedId === void 0 && observedId !== void 0) {
+    throw conversationAffinityBlocker(
+      "conversation_binding_lost",
+      `The visible Chat conversation changed to ${observedId} before the workflow could prove that it contains the archived submitted prompt.`,
+      state,
+      resumable,
+      page
+    );
+  }
+  if (affinity.invocationTabId !== void 0 && page.tabId !== void 0 && page.tabId !== affinity.invocationTabId) {
+    throw conversationAffinityBlocker(
+      "conversation_tab_affinity_lost",
+      `The workflow moved from bound browser tab ${affinity.invocationTabId} to ${page.tabId}.`,
+      state,
+      resumable,
+      page
+    );
+  }
+  return page;
+}
+function conversationAffinityBlocker(code, message, state, resumable, page) {
+  return new ReviewWorkflowError({
+    ok: false,
+    status: "blocked",
+    warnings: [],
+    blocker: {
+      kind: "selector_drift",
+      code,
+      message,
+      resumable
+    },
+    context: {
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      ...page?.url === void 0 ? {} : { url: page.url },
+      ...page?.tabId === void 0 ? {} : { tabId: page.tabId }
+    }
+  }, state);
+}
+function assertCommandContextAffinity(context, affinity, state, resumable, allowedConversationId) {
+  const observedId = context.conversationId ?? conversationIdFromUrl(context.url);
+  const expectedId = affinity.canonicalId ?? affinity.routeId;
+  if (observedId !== void 0 && expectedId !== void 0 && observedId !== expectedId && observedId !== allowedConversationId) {
+    throw conversationAffinityBlocker(
+      "conversation_binding_lost",
+      `The ${state} result came from Chat conversation ${observedId}, but this invocation is immutably bound to ${expectedId}.`,
+      state,
+      resumable,
+      context
+    );
+  }
+  if (context.tabId !== void 0 && affinity.invocationTabId !== void 0 && context.tabId !== affinity.invocationTabId) {
+    throw conversationAffinityBlocker(
+      "conversation_tab_affinity_lost",
+      `The ${state} result came from browser tab ${context.tabId}, but this invocation is immutably bound to ${affinity.invocationTabId}.`,
+      state,
+      resumable,
+      context
+    );
+  }
+}
+function resumableConversationBlocker(code, message, state, url) {
+  return conversationAffinityBlocker(code, message, state, true, url === void 0 ? void 0 : { url });
+}
+function isCorrectableResumePreparationError(code) {
+  return code === "review_archive_locked" || code === "resume_thread_mismatch" || code === "resume_artifact_baseline_mismatch" || code === "resume_opened_thread_mismatch" || code === "resume_user_turn_mismatch";
+}
+function assertSubmittedTurnOwnership(submission, current, url) {
+  if (submission === void 0) return;
+  const laterAssistantCycle = typeof submission.baselineAssistantCount === "number" && Number.isInteger(submission.baselineAssistantCount) && Number.isInteger(current.assistantTurnCount) && current.assistantTurnCount > submission.baselineAssistantCount + 1;
+  const laterTurnCycle = typeof submission.baselineTurnCount === "number" && typeof current.turnCount === "number" && Number.isInteger(submission.baselineTurnCount) && Number.isInteger(current.turnCount) && current.turnCount > submission.baselineTurnCount + 2;
+  if (!laterAssistantCycle && !laterTurnCycle) return;
+  throw resumableConversationBlocker(
+    "resume_conversation_turn_ambiguous",
+    "The recovered conversation contains another user/assistant cycle after the archived one-shot submission. Even though the latest user text may be identical, response ownership is ambiguous and no response or artifacts were accepted.",
+    "POLL_METADATA",
+    url
+  );
 }
 function requireOk(result, state) {
   if (!result.ok) throw new ReviewWorkflowError(result, state);
@@ -16539,7 +17161,7 @@ async function readArchivedSubmission(archiveDirectory, prepared) {
     throw new ReviewPreparationError("The archive has no durable submission intent or confirmation record.", "resume_submission_unverified");
   }
   const state = intentOnly ? "intent" : value.state ?? "confirmed";
-  if (value.resubmitAllowed !== false || (state === "confirmed" || state === "ambiguous") && value.submitted !== true || state !== "confirmed" && state !== "intent" && state !== "ambiguous") {
+  if (value.resubmitAllowed !== false || (state === "confirmed" || state === "ambiguous") && value.submitted !== true || (state === "intent" || state === "failed") && value.submitted === true || state !== "confirmed" && state !== "intent" && state !== "ambiguous" && state !== "failed" || !isRecord7(value.thread) || value.thread.url !== void 0 && typeof value.thread.url !== "string" || value.thread.id !== void 0 && typeof value.thread.id !== "string" || value.thread.tabId !== void 0 && typeof value.thread.tabId !== "string") {
     throw new ReviewPreparationError("The archived submission receipt does not prove a submit-once, non-resubmittable review.", "resume_submission_unverified");
   }
   const expectedPromptSha256 = sha256Text2(normalizePrompt(prepared.prompt));
@@ -16564,7 +17186,13 @@ async function readArchivedSubmission(archiveDirectory, prepared) {
       throw new ReviewPreparationError("The immutable submission receipt no longer matches the archived prompt, packet set, manifest, configuration snapshot, or artifact baseline.", "resume_submission_integrity_mismatch");
     }
   }
-  return { ...value, state, submitted: state !== "intent" };
+  return { ...value, state, submitted: state === "confirmed" || state === "ambiguous" };
+}
+async function archivedSubmissionRecordExists(archiveDirectory) {
+  for (const name of ["submission-confirmation.json", "submission.json", "submission-intent.json"]) {
+    if (await stat8(join8(archiveDirectory, name)).then((entry) => entry.isFile()).catch(() => false)) return true;
+  }
+  return false;
 }
 async function createSubmissionIntegrity(prepared, archiveDirectory, configurationBefore, artifactBaseline) {
   const configurationPath = join8(archiveDirectory, "configuration.before.json");
@@ -16594,12 +17222,73 @@ function submissionIntegrityFields(value) {
   };
 }
 async function readArchivedTerminalOutcome(archiveDirectory) {
-  const value = await readOptionalJson(join8(archiveDirectory, "terminal-outcome.json"));
+  const value = await readArchivedTerminalMarker(
+    join8(archiveDirectory, "terminal-outcome.json"),
+    "resume_terminal_outcome_invalid",
+    "terminal outcome"
+  );
   if (value === void 0) return void 0;
+  const outcome = validateArchivedTerminalOutcome(value, "resume_terminal_outcome_invalid");
+  if (outcome.blocker.resumable !== false) {
+    throw new ReviewPreparationError("The archived terminal outcome is resumable and therefore cannot be authoritative.", "resume_terminal_outcome_invalid");
+  }
+  return outcome;
+}
+async function readArchivedCommitFailure(archiveDirectory) {
+  const value = await readArchivedTerminalMarker(
+    join8(archiveDirectory, "archive-commit-failure.json"),
+    "resume_archive_commit_failure_invalid",
+    "archive commit failure"
+  );
+  if (value === void 0) return void 0;
+  const outcome = validateArchivedTerminalOutcome(value, "resume_archive_commit_failure_invalid");
+  if (outcome.status !== "failed" || outcome.ok !== false || outcome.blocker.code !== "archive_terminal_commit_failed" || outcome.blocker.resumable !== false) {
+    throw new ReviewPreparationError("The archived terminal provenance commit failure marker is invalid.", "resume_archive_commit_failure_invalid");
+  }
+  return outcome;
+}
+async function readArchivedTerminalMarker(path3, invalidCode, label) {
+  try {
+    return await readOptionalJson(path3);
+  } catch (error) {
+    throw new ReviewPreparationError(
+      `The archived ${label} marker is unreadable or invalid JSON. ${error instanceof Error ? error.message : String(error)}`,
+      invalidCode
+    );
+  }
+}
+async function validateArchivedTerminalBinding(archiveDirectory, outcome, submission) {
+  const invalidCode = outcome.blocker.code === "archive_terminal_commit_failed" ? "resume_archive_commit_failure_invalid" : "resume_terminal_outcome_invalid";
+  const submittedId = submission?.thread.id ?? conversationIdFromUrl(submission?.thread.url);
+  const outcomeId = outcome.thread?.id ?? conversationIdFromUrl(outcome.thread?.url);
+  if (submission === void 0 && outcome.submitted || submission !== void 0 && outcome.submitted !== submission.submitted || submission !== void 0 && submittedId !== void 0 && outcomeId !== submittedId) {
+    throw new ReviewPreparationError(
+      "The archived terminal marker does not match the immutable submission receipt.",
+      invalidCode
+    );
+  }
+  if (outcome.response !== void 0) {
+    const response = await readFile6(join8(archiveDirectory, "response.md"), "utf8").catch(() => void 0);
+    if (response === void 0 || Buffer.byteLength(response) !== outcome.response.bytes || sha256Text2(response) !== outcome.response.sha256) {
+      throw new ReviewPreparationError(
+        "The archived terminal marker response metadata does not match response.md.",
+        invalidCode
+      );
+    }
+  }
+}
+function validateArchivedTerminalOutcome(value, invalidCode) {
   if (value.schemaVersion !== 1 || typeof value.finalizedAt !== "string" || value.status !== "blocked" && value.status !== "failed" && value.status !== "completed" && value.status !== "completed_with_warnings" || typeof value.ok !== "boolean" || typeof value.submitted !== "boolean" || value.resubmitAllowed !== false || !isRecord7(value.blocker) || typeof value.blocker.kind !== "string" || typeof value.blocker.code !== "string" || typeof value.blocker.message !== "string" || typeof value.blocker.resumable !== "boolean" || !Array.isArray(value.warnings) || !value.warnings.every((item) => typeof item === "string") || value.thread !== void 0 && (!isRecord7(value.thread) || value.thread.url !== void 0 && typeof value.thread.url !== "string" || value.thread.id !== void 0 && typeof value.thread.id !== "string") || value.response !== void 0 && (!isRecord7(value.response) || !Number.isInteger(value.response.bytes) || value.response.bytes < 0 || typeof value.response.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.response.sha256))) {
-    throw new ReviewPreparationError("The archived terminal outcome is invalid.", "resume_terminal_outcome_invalid");
+    throw new ReviewPreparationError("The archived terminal outcome is invalid.", invalidCode);
   }
   return value;
+}
+async function archivedFinalMarkerExists(archiveDirectory) {
+  const markers = ["archive-commit-failure.json", "terminal-outcome.json"];
+  for (const marker of markers) {
+    if (await stat8(join8(archiveDirectory, marker)).then(() => true).catch(() => false)) return true;
+  }
+  return false;
 }
 async function readOptionalJson(path3) {
   try {
@@ -16621,28 +17310,24 @@ function conversationIdFromUrl(url) {
 function isProvisionalConversationId(value) {
   return value?.startsWith("WEB:") === true;
 }
-async function recoverCurrentVisibleThread(port, expectedPrompt) {
-  const page = await port.pageState().catch(() => void 0);
-  const conversationId = page?.conversationId ?? conversationIdFromUrl(page?.url);
-  if (page === void 0 || conversationId === void 0 || isProvisionalConversationId(conversationId)) return void 0;
-  const latestUser = await port.readLatestUser().catch(() => void 0);
-  if (latestUser?.ok !== true || !visibleUserTurnContainsExactPrompt(latestUser.data?.text ?? "", expectedPrompt)) return void 0;
-  return {
-    ok: true,
-    status: "ok",
-    data: {
-      url: page.url,
-      conversationId,
-      ...page.title === void 0 ? {} : { title: page.title }
-    },
-    warnings: ["Recovered the archived review from the already-visible prompt-identical Chat conversation."],
-    context: {
-      timestamp: port.now().toISOString(),
-      url: page.url,
-      conversationId,
-      ...page.title === void 0 ? {} : { title: page.title }
+function selectUniqueRecoveryCandidate(candidates, preferredTabId) {
+  const exact = /* @__PURE__ */ new Map();
+  for (const candidate of candidates) {
+    if (candidate.exactPrompt && !exact.has(candidate.conversationId)) exact.set(candidate.conversationId, candidate);
+  }
+  const matches = [...exact.values()];
+  if (matches.length === 1) {
+    const match = matches[0];
+    return { conversationId: match.conversationId, ...match.tabId === void 0 ? {} : { tabId: match.tabId } };
+  }
+  if (matches.length > 1 && preferredTabId !== void 0) {
+    const stableMatches = matches.filter((match) => match.tabId === preferredTabId);
+    if (stableMatches.length === 1) {
+      const match = stableMatches[0];
+      return { conversationId: match.conversationId, ...match.tabId === void 0 ? {} : { tabId: match.tabId } };
     }
-  };
+  }
+  return matches.length > 1 ? "ambiguous" : void 0;
 }
 function recoveryQueryFromPrepared(prepared) {
   const firstLine = prepared.prompt.split(/\r?\n/, 1)[0]?.trim();
@@ -16651,11 +17336,15 @@ function recoveryQueryFromPrepared(prepared) {
   const legacyCanary = prepared.prompt.match(/CANARY_OK:[a-z0-9]+/i)?.[0];
   return legacyCanary ?? prepared.manifest.headSha?.slice(0, 12) ?? prepared.manifest.headRef;
 }
-async function persistThreadCheckpoint(archiveDirectory, prepared, url, id2, now) {
-  if (url === void 0 && id2 === void 0) return;
+async function persistThreadCheckpoint(archiveDirectory, prepared, url, id2, tabId, now) {
+  if (url === void 0 && id2 === void 0 && tabId === void 0) return;
   const checkpoint = {
     schemaVersion: 1,
-    current: { ...url === void 0 ? {} : { url }, ...id2 === void 0 ? {} : { id: id2 } },
+    current: {
+      ...url === void 0 ? {} : { url },
+      ...id2 === void 0 ? {} : { id: id2 },
+      ...tabId === void 0 ? {} : { tabId }
+    },
     recoveryQuery: recoveryQueryFromPrepared(prepared),
     promptSha256: sha256Text2(prepared.prompt),
     updatedAt: now.toISOString()
@@ -16664,7 +17353,7 @@ async function persistThreadCheckpoint(archiveDirectory, prepared, url, id2, now
 }
 async function readArchivedThreadCheckpoint(archiveDirectory) {
   const value = JSON.parse(await readFile6(join8(archiveDirectory, "thread-checkpoint.json"), "utf8"));
-  if (value.schemaVersion !== 1 || value.current === void 0 || typeof value.recoveryQuery !== "string" || typeof value.promptSha256 !== "string") {
+  if (value.schemaVersion !== 1 || !isRecord7(value.current) || value.current.url !== void 0 && typeof value.current.url !== "string" || value.current.id !== void 0 && typeof value.current.id !== "string" || value.current.tabId !== void 0 && typeof value.current.tabId !== "string" || typeof value.recoveryQuery !== "string" || typeof value.promptSha256 !== "string") {
     throw new Error("Archived thread checkpoint is invalid.");
   }
   return value;
@@ -16687,59 +17376,277 @@ function validateThreadCheckpoint(checkpoint, submission, prepared) {
   }
   const submittedId = submission.thread.id ?? conversationIdFromUrl(submission.thread.url);
   const checkpointId = checkpoint.current.id ?? conversationIdFromUrl(checkpoint.current.url);
-  if (submittedId !== void 0 && checkpointId !== void 0 && !isProvisionalConversationId(submittedId) && submittedId !== checkpointId) {
+  if (submittedId !== void 0 && checkpointId !== void 0 && !isProvisionalConversationId(submittedId) && !isProvisionalConversationId(checkpointId) && submittedId !== checkpointId) {
     throw new ReviewPreparationError("The mutable thread checkpoint points at a different conversation than the immutable submission receipt.", "resume_checkpoint_thread_mismatch");
   }
 }
-async function recoverReviewThread(env, query, expectedPrompt) {
+async function recoverReviewThread(env, query, expectedPrompt, preferred) {
+  const warnings = [];
+  const candidates = /* @__PURE__ */ new Map();
+  const addCandidate = (url, conversationId, title) => {
+    if (candidates.size >= MAX_RECOVERY_CANDIDATES) return;
+    const id2 = conversationId ?? conversationIdFromUrl(url);
+    if (id2 === void 0 || isProvisionalConversationId(id2)) return;
+    const canonicalUrl = url ?? new URL(`/c/${id2}`, "https://chatgpt.com/").toString();
+    if (!candidates.has(id2)) candidates.set(id2, { url: canonicalUrl, conversationId: id2, ...title === void 0 ? {} : { title } });
+  };
+  const current = env.page === void 0 ? void 0 : await readPageState(env.page).catch(() => void 0);
+  const probe = {
+    ...env.expectedTabId === void 0 ? {} : { tabId: env.expectedTabId },
+    ...current?.url === void 0 ? {} : { url: current.url },
+    ...current?.conversationId === void 0 ? {} : { conversationId: current.conversationId }
+  };
+  addCandidate(preferred?.url, preferred?.conversationId);
+  addCandidate(current?.url, current?.conversationId, current?.title);
   const visible = await listVisibleThreads(env, 20);
   if (visible.ok && visible.data !== void 0) {
-    const candidates = visible.data.results.map((candidate, index) => ({ candidate, index, score: recoveryCandidateScore(candidate.title, query) })).sort((left, right) => right.score - left.score || left.index - right.index).slice(0, 12);
-    for (const { candidate } of candidates) {
-      const opened = await openThread(env, { url: new URL(candidate.href, "https://chatgpt.com/").toString(), timeoutMs: 12e3 });
-      if (!opened.ok) continue;
-      const user = await readLatest(env, { role: "user", format: "text" });
-      if (user.ok && visibleUserTurnContainsExactPrompt(user.data?.text ?? "", expectedPrompt)) {
-        return {
-          ...opened,
-          warnings: [
-            ...visible.warnings,
-            ...opened.warnings,
-            "Recovered the archived review from a prompt-identical conversation in visible Chat history."
-          ]
-        };
-      }
+    warnings.push(...visible.warnings);
+    for (const candidate of visible.data.results.map((candidate2, index) => ({ candidate: candidate2, index, score: recoveryCandidateScore(candidate2.title, query) })).filter((candidate2) => candidate2.score > 0).sort((left, right) => right.score - left.score || left.index - right.index).slice(0, MAX_RECOVERY_CANDIDATES - candidates.size)) {
+      addCandidate(new URL(candidate.candidate.href, "https://chatgpt.com/").toString(), candidate.candidate.conversationId, candidate.candidate.title);
     }
   }
-  const search = await searchThreads(env, { query, limit: 3 });
-  if (!search.ok || search.data === void 0) {
+  const search = await searchThreads(env, { query, limit: 12 });
+  if (search.ok && search.data !== void 0) {
+    warnings.push(...search.warnings);
+    for (const candidate of search.data.results.slice(0, MAX_RECOVERY_CANDIDATES - candidates.size)) {
+      addCandidate(new URL(candidate.href, "https://chatgpt.com/").toString(), candidate.conversationId, candidate.title);
+    }
+  } else if (candidates.size === 0) {
+    return commandFailureAsOpenThread(search);
+  }
+  const exactMatches = [];
+  for (const candidate of candidates.values()) {
+    const opened = await exactClaimOrOpenRecoveryCandidate(env, candidate, probe, preferred?.tabId);
+    if (!opened.ok) {
+      const restored2 = await restoreRecoveryProbe(env, probe);
+      return restored2 ?? opened;
+    }
+    const user = await readLatest(env, { role: "user", format: "text" });
+    if (user.ok && visibleUserTurnContainsExactPrompt(user.data?.text ?? "", expectedPrompt)) {
+      exactMatches.push({ candidate, ...opened.context.tabId === void 0 ? {} : { tabId: opened.context.tabId } });
+    }
+    const restored = await restoreRecoveryProbe(env, probe);
+    if (restored !== void 0) return restored;
+  }
+  const selectedEvidence = selectUniqueRecoveryCandidate(exactMatches.map((match) => ({
+    conversationId: match.candidate.conversationId,
+    ...match.tabId === void 0 ? {} : { tabId: match.tabId },
+    exactPrompt: true
+  })), preferred?.tabId);
+  const selected = typeof selectedEvidence === "object" ? exactMatches.find((match) => match.candidate.conversationId === selectedEvidence.conversationId) : void 0;
+  if (selectedEvidence === "ambiguous") {
     return {
       ok: false,
-      status: search.status,
-      warnings: search.warnings,
-      ...search.blocker === void 0 ? {} : { blocker: search.blocker },
-      ...search.error === void 0 ? {} : { error: search.error },
+      status: "blocked",
+      warnings,
+      blocker: {
+        kind: "not_found",
+        code: "review_thread_recovery_ambiguous",
+        message: "Multiple canonical Chat conversations contain the exact archived prompt. Recovery refused to choose one without a unique archived tab binding.",
+        resumable: true
+      },
+      context: { timestamp: (/* @__PURE__ */ new Date()).toISOString(), ...probe.tabId === void 0 ? {} : { tabId: probe.tabId } }
+    };
+  }
+  if (selected === void 0) {
+    return {
+      ok: false,
+      status: "not_found",
+      warnings,
+      blocker: {
+        kind: "not_found",
+        code: "review_thread_recovery_not_found",
+        message: "The provisional Chat conversation ID expired, and visible Chat search found no conversation containing the exact archived prompt.",
+        resumable: true
+      },
       context: search.context
     };
   }
-  const expected = normalizePrompt(expectedPrompt);
-  for (const candidate of search.data.results) {
-    const opened = await openThread(env, { url: new URL(candidate.href, "https://chatgpt.com/").toString(), timeoutMs: 12e3 });
-    if (!opened.ok) continue;
-    const user = await readLatest(env, { role: "user", format: "text" });
-    if (user.ok && promptMatches(normalizePrompt(user.data?.text ?? ""), expected, query)) return opened;
+  const finalOpened = await exactClaimOrOpenRecoveryCandidate(env, selected.candidate, probe, selected.tabId ?? preferred?.tabId);
+  if (!finalOpened.ok) return finalOpened;
+  const finalUser = await readLatest(env, { role: "user", format: "text" });
+  if (!finalUser.ok || !visibleUserTurnContainsExactPrompt(finalUser.data?.text ?? "", expectedPrompt)) {
+    return {
+      ok: false,
+      status: "blocked",
+      warnings,
+      blocker: {
+        kind: "unknown",
+        code: "review_thread_recovery_changed",
+        message: "The selected recovery conversation changed before its exact archived prompt could be reverified.",
+        resumable: true
+      },
+      context: finalOpened.context
+    };
   }
   return {
+    ...finalOpened,
+    warnings: [
+      ...warnings,
+      ...finalOpened.warnings,
+      "Recovered the archived review from a uniquely prompt-identical conversation in visible Chat history."
+    ]
+  };
+}
+async function exactClaimOrOpenRecoveryCandidate(env, candidate, probe, preferredTabId) {
+  if (preferredTabId !== void 0) {
+    const preferredClaim = await bootstrap(env, {
+      existingTab: {
+        target: { type: "tabId", tabId: preferredTabId },
+        ifMissing: "block",
+        ifMultiple: "block",
+        requireChatGPT: true
+      },
+      preferExistingTab: false
+    });
+    if (preferredClaim.ok) {
+      const preferredState = env.page === void 0 ? void 0 : await readPageState(env.page).catch(() => void 0);
+      const preferredObservedId = preferredState?.conversationId ?? conversationIdFromUrl(preferredState?.url);
+      if (preferredObservedId === candidate.conversationId) {
+        return recoveryCandidateSuccess(candidate, preferredClaim, preferredState);
+      }
+      const restored2 = await restoreRecoveryProbe(env, probe);
+      if (restored2 !== void 0) return restored2;
+    } else if (preferredClaim.blocker?.code !== "existing_tab_not_found") {
+      return commandFailureAsOpenThread(makeExistingTabRetryResumable(preferredClaim, true));
+    }
+  }
+  const claim = await bootstrap(env, {
+    existingTab: {
+      target: { type: "conversationId", conversationId: candidate.conversationId },
+      ifMissing: "block",
+      ifMultiple: "block",
+      requireChatGPT: true
+    },
+    preferExistingTab: false
+  });
+  if (claim.ok) {
+    const state2 = env.page === void 0 ? void 0 : await readPageState(env.page).catch(() => void 0);
+    const observedId2 = state2?.conversationId ?? conversationIdFromUrl(state2?.url) ?? claim.context.conversationId ?? conversationIdFromUrl(claim.context.url);
+    if (observedId2 !== candidate.conversationId) {
+      const restored2 = await restoreRecoveryProbe(env, probe);
+      return restored2 ?? recoveryCandidateDrift(candidate, observedId2, claim.context);
+    }
+    return recoveryCandidateSuccess(candidate, claim, state2);
+  }
+  if (claim.blocker?.code !== "existing_tab_not_found") {
+    return commandFailureAsOpenThread(makeExistingTabRetryResumable(claim, true));
+  }
+  const restored = await restoreRecoveryProbe(env, probe);
+  if (restored !== void 0) return restored;
+  const opened = await openThread(env, { url: candidate.url, timeoutMs: RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS });
+  if (opened.context.tabId === void 0 && probe.tabId !== void 0) opened.context.tabId = probe.tabId;
+  if (!opened.ok) {
+    const repaired = await restoreRecoveryProbe(env, probe);
+    return repaired ?? opened;
+  }
+  const state = env.page === void 0 ? void 0 : await readPageState(env.page).catch(() => void 0);
+  const observedId = state?.conversationId ?? conversationIdFromUrl(state?.url) ?? opened.data?.conversationId ?? conversationIdFromUrl(opened.data?.url || opened.context.url) ?? opened.context.conversationId;
+  if (observedId !== candidate.conversationId) {
+    const repaired = await restoreRecoveryProbe(env, probe);
+    return repaired ?? recoveryCandidateDrift(candidate, observedId, opened.context);
+  }
+  return opened;
+}
+async function restoreRecoveryProbe(env, probe) {
+  if (probe.tabId !== void 0 && env.expectedTabId !== probe.tabId) {
+    const restored = await bootstrap(env, {
+      existingTab: {
+        target: { type: "tabId", tabId: probe.tabId },
+        ifMissing: "block",
+        ifMultiple: "block",
+        requireChatGPT: true
+      },
+      preferExistingTab: false
+    });
+    if (!restored.ok) return commandFailureAsOpenThread(restored);
+  }
+  if (probe.url === void 0 || env.page === void 0) return void 0;
+  const current = await readPageState(env.page).catch(() => void 0);
+  const currentId = current?.conversationId ?? conversationIdFromUrl(current?.url);
+  const alreadyRestored = probe.conversationId !== void 0 ? currentId === probe.conversationId : current?.url === probe.url;
+  if (alreadyRestored) return void 0;
+  if (typeof env.page.goto !== "function") {
+    return recoveryProbeRestoreFailure(probe, "The bound recovery probe cannot navigate back to its original Chat target.");
+  }
+  try {
+    await env.page.goto(probe.url);
+  } catch (error) {
+    return recoveryProbeRestoreFailure(probe, `The bound recovery probe could not return to its original Chat target: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const restoredState = await readPageState(env.page).catch(() => void 0);
+  const restoredId = restoredState?.conversationId ?? conversationIdFromUrl(restoredState?.url);
+  if (probe.conversationId !== void 0 && restoredId !== probe.conversationId || probe.conversationId === void 0 && restoredState?.url !== probe.url) {
+    return recoveryProbeRestoreFailure(probe, "The bound recovery probe did not return to its original Chat target.");
+  }
+  return void 0;
+}
+function recoveryCandidateSuccess(candidate, claim, state) {
+  const title = state?.title ?? candidate.title;
+  return {
+    ok: true,
+    status: "ok",
+    data: {
+      url: state?.url ?? candidate.url,
+      conversationId: candidate.conversationId,
+      ...title === void 0 ? {} : { title }
+    },
+    warnings: claim.warnings,
+    context: {
+      ...claim.context,
+      url: state?.url ?? candidate.url,
+      conversationId: candidate.conversationId
+    }
+  };
+}
+function recoveryCandidateDrift(candidate, observedId, context) {
+  return {
     ok: false,
-    status: "not_found",
-    warnings: search.warnings,
+    status: "blocked",
+    warnings: [],
     blocker: {
-      kind: "not_found",
-      code: "review_thread_recovery_not_found",
-      message: "The provisional Chat conversation ID expired, and visible Chat search found no prompt-identical review thread.",
+      kind: "selector_drift",
+      code: "review_thread_recovery_candidate_drift",
+      message: `Recovery requested Chat conversation ${candidate.conversationId}, but the claimed or navigated page exposed ${observedId ?? "no canonical conversation ID"}.`,
       resumable: true
     },
-    context: search.context
+    context
+  };
+}
+function recoveryProbeRestoreFailure(probe, message) {
+  return {
+    ok: false,
+    status: "blocked",
+    warnings: [],
+    blocker: {
+      kind: "selector_drift",
+      code: "review_thread_recovery_probe_restore_failed",
+      message,
+      resumable: true
+    },
+    context: {
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      ...probe.url === void 0 ? {} : { url: probe.url },
+      ...probe.conversationId === void 0 ? {} : { conversationId: probe.conversationId },
+      ...probe.tabId === void 0 ? {} : { tabId: probe.tabId }
+    }
+  };
+}
+function commandFailureAsOpenThread(result) {
+  return {
+    ok: false,
+    status: result.status,
+    warnings: result.warnings,
+    ...result.blocker === void 0 ? {} : { blocker: result.blocker },
+    ...result.error === void 0 ? {} : { error: result.error },
+    context: result.context
+  };
+}
+function makeExistingTabRetryResumable(result, onResume) {
+  if (!onResume || result.ok || result.blocker?.code !== "existing_tab_ambiguous" && result.blocker?.code !== "existing_tab_temporarily_claimed") return result;
+  return {
+    ...result,
+    blocker: { ...result.blocker, resumable: true }
   };
 }
 function recoveryCandidateScore(title, query) {
@@ -16769,12 +17676,6 @@ function isKnownAttachmentEnvelope(prefix) {
   if (prefix === "") return true;
   const labels = prefix.split(/\s+File(?=\s|$)/).map((label) => label.trim()).filter(Boolean);
   return labels.length > 0 && labels.every((label) => /^[^/\\\r\n]{1,240}\.[a-z0-9]{1,12}$/i.test(label));
-}
-function promptMatches(actual, expected, query) {
-  if (actual === expected) return true;
-  if (!actual.includes(query) || !expected.includes(query)) return false;
-  const scope = expected.split("\n").find((line) => line.startsWith("Scope: "));
-  return scope !== void 0 && actual.includes(scope);
 }
 async function readArtifactDownloadCheckpoint(archiveDirectory) {
   const artifactsDirectory = resolve6(archiveDirectory, "artifacts");

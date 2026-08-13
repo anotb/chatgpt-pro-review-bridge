@@ -38,6 +38,7 @@ export type ProCodeReviewArgs = {
     /** Defaults to true for changes, false for committed repository scope, and true for an unborn repository. */
     includeWorkingTree?: boolean;
     includeInstructions?: boolean;
+    /** Set false to omit changed-file source snapshots; safety inventory and safe path/diff evidence remain. */
     includeChangedFiles?: boolean;
     includeRelevantCallers?: boolean;
     includeRelatedTests?: boolean;

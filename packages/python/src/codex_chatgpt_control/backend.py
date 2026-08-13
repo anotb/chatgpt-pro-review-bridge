@@ -81,7 +81,7 @@ class StdioBackendTransport:
         if response.get("ok") is False:
             error = response.get("error")
             if not isinstance(error, dict):
-                raise BackendTransportError("Backend protocol error response is missing error details.")
+                raise self._process_error("Backend protocol error response is missing error details.")
             raise BackendProtocolError(
                 str(error.get("code", "backend_error")),
                 str(error.get("message", "Backend protocol error.")),
@@ -97,7 +97,7 @@ class StdioBackendTransport:
             if event_type == "error":
                 error = event.get("error")
                 if not isinstance(error, dict):
-                    raise BackendTransportError("Backend error event is missing error details.")
+                    raise self._process_error("Backend error event is missing error details.")
                 raise BackendProtocolError(
                     str(error.get("code", "backend_error")),
                     str(error.get("message", "Backend stream error.")),
@@ -159,23 +159,23 @@ class StdioBackendTransport:
     def _read_response(self, request: dict[str, Any]) -> BackendResponse:
         value = self._read_json_value("response")
         if not isinstance(value, dict):
-            raise BackendTransportError("Backend response must be a JSON object.")
+            raise self._process_error("Backend response must be a JSON object.")
         if value.get("schemaVersion") != BACKEND_RESPONSE_SCHEMA_VERSION:
-            raise BackendTransportError("Backend response has an unsupported schemaVersion.")
+            raise self._process_error("Backend response has an unsupported schemaVersion.")
         self._assert_matching_request_id(request, value, "response")
         if not isinstance(value.get("ok"), bool):
-            raise BackendTransportError("Backend response is missing boolean ok.")
+            raise self._process_error("Backend response is missing boolean ok.")
         return value
 
     def _read_event(self, request: dict[str, Any]) -> BackendEvent:
         value = self._read_json_value("event")
         if not isinstance(value, dict):
-            raise BackendTransportError("Backend event must be a JSON object.")
+            raise self._process_error("Backend event must be a JSON object.")
         if value.get("schemaVersion") != BACKEND_EVENT_SCHEMA_VERSION:
-            raise BackendTransportError("Backend event has an unsupported schemaVersion.")
+            raise self._process_error("Backend event has an unsupported schemaVersion.")
         self._assert_matching_request_id(request, value, "event")
         if not isinstance(value.get("type"), str):
-            raise BackendTransportError("Backend event is missing type.")
+            raise self._process_error("Backend event is missing type.")
         return value
 
     def _read_json_value(self, label: str) -> Any:
@@ -183,18 +183,7 @@ class StdioBackendTransport:
         try:
             return json.loads(line)
         except json.JSONDecodeError as exc:
-            process = self._process
-            returncode = process.poll() if process is not None else None
-            if process is not None and returncode is None:
-                try:
-                    returncode = process.wait(timeout=0.05)
-                except subprocess.TimeoutExpired:
-                    returncode = None
-            raise BackendTransportError(
-                f"Backend returned invalid JSON {label}.",
-                returncode=returncode,
-                stderr=self._read_stderr(process),
-            ) from exc
+            raise self._process_error(f"Backend returned invalid JSON {label}.") from exc
 
     def _read_stdout_line(self) -> str:
         process = self._start()
@@ -233,7 +222,7 @@ class StdioBackendTransport:
     def _assert_matching_request_id(self, request: dict[str, Any], value: dict[str, Any], label: str) -> None:
         request_id = request.get("requestId")
         if request_id is not None and value.get("requestId") != request_id:
-            raise BackendTransportError(f"Backend {label} requestId did not match the request.")
+            raise self._process_error(f"Backend {label} requestId did not match the request.")
 
     def _process_error(self, message: str) -> BackendTransportError:
         process = self._process
@@ -246,6 +235,8 @@ class StdioBackendTransport:
         stderr_thread = self._stderr_thread
         if stderr_thread is not None and stderr_thread.is_alive():
             stderr_thread.join(timeout=0.5)
+        if process is not None and returncode is None:
+            returncode = process.poll()
         stderr = self._read_stderr(process)
         if returncode is not None:
             return BackendTransportError(

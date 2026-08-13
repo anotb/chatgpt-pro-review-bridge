@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
+import { tabIdFromPage } from "../browser/attach.js";
 import { parseConversationId, readPageState, type PageState } from "../browser/page-state.js";
 import { captureArtifactBaseline, captureArtifactDelta } from "../commands/artifact-inventory.js";
 import { downloadLatestArtifact } from "../commands/artifacts.js";
@@ -53,15 +54,20 @@ import type {
 export type ReviewWorkflowPort = {
   now(): Date;
   bootstrap(target?: { url?: string; conversationId?: string }): Promise<CommandResult<unknown>>;
+  bootstrapRecovery?(target?: { tabId?: string }): Promise<CommandResult<unknown>>;
   openChat(): Promise<CommandResult<unknown>>;
   newThread(): Promise<CommandResult<OpenThreadData>>;
   openThread(target: { url?: string; conversationId?: string }): Promise<CommandResult<OpenThreadData>>;
-  recoverThread(query: string, expectedPrompt: string): Promise<CommandResult<OpenThreadData>>;
+  recoverThread(
+    query: string,
+    expectedPrompt: string,
+    preferred?: { url?: string; conversationId?: string; tabId?: string }
+  ): Promise<CommandResult<OpenThreadData>>;
   snapshotConfiguration(): Promise<CommandResult<ConfigurationSnapshotData>>;
   applyPro(): Promise<CommandResult<ApplyConfigurationData>>;
   inspectConfiguration(): Promise<CommandResult<ConfigurationInspectionData>>;
   restoreConfiguration(snapshot: ConfigurationSnapshotData): Promise<CommandResult<RestoreConfigurationData>>;
-  pageState(): Promise<PageState>;
+  pageState(): Promise<PageState & { tabId?: string }>;
   artifactBaseline(): Promise<CommandResult<ArtifactInventoryData>>;
   artifactDelta(baseline: ArtifactInventoryData): Promise<CommandResult<ArtifactDeltaData>>;
   attach(paths: string[]): Promise<CommandResult<unknown>>;
@@ -74,6 +80,15 @@ export type ReviewWorkflowPort = {
   downloadFile(destDir: string, filename: string, assistantIndex: number, occurrenceIndex: number): Promise<CommandResult<DownloadedFile>>;
   downloadImage(destDir: string, index: number, turnId?: string): Promise<CommandResult<DownloadedFile>>;
 };
+
+type ConversationAffinity = {
+  canonicalId: string | undefined;
+  routeId: string | undefined;
+  invocationTabId: string | undefined;
+};
+
+const MAX_RECOVERY_CANDIDATES = 6;
+const RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS = 6_000;
 
 class ReviewWorkflowError extends Error {
   constructor(readonly result: CommandResult<unknown>, readonly state: ReviewState) {
@@ -125,7 +140,10 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
   let recoveryQuery: string | undefined;
   let releaseLease: (() => Promise<void>) | undefined;
   let archivedSubmission: ArchivedSubmission | undefined;
+  let resumedMessageStatus: MessageStatusData | undefined;
   let terminalOutcomeAlreadyFinal = false;
+  const affinity: ConversationAffinity = { canonicalId: undefined, routeId: undefined, invocationTabId: undefined };
+  let recoveryHint: { url?: string; conversationId?: string; tabId?: string } | undefined;
 
   const runStep = async <T>(state: ReviewState, operation: () => Promise<T>): Promise<T> => {
     const startedAt = port.now().toISOString();
@@ -171,17 +189,38 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
   try {
     validateRequestedThread(args);
     if (args.resume === undefined) {
+      const requestedThreadId = args.thread?.id ?? conversationIdFromUrl(args.thread?.url);
+      if (requestedThreadId !== undefined) {
+        affinity.canonicalId = requestedThreadId;
+        affinity.routeId = requestedThreadId;
+      }
       prepared = await runStep("PREPARE_CONTEXT", () => prepareReviewContext(args, port.now()));
       archiveDirectory = prepared.archiveDirectory;
       releaseLease = await acquireReviewLease(archiveDirectory);
     } else {
       archiveDirectory = args.resume.archiveDirectory;
       releaseLease = await acquireReviewLease(archiveDirectory);
+      terminalOutcomeAlreadyFinal = await archivedFinalMarkerExists(args.resume.archiveDirectory);
       prepared = await readArchivedPreparedContext(args.resume.archiveDirectory);
-      terminalOutcomeAlreadyFinal = await stat(join(args.resume.archiveDirectory, "terminal-outcome.json"))
-        .then(() => true)
-        .catch(() => false);
-      const terminalOutcome = await readArchivedTerminalOutcome(args.resume.archiveDirectory);
+      let archiveCommitFailure: ArchivedTerminalOutcome | undefined;
+      let terminalOutcome: ArchivedTerminalOutcome | undefined;
+      let terminalMarkerError: unknown;
+      try {
+        archiveCommitFailure = await readArchivedCommitFailure(args.resume.archiveDirectory);
+        terminalOutcome = await readArchivedTerminalOutcome(args.resume.archiveDirectory);
+      } catch (error) {
+        terminalMarkerError = error;
+      }
+      const archivedFinalOutcome = archiveCommitFailure
+        ?? (terminalOutcome?.blocker.resumable === false ? terminalOutcome : undefined);
+      const submissionRecordExists = await archivedSubmissionRecordExists(args.resume.archiveDirectory);
+      if (!submissionRecordExists) {
+        if (terminalMarkerError !== undefined) throw terminalMarkerError;
+        if (archivedFinalOutcome !== undefined && archivedFinalOutcome.submitted === false) {
+          await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, undefined);
+          throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
+        }
+      }
       try {
         configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
       } catch (error) {
@@ -190,60 +229,107 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           "resume_configuration_snapshot_invalid"
         );
       }
-      if (terminalOutcome !== undefined && terminalOutcome.blocker.resumable === false) {
-        if (terminalOutcome.submitted) {
-          archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
+      try {
+        archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
+      } catch (error) {
+        const missingSubmission = error instanceof ReviewPreparationError
+          && error.code === "resume_submission_unverified";
+        if (!missingSubmission || submissionRecordExists) throw error;
+        if (terminalMarkerError !== undefined) throw terminalMarkerError;
+        if (archivedFinalOutcome !== undefined
+          && archivedFinalOutcome.submitted === false
+          && missingSubmission) {
+          await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, undefined);
+          throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
         }
-        throw new ArchivedTerminalOutcomeError(terminalOutcome);
+        throw error;
       }
-      archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
+      if (terminalMarkerError !== undefined) throw terminalMarkerError;
+      submitted = archivedSubmission.submitted;
+      if (archivedFinalOutcome !== undefined) {
+        await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, archivedSubmission);
+        throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
+      }
       const checkpoint = await readOptionalThreadCheckpoint(args.resume.archiveDirectory);
       validateThreadCheckpoint(checkpoint, archivedSubmission, prepared);
       const receiptThreadId = archivedSubmission.thread.id ?? conversationIdFromUrl(archivedSubmission.thread.url);
       const receiptIsProvisional = isProvisionalConversationId(receiptThreadId);
-      const archivedTarget = checkpoint !== undefined
-        && (archivedSubmission.state !== "confirmed" || receiptIsProvisional)
-        ? checkpoint.current
-        : archivedSubmission.thread;
-      const archivedThreadId = archivedTarget.id ?? conversationIdFromUrl(archivedTarget.url);
       const suppliedUrlId = conversationIdFromUrl(threadUrl);
       if (threadId !== undefined && suppliedUrlId !== undefined && threadId !== suppliedUrlId) {
         throw new ReviewPreparationError("resume.conversationId and resume.threadUrl refer to different Chat conversations.", "resume_thread_mismatch");
       }
       const suppliedThreadId = threadId ?? suppliedUrlId;
-      if (!receiptIsProvisional && suppliedThreadId !== undefined && archivedThreadId !== undefined && suppliedThreadId !== archivedThreadId) {
+      if (!receiptIsProvisional && suppliedThreadId !== undefined && receiptThreadId !== undefined && suppliedThreadId !== receiptThreadId) {
         throw new ReviewPreparationError("The caller-supplied resume thread does not match the immutable archived submission receipt.", "resume_thread_mismatch");
       }
-      if (receiptIsProvisional
-        && archivedThreadId !== undefined
-        && !isProvisionalConversationId(archivedThreadId)
-        && suppliedThreadId !== undefined
-        && suppliedThreadId !== archivedThreadId) {
-        throw new ReviewPreparationError("The caller-supplied resume thread does not match the prompt-verified canonical thread checkpoint.", "resume_thread_mismatch");
+      if (receiptIsProvisional) {
+        const checkpointId = checkpoint?.current.id ?? conversationIdFromUrl(checkpoint?.current.url);
+        const candidateId = suppliedThreadId !== undefined && !isProvisionalConversationId(suppliedThreadId)
+          ? suppliedThreadId
+          : checkpointId !== undefined && !isProvisionalConversationId(checkpointId)
+            ? checkpointId
+            : undefined;
+        const recoveryTabId = checkpoint?.current.tabId ?? archivedSubmission.thread.tabId;
+        recoveryHint = {
+          ...(candidateId === undefined ? {} : { conversationId: candidateId }),
+          ...(candidateId !== undefined && suppliedUrlId === candidateId && threadUrl !== undefined
+            ? { url: threadUrl }
+            : candidateId !== undefined && checkpointId === candidateId && checkpoint?.current.url !== undefined
+              ? { url: checkpoint.current.url }
+              : {}),
+          ...(recoveryTabId === undefined ? {} : { tabId: recoveryTabId })
+        };
+        threadId = receiptThreadId;
+        threadUrl = archivedSubmission.thread.url;
+        affinity.routeId = receiptThreadId;
+      } else {
+        threadId = receiptThreadId ?? suppliedThreadId;
+        threadUrl = archivedSubmission.thread.url ?? threadUrl;
+        affinity.canonicalId = receiptThreadId;
+        affinity.routeId = receiptThreadId;
+        recoveryHint = archivedSubmission.thread.tabId === undefined ? undefined : { tabId: archivedSubmission.thread.tabId };
       }
-      const useSuppliedCanonicalTarget = receiptIsProvisional
-        && suppliedThreadId !== undefined
-        && !isProvisionalConversationId(suppliedThreadId);
-      threadId = useSuppliedCanonicalTarget ? suppliedThreadId : (archivedThreadId ?? suppliedThreadId);
-      threadUrl = useSuppliedCanonicalTarget
-        ? (suppliedUrlId === suppliedThreadId ? threadUrl : undefined)
-        : (archivedTarget.url ?? threadUrl);
       if (args.resume.artifactBaseline !== undefined
         && sha256Text(JSON.stringify(args.resume.artifactBaseline)) !== sha256Text(JSON.stringify(archivedSubmission.artifactBaseline))) {
         throw new ReviewPreparationError("resume.artifactBaseline does not match the immutable archived submission baseline.", "resume_artifact_baseline_mismatch");
       }
       artifactBaseline = archivedSubmission.artifactBaseline;
       recoveryQuery = checkpoint?.recoveryQuery ?? recoveryQueryFromPrepared(prepared);
-      submitted = true;
     }
 
-    const bootstrapTarget = (args.resume === undefined && args.thread === undefined) || isProvisionalConversationId(threadId)
+    const needsProvisionalRecovery = args.resume !== undefined
+      && (isProvisionalConversationId(threadId)
+        || (archivedSubmission !== undefined && archivedSubmission.state !== "confirmed" && affinity.canonicalId === undefined));
+    const archivedTabTarget = args.resume === undefined ? undefined : recoveryHint?.tabId;
+    const ordinaryBootstrapTarget = needsProvisionalRecovery
       ? undefined
-      : {
+      : (args.resume === undefined && args.thread === undefined)
+        ? undefined
+        : {
           ...(threadUrl === undefined ? {} : { url: threadUrl }),
           ...(threadId === undefined ? {} : { conversationId: threadId })
         };
-    requireOk(await runStep("PREFLIGHT_BROWSER", () => port.bootstrap(bootstrapTarget)), "PREFLIGHT_BROWSER");
+    const boot = requireOk(await runStep("PREFLIGHT_BROWSER", async () => {
+      const useRecoveryBootstrap = args.resume !== undefined
+        && (needsProvisionalRecovery || archivedTabTarget !== undefined)
+        && port.bootstrapRecovery !== undefined;
+      const first = makeExistingTabRetryResumable(
+        await (useRecoveryBootstrap
+          ? port.bootstrapRecovery!(archivedTabTarget === undefined ? undefined : { tabId: archivedTabTarget })
+          : port.bootstrap(ordinaryBootstrapTarget)),
+        args.resume !== undefined
+      );
+      if (first.ok && archivedTabTarget !== undefined && !needsProvisionalRecovery && affinity.canonicalId !== undefined) {
+        const claimed = await port.pageState().catch(() => undefined);
+        const claimedId = claimed?.conversationId ?? conversationIdFromUrl(claimed?.url);
+        if (claimedId !== affinity.canonicalId) {
+          return makeExistingTabRetryResumable(await port.bootstrap(ordinaryBootstrapTarget), true);
+        }
+      }
+      if (first.ok || archivedTabTarget === undefined || first.blocker?.code !== "existing_tab_not_found") return first;
+      return makeExistingTabRetryResumable(await port.bootstrap(ordinaryBootstrapTarget), true);
+    }), "PREFLIGHT_BROWSER");
+    affinity.invocationTabId = boot.context.tabId;
     requireOk(await runStep("OPEN_CHAT", () => port.openChat()), "OPEN_CHAT");
     if (args.resume === undefined) {
       const opened = requireData(await runStep("OPEN_CHAT", () => args.thread === undefined
@@ -254,18 +340,17 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           })), "OPEN_CHAT");
       threadUrl = opened.data.url || opened.context.url;
       threadId = opened.data.conversationId ?? opened.context.conversationId;
+      affinity.invocationTabId = opened.context.tabId ?? affinity.invocationTabId;
+      const openedThreadId = threadId ?? conversationIdFromUrl(threadUrl);
+      affinity.routeId = openedThreadId;
+      if (openedThreadId !== undefined && !isProvisionalConversationId(openedThreadId)) affinity.canonicalId = openedThreadId;
+      const openedPage = await establishConversationAffinity(port, affinity, "OPEN_CHAT", false);
+      threadUrl = openedPage.url ?? threadUrl;
+      threadId = affinity.canonicalId ?? affinity.routeId ?? threadId;
     } else {
-      const needsThreadRecovery = isProvisionalConversationId(threadId)
-        || (archivedSubmission !== undefined
-          && archivedSubmission.state !== "confirmed"
-          && threadId === undefined);
-      const visibleRecovery = needsThreadRecovery
-        ? await recoverCurrentVisibleThread(port, prepared!.prompt)
-        : undefined;
+      const needsThreadRecovery = needsProvisionalRecovery;
       const openResult = needsThreadRecovery
-        ? await runStep("RECOVER_THREAD", () => visibleRecovery === undefined
-            ? port.recoverThread(recoveryQuery!, prepared!.prompt)
-            : Promise.resolve(visibleRecovery))
+        ? await runStep("RECOVER_THREAD", () => port.recoverThread(recoveryQuery!, prepared!.prompt, recoveryHint))
         : await runStep("OPEN_CHAT", () => port.openThread({
             ...(threadId === undefined ? {} : { conversationId: threadId }),
             ...(threadUrl === undefined ? {} : { url: threadUrl })
@@ -279,9 +364,32 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         && openedThreadId !== expectedThreadId) {
         throw new ReviewPreparationError("The visible opened thread does not match the immutable submission receipt.", "resume_opened_thread_mismatch");
       }
-      threadUrl = opened.data.url || opened.context.url || threadUrl;
-      threadId = opened.data.conversationId ?? opened.context.conversationId;
+      const openedThreadUrl = opened.data.url || opened.context.url || threadUrl;
+      affinity.invocationTabId = opened.context.tabId ?? affinity.invocationTabId;
+      if (needsThreadRecovery) {
+        if (openedThreadId === undefined || isProvisionalConversationId(openedThreadId)) {
+          throw resumableConversationBlocker(
+            "resume_recovered_thread_not_canonical",
+            "The prompt-identical recovered Chat conversation did not expose a canonical conversation ID.",
+            "RECOVER_THREAD",
+            openedThreadUrl
+          );
+        }
+        // Adopt the recovered candidate only for this invocation before checking
+        // command provenance. Nothing is persisted until its prompt and turn
+        // evidence have also been verified below.
+        affinity.canonicalId = openedThreadId;
+        affinity.routeId = openedThreadId;
+        threadUrl = openedThreadUrl;
+        threadId = openedThreadId;
+        await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
+      } else {
+        threadUrl = openedThreadUrl;
+        threadId = openedThreadId;
+        await assertConversationAffinity(port, affinity, "OPEN_CHAT", true);
+      }
       const latestUser = requireData(await port.readLatestUser(), "POLL_METADATA");
+      assertCommandContextAffinity(latestUser.context, affinity, "RECOVER_THREAD", true);
       const observedUserSha256 = sha256Text(normalizeVisiblePrompt(latestUser.data.text));
       const visiblePromptProven = archivedSubmission?.userTurnSha256 !== undefined
         ? observedUserSha256 === archivedSubmission.userTurnSha256
@@ -305,8 +413,16 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         }
         throw new ReviewPreparationError(message, "resume_user_turn_mismatch");
       }
-      await persistThreadCheckpoint(archiveDirectory!, prepared!, threadUrl, threadId, port.now());
-      if (archivedSubmission !== undefined && archivedSubmission.state !== "confirmed" && archiveDirectory !== undefined) {
+      await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
+      const recoveryStatus = requireData(await port.messageStatus(), "POLL_METADATA");
+      assertCommandContextAffinity(recoveryStatus.context, affinity, "POLL_METADATA", true);
+      resumedMessageStatus = recoveryStatus.data;
+      assertSubmittedTurnOwnership(archivedSubmission, resumedMessageStatus, threadUrl);
+      await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
+      await persistThreadCheckpoint(archiveDirectory!, prepared!, threadUrl, threadId, affinity.invocationTabId, port.now());
+      const receiptNeedsConfirmation = archivedSubmission !== undefined
+        && (archivedSubmission.state !== "confirmed" || isProvisionalConversationId(expectedThreadId));
+      if (archivedSubmission !== undefined && receiptNeedsConfirmation && archiveDirectory !== undefined) {
         await writeImmutableJson(join(archiveDirectory, "submission-confirmation.json"), {
           schemaVersion: archivedSubmission.schemaVersion === 3 ? 3 : 2,
           state: "confirmed",
@@ -315,7 +431,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           submittedAt: port.now().toISOString(),
           promptSha256: sha256Text(normalizePrompt(prepared!.prompt)),
           userTurnSha256: sha256Text(normalizeVisiblePrompt(prepared!.prompt)),
-          thread: { url: threadUrl, id: threadId },
+          thread: { url: threadUrl, id: threadId, ...(affinity.invocationTabId === undefined ? {} : { tabId: affinity.invocationTabId }) },
           baselineTurnCount: archivedSubmission.baselineTurnCount,
           baselineAssistantCount: archivedSubmission.baselineAssistantCount,
           artifactBaseline: archivedSubmission.artifactBaseline,
@@ -327,11 +443,15 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           state: "confirmed",
           submitted: true,
           userTurnSha256: observedUserSha256,
-          thread: { ...(threadUrl === undefined ? {} : { url: threadUrl }), ...(threadId === undefined ? {} : { id: threadId }) }
+          thread: {
+            ...(threadUrl === undefined ? {} : { url: threadUrl }),
+            ...(threadId === undefined ? {} : { id: threadId }),
+            ...(affinity.invocationTabId === undefined ? {} : { tabId: affinity.invocationTabId })
+          }
         };
       }
     }
-    await assertPageSafe(port, "PREFLIGHT_BROWSER");
+    await assertConversationAffinity(port, affinity, "PREFLIGHT_BROWSER", args.resume !== undefined);
 
     if (args.resume !== undefined && archiveDirectory !== undefined && configurationBefore === undefined) {
       try {
@@ -378,7 +498,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     verifiedBeforeSubmit = appliedData.verified && configurationMatchesSelection(appliedData.after, { intelligence: "Pro" });
     if (!verifiedBeforeSubmit) throw workflowBlocker("model_fallback", "pro_precondition_unverified", "The visible Chat setting did not strictly verify Pro before submission.", "VERIFY_PRO_BEFORE_SUBMIT");
     await runStep("VERIFY_PRO_BEFORE_SUBMIT", async () => {
-      await assertPageSafe(port, "VERIFY_PRO_BEFORE_SUBMIT");
+      await assertConversationAffinity(port, affinity, "VERIFY_PRO_BEFORE_SUBMIT", args.resume !== undefined);
       return { verified: true, active: appliedData.after.active };
     });
 
@@ -395,12 +515,15 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     if (args.resume === undefined) {
       if (prepared!.mode === "review-packets") {
         const attachments = [prepared!.uploadManifestPath, ...prepared!.packetPaths];
+        await assertConversationAffinity(port, affinity, "ATTACH_PACKETS", false);
         requireOk(await runStep("ATTACH_PACKETS", () => port.attach(attachments)), "ATTACH_PACKETS");
       }
+      await assertConversationAffinity(port, affinity, "SUBMIT_ONCE", false);
       const beforeMessage = requireData(await port.messageStatus(), "SUBMIT_ONCE");
       baselineAssistantCount = beforeMessage.data.assistantTurnCount;
+      await assertConversationAffinity(port, affinity, "SUBMIT_ONCE", false);
       requireOk(await port.compose(prepared!.prompt), "SUBMIT_ONCE");
-      await assertPageSafe(port, "VERIFY_PRO_BEFORE_SUBMIT");
+      await assertConversationAffinity(port, affinity, "VERIFY_PRO_BEFORE_SUBMIT", false);
       const submissionIntegrity = archiveDirectory === undefined
         ? undefined
         : await createSubmissionIntegrity(prepared!, archiveDirectory, configurationBefore!, artifactBaseline!);
@@ -411,8 +534,12 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           resubmitAllowed: false,
           createdAt: port.now().toISOString(),
           promptSha256: sha256Text(normalizePrompt(prepared!.prompt)),
-          thread: { url: threadUrl, id: threadId },
-          baselineTurnCount: beforeMessage.data.turnCount,
+          thread: {
+            ...(threadUrl === undefined ? {} : { url: threadUrl }),
+            ...(threadId === undefined ? {} : { id: threadId }),
+            ...(affinity.invocationTabId === undefined ? {} : { tabId: affinity.invocationTabId })
+          },
+          ...(beforeMessage.data.turnCount === undefined ? {} : { baselineTurnCount: beforeMessage.data.turnCount }),
           baselineAssistantCount,
           artifactBaseline,
           ...submissionIntegrity
@@ -426,16 +553,10 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       } catch (error) {
         submitError = error;
       }
-      threadUrl = submitResult?.context.url ?? threadUrl;
-      threadId = submitResult?.context.conversationId ?? threadId;
       const afterMessage = await port.messageStatus().catch(() => undefined);
       const latestUser = await port.readLatestUser().catch(() => undefined);
       const visiblePage = await port.pageState().catch(() => undefined);
       const visibleConversationId = visiblePage?.conversationId ?? conversationIdFromUrl(visiblePage?.url);
-      if (visiblePage !== undefined && visibleConversationId !== undefined && !isProvisionalConversationId(visibleConversationId)) {
-        threadUrl = visiblePage.url;
-        threadId = visibleConversationId;
-      }
       const latestUserText = latestUser?.ok === true ? latestUser.data?.text : undefined;
       const exactUserTurn = latestUserText !== undefined
         && visibleUserTurnContainsExactPrompt(latestUserText, prepared!.prompt);
@@ -446,10 +567,50 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         || afterMessage.data?.generationActive === true
       );
       const submitReported = submitResult?.ok === true && submitResult.data?.submitted === true;
-      const submissionState = exactUserTurn ? "confirmed" : (submitReported || pageAdvanced ? "ambiguous" : "failed");
+      const submitConversationId = submitResult?.context.conversationId ?? conversationIdFromUrl(submitResult?.context.url);
+      const candidateOnBoundTab = visiblePage?.tabId === undefined
+        || affinity.invocationTabId === undefined
+        || visiblePage.tabId === affinity.invocationTabId;
+      const canonicalTransitionProven = exactUserTurn
+        && candidateOnBoundTab
+        && (pageAdvanced || submitReported)
+        && (submitConversationId === undefined
+          || submitConversationId === affinity.routeId
+          || submitConversationId === visibleConversationId);
+      const preSubmitRouteId = affinity.routeId;
+      if (canonicalTransitionProven
+        && affinity.canonicalId === undefined
+        && visibleConversationId !== undefined
+        && !isProvisionalConversationId(visibleConversationId)) {
+        affinity.canonicalId = visibleConversationId;
+        affinity.routeId = visibleConversationId;
+        threadId = visibleConversationId;
+        threadUrl = visiblePage?.url ?? threadUrl;
+      }
+      let postSubmitAffinityError: unknown;
+      try {
+        const acceptedProvisionalContext = canonicalTransitionProven
+          && isProvisionalConversationId(preSubmitRouteId)
+          && submitConversationId === preSubmitRouteId;
+        if (submitResult !== undefined) {
+          assertCommandContextAffinity(
+            submitResult.context,
+            affinity,
+            "SUBMIT_ONCE",
+            true,
+            acceptedProvisionalContext ? preSubmitRouteId : undefined
+          );
+        }
+        await assertConversationAffinity(port, affinity, "SUBMIT_ONCE", true);
+      } catch (error) {
+        postSubmitAffinityError = error;
+      }
+      const submissionState = postSubmitAffinityError === undefined && exactUserTurn
+        ? "confirmed"
+        : (submitReported || pageAdvanced || postSubmitAffinityError !== undefined ? "ambiguous" : "failed");
       submitted = submissionState !== "failed";
       if (archiveDirectory !== undefined) {
-        await writeImmutableJson(join(archiveDirectory, "submission.json"), {
+        const archivedSubmissionRecord: ArchivedSubmission = {
           schemaVersion: 3,
           state: submissionState,
           submitted,
@@ -457,15 +618,22 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           submittedAt: port.now().toISOString(),
           promptSha256: sha256Text(normalizePrompt(prepared!.prompt)),
           ...(exactUserTurn ? { userTurnSha256: sha256Text(normalizeVisiblePrompt(prepared!.prompt)) } : {}),
-          thread: { url: threadUrl, id: threadId },
-          baselineTurnCount: beforeMessage.data.turnCount,
+          thread: {
+            ...(threadUrl === undefined ? {} : { url: threadUrl }),
+            ...(threadId === undefined ? {} : { id: threadId }),
+            ...(affinity.invocationTabId === undefined ? {} : { tabId: affinity.invocationTabId })
+          },
+          ...(beforeMessage.data.turnCount === undefined ? {} : { baselineTurnCount: beforeMessage.data.turnCount }),
           baselineAssistantCount,
           artifactBaseline,
           ...submissionIntegrity,
           result: redactReportValue(submitResult ?? { error: submitError instanceof Error ? { name: submitError.name, message: submitError.message } : String(submitError) })
-        });
-        await persistThreadCheckpoint(archiveDirectory, prepared!, threadUrl, threadId, port.now());
+        };
+        await writeImmutableJson(join(archiveDirectory, "submission.json"), archivedSubmissionRecord);
+        archivedSubmission = archivedSubmissionRecord;
+        await persistThreadCheckpoint(archiveDirectory, prepared!, threadUrl, threadId, affinity.invocationTabId, port.now());
       }
+      if (postSubmitAffinityError !== undefined) throw postSubmitAffinityError;
       if (submissionState !== "confirmed") {
         if (submissionState === "ambiguous") {
           warnings.push("Chat advanced after the single submit attempt, but the exact rendered user turn is not yet provable. Resume this archive to reconcile the visible prompt; do not resend it.");
@@ -482,14 +650,16 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         warnings.push(`Submit transport reported an error after the exact visible user turn was confirmed: ${submitError instanceof Error ? submitError.message : String(submitError)}`);
       }
     } else {
-      const current = requireData(await port.messageStatus(), "POLL_METADATA");
+      const current = resumedMessageStatus === undefined
+        ? requireData(await port.messageStatus(), "POLL_METADATA").data
+        : resumedMessageStatus;
       // A resumed review owns a fresh one-prompt thread. Poll the already-visible
       // latest assistant turn even when the cheap status probe calls it
       // "partial"; the bounded metadata wait is responsible for confirming
       // response actions, text stability, and inactive generation. Using the
       // full assistant count here waits for a nonexistent duplicate response.
       baselineAssistantCount = archivedSubmission?.baselineAssistantCount
-        ?? Math.max(0, current.data.assistantTurnCount - (current.data.assistantTurnCount > 0 ? 1 : 0));
+        ?? Math.max(0, current.assistantTurnCount - (current.assistantTurnCount > 0 ? 1 : 0));
     }
 
     const callTimeoutMs = positive(args.polling?.callTimeoutMs, 20_000);
@@ -503,13 +673,13 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     let complete = false;
     for (let call = 0; call < maxCalls; call += 1) {
       const wait = await runStep("POLL_METADATA", () => port.waitMetadata(baselineAssistantCount, callTimeoutMs, stableMs, pollMs));
-      const polledThreadId = wait.context.conversationId ?? conversationIdFromUrl(wait.context.url);
-      if (polledThreadId !== undefined) {
-        threadUrl = wait.context.url ?? threadUrl;
-        threadId = polledThreadId;
+      assertCommandContextAffinity(wait.context, affinity, "POLL_METADATA", true);
+      const polledPage = await assertConversationAffinity(port, affinity, "POLL_METADATA", true);
+      threadUrl = polledPage.url ?? threadUrl;
+      threadId = affinity.canonicalId ?? affinity.routeId ?? threadId;
+      if (archiveDirectory !== undefined) {
+        await persistThreadCheckpoint(archiveDirectory, prepared!, threadUrl, threadId, affinity.invocationTabId, port.now());
       }
-      if (archiveDirectory !== undefined) await persistThreadCheckpoint(archiveDirectory, prepared!, threadUrl, threadId, port.now());
-      await assertPageSafe(port, "POLL_METADATA");
       if (wait.ok && wait.data?.complete === true) {
         complete = true;
         break;
@@ -526,6 +696,21 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     }
     if (!complete) throw new ReviewInProgress();
 
+    if (submitted) {
+      const finalOwnership = requireData(await port.messageStatus(), "READ_FULL_MARKDOWN_ONCE").data;
+      assertSubmittedTurnOwnership(archivedSubmission, finalOwnership, threadUrl);
+    }
+    await assertConversationAffinity(port, affinity, "READ_FULL_MARKDOWN_ONCE", true);
+    const finalUser = requireData(await port.readLatestUser(), "READ_FULL_MARKDOWN_ONCE");
+    if (!visibleUserTurnContainsExactPrompt(finalUser.data.text, prepared!.prompt)) {
+      throw resumableConversationBlocker(
+        "conversation_prompt_affinity_lost",
+        "The latest visible user turn no longer matches the archived submitted prompt. The response and artifacts were not read.",
+        "READ_FULL_MARKDOWN_ONCE",
+        threadUrl
+      );
+    }
+
     const archivedResponse = archiveDirectory === undefined
       ? undefined
       : await readFile(join(archiveDirectory, "response.md"), "utf8").catch(() => undefined);
@@ -541,20 +726,28 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         data: { bytes: Buffer.byteLength(responseMarkdown), sha256: responseSha256 }
       });
     } else {
+      await assertConversationAffinity(port, affinity, "READ_FULL_MARKDOWN_ONCE", true);
       const read = requireData(await runStep("READ_FULL_MARKDOWN_ONCE", () => port.readFullMarkdown()), "READ_FULL_MARKDOWN_ONCE");
+      await assertConversationAffinity(port, affinity, "READ_FULL_MARKDOWN_ONCE", true);
       responseMarkdown = read.data.markdown ?? read.data.text;
       responseSha256 = sha256Text(responseMarkdown);
+      if (submitted) {
+        const postReadOwnership = requireData(await port.messageStatus(), "READ_FULL_MARKDOWN_ONCE").data;
+        assertSubmittedTurnOwnership(archivedSubmission, postReadOwnership, threadUrl);
+      }
       if (archiveDirectory !== undefined) await writeImmutableFile(join(archiveDirectory, "response.md"), responseMarkdown);
     }
 
+    await assertConversationAffinity(port, affinity, "VERIFY_PRO_AFTER_COMPLETION", true);
     const after = requireData(await runStep("VERIFY_PRO_AFTER_COMPLETION", () => port.inspectConfiguration()), "VERIFY_PRO_AFTER_COMPLETION");
-    await assertPageSafe(port, "VERIFY_PRO_AFTER_COMPLETION");
+    await assertConversationAffinity(port, affinity, "VERIFY_PRO_AFTER_COMPLETION", true);
     verifiedAfterCompletion = after.data.verified && configurationMatchesSelection(after.data, { intelligence: "Pro" });
     if (!verifiedAfterCompletion) throw workflowBlocker("model_fallback", "pro_postcondition_unverified", "The visible Chat setting no longer strictly verifies Pro after completion; the response is archived but is not accepted as a verified Pro review.", "VERIFY_PRO_AFTER_COMPLETION");
 
     const finalizedArtifacts = archiveDirectory === undefined
       ? undefined
       : await readFinalizedArtifactManifest(archiveDirectory);
+    await assertConversationAffinity(port, affinity, "ENUMERATE_NEW_ARTIFACTS", true);
     const delta = finalizedArtifacts === undefined
       ? requireData(await runStep("ENUMERATE_NEW_ARTIFACTS", () => port.artifactDelta(artifactBaseline!)), "ENUMERATE_NEW_ARTIFACTS").data
       : await runStep("ENUMERATE_NEW_ARTIFACTS", async () => ({
@@ -563,6 +756,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           added: [],
           finalizedArchive: true
         }));
+    await assertConversationAffinity(port, affinity, "ENUMERATE_NEW_ARTIFACTS", true);
     if (finalizedArtifacts !== undefined) {
       artifacts.push(...finalizedArtifacts);
       await runStep("DOWNLOAD_AND_HASH_ARTIFACTS", async () => ({
@@ -574,6 +768,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     } else if ((args.output?.downloadArtifacts ?? "all") === "all" && archiveDirectory !== undefined) {
       const artifactArchiveDirectory = archiveDirectory;
       await runStep("DOWNLOAD_AND_HASH_ARTIFACTS", async () => {
+        await assertConversationAffinity(port, affinity, "DOWNLOAD_AND_HASH_ARTIFACTS", true);
         const staging = await mkdtemp(join(tmpdir(), "chatgpt-pro-review-artifacts-"));
         const checkpointArtifacts = await readArtifactDownloadCheckpoint(artifactArchiveDirectory);
         artifacts.push(...checkpointArtifacts);
@@ -581,6 +776,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         const used = new Set(checkpointArtifacts.map(artifact => artifact.name.toLocaleLowerCase()));
         try {
           for (const item of delta.added) {
+            await assertConversationAffinity(port, affinity, "DOWNLOAD_AND_HASH_ARTIFACTS", true);
             if (artifacts.some(artifact => artifactMatchesInventoryItem(artifact, item))) continue;
             let downloaded: CommandResult<DownloadedFile>;
             let desiredName: string;
@@ -615,6 +811,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         } finally {
           await rm(staging, { recursive: true, force: true });
         }
+        await assertConversationAffinity(port, affinity, "DOWNLOAD_AND_HASH_ARTIFACTS", true);
         return { downloaded: artifacts.length - checkpointCount, reused: checkpointCount, total: artifacts.length };
       });
     } else if (delta.added.length > 0) {
@@ -625,6 +822,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       const completedArchiveDirectory = archiveDirectory;
       const archivedResponse = responseMarkdown;
       await runStep("ARCHIVE_RUN", async () => {
+        await assertConversationAffinity(port, affinity, "ARCHIVE_RUN", true);
         await writeImmutableJson(join(completedArchiveDirectory, "artifacts", "manifest.json"), artifacts);
         return { responseSha256, responseBytes: Buffer.byteLength(archivedResponse), artifacts: artifacts.length };
       });
@@ -645,6 +843,11 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       terminalStatus = "in_progress";
     } else if (error instanceof ReviewPreparationError) {
       archiveDirectory = error.archiveDirectory ?? archiveDirectory;
+      if (archivedSubmission !== undefined) {
+        submitted = archivedSubmission.submitted;
+        threadUrl = archivedSubmission.thread.url ?? threadUrl;
+        threadId = archivedSubmission.thread.id ?? conversationIdFromUrl(archivedSubmission.thread.url) ?? threadId;
+      }
       terminalStatus = "blocked";
       blocker = {
         kind: error.code.includes("configuration_snapshot")
@@ -652,7 +855,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           : "unknown",
         code: error.code,
         message: error.message,
-        resumable: error.code === "review_archive_locked"
+        resumable: isCorrectableResumePreparationError(error.code)
       };
     } else if (error instanceof ReviewWorkflowError) {
       terminalStatus = error.result.status === "blocked" || error.result.status === "needs_confirmation" ? "blocked" : "failed";
@@ -663,7 +866,10 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       warnings.push(error instanceof Error ? error.message : String(error));
     }
   } finally {
-    if (terminalStatus !== "in_progress" && configurationBefore !== undefined && args.safeguards?.restorePreviousConfiguration === true) {
+    if (!terminalOutcomeAlreadyFinal
+      && terminalStatus !== "in_progress"
+      && configurationBefore !== undefined
+      && args.safeguards?.restorePreviousConfiguration === true) {
       try {
         const restore = await runStep("RESTORE_PREVIOUS_CONFIGURATION", () => port.restoreConfiguration(configurationBefore!));
         restored = restore.data?.restored === true;
@@ -771,6 +977,9 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         primaryError: primaryError instanceof Error ? { name: primaryError.name, message: primaryError.message } : undefined
       };
       try {
+        await writeJsonReplacing(join(archiveDirectory, "configuration.json"), configurationRecord);
+        await writeJsonReplacing(join(archiveDirectory, "run-report.redacted.json"), redactReportValue(receipt));
+        await writeJsonReplacing(join(archiveDirectory, "receipt.json"), receipt);
         if (result.blocker?.resumable === false && result.status !== "in_progress") {
           const terminalOutcome: ArchivedTerminalOutcome = {
             schemaVersion: 1,
@@ -788,9 +997,6 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           };
           await writeImmutableJson(join(archiveDirectory, "terminal-outcome.json"), terminalOutcome);
         }
-        await writeJsonReplacing(join(archiveDirectory, "configuration.json"), configurationRecord);
-        await writeJsonReplacing(join(archiveDirectory, "run-report.redacted.json"), redactReportValue(receipt));
-        await writeJsonReplacing(join(archiveDirectory, "receipt.json"), receipt);
       } catch (error) {
         const message = `Required terminal provenance could not be committed: ${error instanceof Error ? error.message : String(error)}`;
         result.ok = false;
@@ -802,6 +1008,25 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           message,
           resumable: false
         };
+        const archiveCommitFailure: ArchivedTerminalOutcome = {
+          schemaVersion: 1,
+          finalizedAt: port.now().toISOString(),
+          status: "failed",
+          ok: false,
+          submitted: result.submitted,
+          resubmitAllowed: false,
+          blocker: result.blocker,
+          warnings: result.warnings,
+          ...(result.thread === undefined ? {} : { thread: result.thread }),
+          ...(responseMarkdown === undefined || responseSha256 === undefined
+            ? {}
+            : { response: { bytes: Buffer.byteLength(responseMarkdown), sha256: responseSha256 } })
+        };
+        try {
+          await writeImmutableJson(join(archiveDirectory, "archive-commit-failure.json"), archiveCommitFailure);
+        } catch (markerError) {
+          result.warnings.push(`The authoritative archive commit failure marker could not be written: ${markerError instanceof Error ? markerError.message : String(markerError)}`);
+        }
       }
     }
     steps.push({ state: "RETURN_FULL_RESULT", startedAt: port.now().toISOString(), endedAt: port.now().toISOString(), ok: result.ok, status: result.status });
@@ -815,28 +1040,41 @@ export function defaultReviewWorkflowPort(env: RuntimeEnv): ReviewWorkflowPort {
   return {
     now: () => env.now?.() ?? new Date(),
     bootstrap: target => bootstrap(env, target === undefined
-      ? { preferExistingTab: true }
-      : {
+        ? { preferExistingTab: true }
+        : {
           existingTab: {
             target: target.conversationId === undefined
               ? { type: "url", url: target.url! }
               : { type: "conversationId", conversationId: target.conversationId },
             ifMissing: "open",
-            ifMultiple: "first",
+            ifMultiple: "block",
             requireChatGPT: true
           }
+        }),
+    bootstrapRecovery: target => bootstrap(env, target?.tabId === undefined
+      ? { preferExistingTab: false }
+      : {
+          existingTab: {
+            target: { type: "tabId", tabId: target.tabId },
+            ifMissing: "block",
+            ifMultiple: "block",
+            requireChatGPT: true
+          },
+          preferExistingTab: false
         }),
     openChat: () => openExperience(env, { experience: "chat" }),
     newThread: () => newThread(env),
     openThread: target => openThread(env, { ...target, timeoutMs: 12_000 }),
-    recoverThread: (query, expectedPrompt) => recoverReviewThread(env, query, expectedPrompt),
+    recoverThread: (query, expectedPrompt, preferred) => recoverReviewThread(env, query, expectedPrompt, preferred),
     snapshotConfiguration: () => snapshotConfiguration(env, { experience: "chat" }),
     applyPro: () => applyConfiguration(env, { experience: "chat", desired: { intelligence: "Pro" }, strict: true }),
     inspectConfiguration: () => inspectConfiguration(env, { experience: "chat", includeOptions: false }),
     restoreConfiguration: snapshot => restoreConfiguration(env, { snapshot, strict: true }),
     pageState: async () => {
       if (env.page === undefined) throw new Error("No visible ChatGPT page is attached.");
-      return readPageState(env.page);
+      const state = await readPageState(env.page);
+      const tabId = tabIdFromPage(env.page);
+      return tabId === undefined ? state : { ...state, tabId };
     },
     artifactBaseline: () => captureArtifactBaseline(env),
     artifactDelta: baseline => captureArtifactDelta(env, { baseline }),
@@ -878,6 +1116,173 @@ async function assertPageSafe(port: ReviewWorkflowPort, state: ReviewState): Pro
       context: { timestamp: port.now().toISOString(), url: page.url }
     }, state);
   }
+}
+
+async function assertConversationAffinity(
+  port: ReviewWorkflowPort,
+  affinity: ConversationAffinity,
+  state: ReviewState,
+  resumable: boolean
+): Promise<PageState & { tabId?: string }> {
+  const page = await port.pageState();
+  return assertConversationAffinityAgainstPage(port, affinity, state, resumable, page);
+}
+
+async function establishConversationAffinity(
+  port: ReviewWorkflowPort,
+  affinity: ConversationAffinity,
+  state: ReviewState,
+  resumable: boolean
+): Promise<PageState & { tabId?: string }> {
+  const page = await port.pageState();
+  const observedId = page.conversationId ?? conversationIdFromUrl(page.url);
+  if (affinity.invocationTabId === undefined && page.tabId !== undefined) affinity.invocationTabId = page.tabId;
+  if (affinity.routeId === undefined && observedId !== undefined) {
+    affinity.routeId = observedId;
+    if (!isProvisionalConversationId(observedId)) affinity.canonicalId = observedId;
+  }
+  return assertConversationAffinityAgainstPage(port, affinity, state, resumable, page);
+}
+
+function assertConversationAffinityAgainstPage(
+  port: ReviewWorkflowPort,
+  affinity: ConversationAffinity,
+  state: ReviewState,
+  resumable: boolean,
+  page: PageState & { tabId?: string }
+): PageState & { tabId?: string } {
+  if (page.blocker !== undefined && page.blocker.kind !== "modal") {
+    throw new ReviewWorkflowError({
+      ok: false,
+      status: "blocked",
+      warnings: [],
+      blocker: { ...page.blocker, resumable: page.blocker.kind !== "model_fallback" && page.blocker.kind !== "model_unavailable" },
+      context: { timestamp: port.now().toISOString(), url: page.url, ...(page.tabId === undefined ? {} : { tabId: page.tabId }) }
+    }, state);
+  }
+  const observedId = page.conversationId ?? conversationIdFromUrl(page.url);
+  const expectedId = affinity.canonicalId ?? affinity.routeId;
+  if (expectedId !== undefined && observedId !== expectedId) {
+    throw conversationAffinityBlocker(
+      "conversation_binding_lost",
+      `The visible Chat conversation changed from ${expectedId} to ${observedId ?? "an unverifiable target"}. The archived conversation binding was not changed.`,
+      state,
+      resumable,
+      page
+    );
+  }
+  if (expectedId === undefined && observedId !== undefined) {
+    throw conversationAffinityBlocker(
+      "conversation_binding_lost",
+      `The visible Chat conversation changed to ${observedId} before the workflow could prove that it contains the archived submitted prompt.`,
+      state,
+      resumable,
+      page
+    );
+  }
+  if (affinity.invocationTabId !== undefined && page.tabId !== undefined && page.tabId !== affinity.invocationTabId) {
+    throw conversationAffinityBlocker(
+      "conversation_tab_affinity_lost",
+      `The workflow moved from bound browser tab ${affinity.invocationTabId} to ${page.tabId}.`,
+      state,
+      resumable,
+      page
+    );
+  }
+  return page;
+}
+
+function conversationAffinityBlocker(
+  code: string,
+  message: string,
+  state: ReviewState,
+  resumable: boolean,
+  page?: { url?: string; tabId?: string }
+): ReviewWorkflowError {
+  return new ReviewWorkflowError({
+    ok: false,
+    status: "blocked",
+    warnings: [],
+    blocker: {
+      kind: "selector_drift",
+      code,
+      message,
+      resumable
+    },
+    context: {
+      timestamp: new Date().toISOString(),
+      ...(page?.url === undefined ? {} : { url: page.url }),
+      ...(page?.tabId === undefined ? {} : { tabId: page.tabId })
+    }
+  }, state);
+}
+
+function assertCommandContextAffinity(
+  context: { url?: string; conversationId?: string; tabId?: string },
+  affinity: ConversationAffinity,
+  state: ReviewState,
+  resumable: boolean,
+  allowedConversationId?: string
+): void {
+  const observedId = context.conversationId ?? conversationIdFromUrl(context.url);
+  const expectedId = affinity.canonicalId ?? affinity.routeId;
+  if (observedId !== undefined
+    && expectedId !== undefined
+    && observedId !== expectedId
+    && observedId !== allowedConversationId) {
+    throw conversationAffinityBlocker(
+      "conversation_binding_lost",
+      `The ${state} result came from Chat conversation ${observedId}, but this invocation is immutably bound to ${expectedId}.`,
+      state,
+      resumable,
+      context
+    );
+  }
+  if (context.tabId !== undefined && affinity.invocationTabId !== undefined && context.tabId !== affinity.invocationTabId) {
+    throw conversationAffinityBlocker(
+      "conversation_tab_affinity_lost",
+      `The ${state} result came from browser tab ${context.tabId}, but this invocation is immutably bound to ${affinity.invocationTabId}.`,
+      state,
+      resumable,
+      context
+    );
+  }
+}
+
+function resumableConversationBlocker(code: string, message: string, state: ReviewState, url?: string): ReviewWorkflowError {
+  return conversationAffinityBlocker(code, message, state, true, url === undefined ? undefined : { url });
+}
+
+function isCorrectableResumePreparationError(code: string): boolean {
+  return code === "review_archive_locked"
+    || code === "resume_thread_mismatch"
+    || code === "resume_artifact_baseline_mismatch"
+    || code === "resume_opened_thread_mismatch"
+    || code === "resume_user_turn_mismatch";
+}
+
+function assertSubmittedTurnOwnership(
+  submission: ArchivedSubmission | undefined,
+  current: MessageStatusData,
+  url: string | undefined
+): void {
+  if (submission === undefined) return;
+  const laterAssistantCycle = typeof submission.baselineAssistantCount === "number"
+    && Number.isInteger(submission.baselineAssistantCount)
+    && Number.isInteger(current.assistantTurnCount)
+    && current.assistantTurnCount > submission.baselineAssistantCount + 1;
+  const laterTurnCycle = typeof submission.baselineTurnCount === "number"
+    && typeof current.turnCount === "number"
+    && Number.isInteger(submission.baselineTurnCount)
+    && Number.isInteger(current.turnCount)
+    && current.turnCount > submission.baselineTurnCount + 2;
+  if (!laterAssistantCycle && !laterTurnCycle) return;
+  throw resumableConversationBlocker(
+    "resume_conversation_turn_ambiguous",
+    "The recovered conversation contains another user/assistant cycle after the archived one-shot submission. Even though the latest user text may be identical, response ownership is ambiguous and no response or artifacts were accepted.",
+    "POLL_METADATA",
+    url
+  );
 }
 
 function requireOk<T>(result: CommandResult<T>, state: ReviewState): CommandResult<T> {
@@ -992,7 +1397,8 @@ type ArchivedSubmission = {
   submitted: boolean;
   resubmitAllowed: false;
   schemaVersion?: 1 | 2 | 3;
-  state: "confirmed" | "intent" | "ambiguous";
+  state: "confirmed" | "intent" | "ambiguous" | "failed";
+  submittedAt?: string;
   promptSha256?: string;
   manifestSha256?: string;
   uploadManifestSha256?: string;
@@ -1002,8 +1408,9 @@ type ArchivedSubmission = {
   userTurnSha256?: string;
   baselineTurnCount?: number;
   baselineAssistantCount?: number;
-  thread: { url?: string; id?: string };
+  thread: { url?: string; id?: string; tabId?: string };
   artifactBaseline: ArtifactInventoryData;
+  result?: unknown;
 };
 
 type ArchivedTerminalOutcome = {
@@ -1021,7 +1428,7 @@ type ArchivedTerminalOutcome = {
 
 type ThreadCheckpoint = {
   schemaVersion: 1;
-  current: { url?: string; id?: string };
+  current: { url?: string; id?: string; tabId?: string };
   recoveryQuery: string;
   promptSha256: string;
   updatedAt: string;
@@ -1038,7 +1445,12 @@ async function readArchivedSubmission(archiveDirectory: string, prepared: Prepar
   const state = intentOnly ? "intent" : (value.state ?? "confirmed");
   if (value.resubmitAllowed !== false
     || ((state === "confirmed" || state === "ambiguous") && value.submitted !== true)
-    || (state !== "confirmed" && state !== "intent" && state !== "ambiguous")) {
+    || ((state === "intent" || state === "failed") && value.submitted === true)
+    || (state !== "confirmed" && state !== "intent" && state !== "ambiguous" && state !== "failed")
+    || !isRecord(value.thread)
+    || (value.thread.url !== undefined && typeof value.thread.url !== "string")
+    || (value.thread.id !== undefined && typeof value.thread.id !== "string")
+    || (value.thread.tabId !== undefined && typeof value.thread.tabId !== "string")) {
     throw new ReviewPreparationError("The archived submission receipt does not prove a submit-once, non-resubmittable review.", "resume_submission_unverified");
   }
   const expectedPromptSha256 = sha256Text(normalizePrompt(prepared.prompt));
@@ -1068,7 +1480,14 @@ async function readArchivedSubmission(archiveDirectory: string, prepared: Prepar
       throw new ReviewPreparationError("The immutable submission receipt no longer matches the archived prompt, packet set, manifest, configuration snapshot, or artifact baseline.", "resume_submission_integrity_mismatch");
     }
   }
-  return { ...value, state, submitted: state !== "intent" } as ArchivedSubmission;
+  return { ...value, state, submitted: state === "confirmed" || state === "ambiguous" } as ArchivedSubmission;
+}
+
+async function archivedSubmissionRecordExists(archiveDirectory: string): Promise<boolean> {
+  for (const name of ["submission-confirmation.json", "submission.json", "submission-intent.json"]) {
+    if (await stat(join(archiveDirectory, name)).then(entry => entry.isFile()).catch(() => false)) return true;
+  }
+  return false;
 }
 
 async function createSubmissionIntegrity(
@@ -1109,8 +1528,86 @@ function submissionIntegrityFields(value: Partial<ArchivedSubmission>): Partial<
 }
 
 async function readArchivedTerminalOutcome(archiveDirectory: string): Promise<ArchivedTerminalOutcome | undefined> {
-  const value = await readOptionalJson(join(archiveDirectory, "terminal-outcome.json"));
+  const value = await readArchivedTerminalMarker(
+    join(archiveDirectory, "terminal-outcome.json"),
+    "resume_terminal_outcome_invalid",
+    "terminal outcome"
+  );
   if (value === undefined) return undefined;
+  const outcome = validateArchivedTerminalOutcome(value, "resume_terminal_outcome_invalid");
+  if (outcome.blocker.resumable !== false) {
+    throw new ReviewPreparationError("The archived terminal outcome is resumable and therefore cannot be authoritative.", "resume_terminal_outcome_invalid");
+  }
+  return outcome;
+}
+
+async function readArchivedCommitFailure(archiveDirectory: string): Promise<ArchivedTerminalOutcome | undefined> {
+  const value = await readArchivedTerminalMarker(
+    join(archiveDirectory, "archive-commit-failure.json"),
+    "resume_archive_commit_failure_invalid",
+    "archive commit failure"
+  );
+  if (value === undefined) return undefined;
+  const outcome = validateArchivedTerminalOutcome(value, "resume_archive_commit_failure_invalid");
+  if (outcome.status !== "failed"
+    || outcome.ok !== false
+    || outcome.blocker.code !== "archive_terminal_commit_failed"
+    || outcome.blocker.resumable !== false) {
+    throw new ReviewPreparationError("The archived terminal provenance commit failure marker is invalid.", "resume_archive_commit_failure_invalid");
+  }
+  return outcome;
+}
+
+async function readArchivedTerminalMarker(
+  path: string,
+  invalidCode: "resume_terminal_outcome_invalid" | "resume_archive_commit_failure_invalid",
+  label: string
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    return await readOptionalJson(path);
+  } catch (error) {
+    throw new ReviewPreparationError(
+      `The archived ${label} marker is unreadable or invalid JSON. ${error instanceof Error ? error.message : String(error)}`,
+      invalidCode
+    );
+  }
+}
+
+async function validateArchivedTerminalBinding(
+  archiveDirectory: string,
+  outcome: ArchivedTerminalOutcome,
+  submission: ArchivedSubmission | undefined
+): Promise<void> {
+  const invalidCode = outcome.blocker.code === "archive_terminal_commit_failed"
+    ? "resume_archive_commit_failure_invalid"
+    : "resume_terminal_outcome_invalid";
+  const submittedId = submission?.thread.id ?? conversationIdFromUrl(submission?.thread.url);
+  const outcomeId = outcome.thread?.id ?? conversationIdFromUrl(outcome.thread?.url);
+  if ((submission === undefined && outcome.submitted)
+    || (submission !== undefined && outcome.submitted !== submission.submitted)
+    || (submission !== undefined && submittedId !== undefined && outcomeId !== submittedId)) {
+    throw new ReviewPreparationError(
+      "The archived terminal marker does not match the immutable submission receipt.",
+      invalidCode
+    );
+  }
+  if (outcome.response !== undefined) {
+    const response = await readFile(join(archiveDirectory, "response.md"), "utf8").catch(() => undefined);
+    if (response === undefined
+      || Buffer.byteLength(response) !== outcome.response.bytes
+      || sha256Text(response) !== outcome.response.sha256) {
+      throw new ReviewPreparationError(
+        "The archived terminal marker response metadata does not match response.md.",
+        invalidCode
+      );
+    }
+  }
+}
+
+function validateArchivedTerminalOutcome(
+  value: Record<string, unknown>,
+  invalidCode: "resume_terminal_outcome_invalid" | "resume_archive_commit_failure_invalid"
+): ArchivedTerminalOutcome {
   if (value.schemaVersion !== 1
     || typeof value.finalizedAt !== "string"
     || (value.status !== "blocked" && value.status !== "failed" && value.status !== "completed" && value.status !== "completed_with_warnings")
@@ -1132,9 +1629,17 @@ async function readArchivedTerminalOutcome(archiveDirectory: string): Promise<Ar
       || (value.response.bytes as number) < 0
       || typeof value.response.sha256 !== "string"
       || !/^[a-f0-9]{64}$/.test(value.response.sha256)))) {
-    throw new ReviewPreparationError("The archived terminal outcome is invalid.", "resume_terminal_outcome_invalid");
+    throw new ReviewPreparationError("The archived terminal outcome is invalid.", invalidCode);
   }
   return value as unknown as ArchivedTerminalOutcome;
+}
+
+async function archivedFinalMarkerExists(archiveDirectory: string): Promise<boolean> {
+  const markers = ["archive-commit-failure.json", "terminal-outcome.json"];
+  for (const marker of markers) {
+    if (await stat(join(archiveDirectory, marker)).then(() => true).catch(() => false)) return true;
+  }
+  return false;
 }
 
 async function readOptionalJson(path: string): Promise<Record<string, unknown> | undefined> {
@@ -1162,11 +1667,16 @@ function isProvisionalConversationId(value: string | undefined): boolean {
 
 async function recoverCurrentVisibleThread(
   port: ReviewWorkflowPort,
-  expectedPrompt: string
+  expectedPrompt: string,
+  requiredTabId: string | undefined
 ): Promise<CommandResult<OpenThreadData> | undefined> {
+  if (requiredTabId === undefined) return undefined;
   const page = await port.pageState().catch(() => undefined);
   const conversationId = page?.conversationId ?? conversationIdFromUrl(page?.url);
-  if (page === undefined || conversationId === undefined || isProvisionalConversationId(conversationId)) return undefined;
+  if (page === undefined
+    || page.tabId !== requiredTabId
+    || conversationId === undefined
+    || isProvisionalConversationId(conversationId)) return undefined;
   const latestUser = await port.readLatestUser().catch(() => undefined);
   if (latestUser?.ok !== true || !visibleUserTurnContainsExactPrompt(latestUser.data?.text ?? "", expectedPrompt)) return undefined;
   return {
@@ -1182,9 +1692,39 @@ async function recoverCurrentVisibleThread(
       timestamp: port.now().toISOString(),
       url: page.url,
       conversationId,
+      tabId: page.tabId,
       ...(page.title === undefined ? {} : { title: page.title })
     }
   };
+}
+
+type RecoveryCandidateEvidence = {
+  conversationId: string;
+  tabId?: string;
+  exactPrompt: boolean;
+};
+
+function selectUniqueRecoveryCandidate(
+  candidates: RecoveryCandidateEvidence[],
+  preferredTabId?: string
+): { conversationId: string; tabId?: string } | "ambiguous" | undefined {
+  const exact = new Map<string, RecoveryCandidateEvidence>();
+  for (const candidate of candidates) {
+    if (candidate.exactPrompt && !exact.has(candidate.conversationId)) exact.set(candidate.conversationId, candidate);
+  }
+  const matches = [...exact.values()];
+  if (matches.length === 1) {
+    const match = matches[0]!;
+    return { conversationId: match.conversationId, ...(match.tabId === undefined ? {} : { tabId: match.tabId }) };
+  }
+  if (matches.length > 1 && preferredTabId !== undefined) {
+    const stableMatches = matches.filter(match => match.tabId === preferredTabId);
+    if (stableMatches.length === 1) {
+      const match = stableMatches[0]!;
+      return { conversationId: match.conversationId, ...(match.tabId === undefined ? {} : { tabId: match.tabId }) };
+    }
+  }
+  return matches.length > 1 ? "ambiguous" : undefined;
 }
 
 function recoveryQueryFromPrepared(prepared: PreparedReviewContext): string {
@@ -1200,12 +1740,17 @@ async function persistThreadCheckpoint(
   prepared: PreparedReviewContext,
   url: string | undefined,
   id: string | undefined,
+  tabId: string | undefined,
   now: Date
 ): Promise<void> {
-  if (url === undefined && id === undefined) return;
+  if (url === undefined && id === undefined && tabId === undefined) return;
   const checkpoint: ThreadCheckpoint = {
     schemaVersion: 1,
-    current: { ...(url === undefined ? {} : { url }), ...(id === undefined ? {} : { id }) },
+    current: {
+      ...(url === undefined ? {} : { url }),
+      ...(id === undefined ? {} : { id }),
+      ...(tabId === undefined ? {} : { tabId })
+    },
     recoveryQuery: recoveryQueryFromPrepared(prepared),
     promptSha256: sha256Text(prepared.prompt),
     updatedAt: now.toISOString()
@@ -1215,7 +1760,13 @@ async function persistThreadCheckpoint(
 
 async function readArchivedThreadCheckpoint(archiveDirectory: string): Promise<ThreadCheckpoint> {
   const value = JSON.parse(await readFile(join(archiveDirectory, "thread-checkpoint.json"), "utf8")) as Partial<ThreadCheckpoint>;
-  if (value.schemaVersion !== 1 || value.current === undefined || typeof value.recoveryQuery !== "string" || typeof value.promptSha256 !== "string") {
+  if (value.schemaVersion !== 1
+    || !isRecord(value.current)
+    || (value.current.url !== undefined && typeof value.current.url !== "string")
+    || (value.current.id !== undefined && typeof value.current.id !== "string")
+    || (value.current.tabId !== undefined && typeof value.current.tabId !== "string")
+    || typeof value.recoveryQuery !== "string"
+    || typeof value.promptSha256 !== "string") {
     throw new Error("Archived thread checkpoint is invalid.");
   }
   return value as ThreadCheckpoint;
@@ -1244,64 +1795,337 @@ function validateThreadCheckpoint(
   }
   const submittedId = submission.thread.id ?? conversationIdFromUrl(submission.thread.url);
   const checkpointId = checkpoint.current.id ?? conversationIdFromUrl(checkpoint.current.url);
-  if (submittedId !== undefined && checkpointId !== undefined && !isProvisionalConversationId(submittedId) && submittedId !== checkpointId) {
+  if (submittedId !== undefined
+    && checkpointId !== undefined
+    && !isProvisionalConversationId(submittedId)
+    && !isProvisionalConversationId(checkpointId)
+    && submittedId !== checkpointId) {
     throw new ReviewPreparationError("The mutable thread checkpoint points at a different conversation than the immutable submission receipt.", "resume_checkpoint_thread_mismatch");
   }
 }
 
-async function recoverReviewThread(env: RuntimeEnv, query: string, expectedPrompt: string): Promise<CommandResult<OpenThreadData>> {
+type RecoveryProbe = {
+  tabId?: string;
+  url?: string;
+  conversationId?: string;
+};
+
+async function recoverReviewThread(
+  env: RuntimeEnv,
+  query: string,
+  expectedPrompt: string,
+  preferred?: { url?: string; conversationId?: string; tabId?: string }
+): Promise<CommandResult<OpenThreadData>> {
+  const warnings: string[] = [];
+  const candidates = new Map<string, { url: string; conversationId: string; title?: string }>();
+  const addCandidate = (url: string | undefined, conversationId: string | undefined, title?: string): void => {
+    if (candidates.size >= MAX_RECOVERY_CANDIDATES) return;
+    const id = conversationId ?? conversationIdFromUrl(url);
+    if (id === undefined || isProvisionalConversationId(id)) return;
+    const canonicalUrl = url ?? new URL(`/c/${id}`, "https://chatgpt.com/").toString();
+    if (!candidates.has(id)) candidates.set(id, { url: canonicalUrl, conversationId: id, ...(title === undefined ? {} : { title }) });
+  };
+
+  const current = env.page === undefined ? undefined : await readPageState(env.page).catch(() => undefined);
+  const probe: RecoveryProbe = {
+    ...(env.expectedTabId === undefined ? {} : { tabId: env.expectedTabId }),
+    ...(current?.url === undefined ? {} : { url: current.url }),
+    ...(current?.conversationId === undefined ? {} : { conversationId: current.conversationId })
+  };
+  addCandidate(preferred?.url, preferred?.conversationId);
+  addCandidate(current?.url, current?.conversationId, current?.title);
+
   const visible = await listVisibleThreads(env, 20);
   if (visible.ok && visible.data !== undefined) {
-    const candidates = visible.data.results
+    warnings.push(...visible.warnings);
+    for (const candidate of visible.data.results
       .map((candidate, index) => ({ candidate, index, score: recoveryCandidateScore(candidate.title, query) }))
+      .filter(candidate => candidate.score > 0)
       .sort((left, right) => right.score - left.score || left.index - right.index)
-      .slice(0, 12);
-    for (const { candidate } of candidates) {
-      const opened = await openThread(env, { url: new URL(candidate.href, "https://chatgpt.com/").toString(), timeoutMs: 12_000 });
-      if (!opened.ok) continue;
-      const user = await readLatest(env, { role: "user", format: "text" });
-      if (user.ok && visibleUserTurnContainsExactPrompt(user.data?.text ?? "", expectedPrompt)) {
-        return {
-          ...opened,
-          warnings: [
-            ...visible.warnings,
-            ...opened.warnings,
-            "Recovered the archived review from a prompt-identical conversation in visible Chat history."
-          ]
-        };
-      }
+      .slice(0, MAX_RECOVERY_CANDIDATES - candidates.size)) {
+      addCandidate(new URL(candidate.candidate.href, "https://chatgpt.com/").toString(), candidate.candidate.conversationId, candidate.candidate.title);
     }
   }
 
-  const search = await searchThreads(env, { query, limit: 3 });
-  if (!search.ok || search.data === undefined) {
+  const search = await searchThreads(env, { query, limit: 12 });
+  if (search.ok && search.data !== undefined) {
+    warnings.push(...search.warnings);
+    for (const candidate of search.data.results.slice(0, MAX_RECOVERY_CANDIDATES - candidates.size)) {
+      addCandidate(new URL(candidate.href, "https://chatgpt.com/").toString(), candidate.conversationId, candidate.title);
+    }
+  } else if (candidates.size === 0) {
+    return commandFailureAsOpenThread(search);
+  }
+
+  const exactMatches: Array<{ candidate: { url: string; conversationId: string; title?: string }; tabId?: string }> = [];
+  for (const candidate of candidates.values()) {
+    const opened = await exactClaimOrOpenRecoveryCandidate(env, candidate, probe, preferred?.tabId);
+    if (!opened.ok) {
+      const restored = await restoreRecoveryProbe(env, probe);
+      return restored ?? opened;
+    }
+    const user = await readLatest(env, { role: "user", format: "text" });
+    if (user.ok && visibleUserTurnContainsExactPrompt(user.data?.text ?? "", expectedPrompt)) {
+      exactMatches.push({ candidate, ...(opened.context.tabId === undefined ? {} : { tabId: opened.context.tabId }) });
+    }
+    const restored = await restoreRecoveryProbe(env, probe);
+    if (restored !== undefined) return restored;
+  }
+
+  const selectedEvidence = selectUniqueRecoveryCandidate(exactMatches.map(match => ({
+    conversationId: match.candidate.conversationId,
+    ...(match.tabId === undefined ? {} : { tabId: match.tabId }),
+    exactPrompt: true
+  })), preferred?.tabId);
+  const selected = typeof selectedEvidence === "object"
+    ? exactMatches.find(match => match.candidate.conversationId === selectedEvidence.conversationId)
+    : undefined;
+  if (selectedEvidence === "ambiguous") {
     return {
       ok: false,
-      status: search.status,
-      warnings: search.warnings,
-      ...(search.blocker === undefined ? {} : { blocker: search.blocker }),
-      ...(search.error === undefined ? {} : { error: search.error }),
+      status: "blocked",
+      warnings,
+      blocker: {
+        kind: "not_found",
+        code: "review_thread_recovery_ambiguous",
+        message: "Multiple canonical Chat conversations contain the exact archived prompt. Recovery refused to choose one without a unique archived tab binding.",
+        resumable: true
+      },
+      context: { timestamp: new Date().toISOString(), ...(probe.tabId === undefined ? {} : { tabId: probe.tabId }) }
+    };
+  }
+  if (selected === undefined) {
+    return {
+      ok: false,
+      status: "not_found",
+      warnings,
+      blocker: {
+        kind: "not_found",
+        code: "review_thread_recovery_not_found",
+        message: "The provisional Chat conversation ID expired, and visible Chat search found no conversation containing the exact archived prompt.",
+        resumable: true
+      },
       context: search.context
     };
   }
-  const expected = normalizePrompt(expectedPrompt);
-  for (const candidate of search.data.results) {
-    const opened = await openThread(env, { url: new URL(candidate.href, "https://chatgpt.com/").toString(), timeoutMs: 12_000 });
-    if (!opened.ok) continue;
-    const user = await readLatest(env, { role: "user", format: "text" });
-    if (user.ok && promptMatches(normalizePrompt(user.data?.text ?? ""), expected, query)) return opened;
+
+  const finalOpened = await exactClaimOrOpenRecoveryCandidate(env, selected.candidate, probe, selected.tabId ?? preferred?.tabId);
+  if (!finalOpened.ok) return finalOpened;
+  const finalUser = await readLatest(env, { role: "user", format: "text" });
+  if (!finalUser.ok || !visibleUserTurnContainsExactPrompt(finalUser.data?.text ?? "", expectedPrompt)) {
+    return {
+      ok: false,
+      status: "blocked",
+      warnings,
+      blocker: {
+        kind: "unknown",
+        code: "review_thread_recovery_changed",
+        message: "The selected recovery conversation changed before its exact archived prompt could be reverified.",
+        resumable: true
+      },
+      context: finalOpened.context
+    };
   }
   return {
+    ...finalOpened,
+    warnings: [
+      ...warnings,
+      ...finalOpened.warnings,
+      "Recovered the archived review from a uniquely prompt-identical conversation in visible Chat history."
+    ]
+  };
+}
+
+async function exactClaimOrOpenRecoveryCandidate(
+  env: RuntimeEnv,
+  candidate: { url: string; conversationId: string; title?: string },
+  probe: RecoveryProbe,
+  preferredTabId?: string
+): Promise<CommandResult<OpenThreadData>> {
+  if (preferredTabId !== undefined) {
+    const preferredClaim = await bootstrap(env, {
+      existingTab: {
+        target: { type: "tabId", tabId: preferredTabId },
+        ifMissing: "block",
+        ifMultiple: "block",
+        requireChatGPT: true
+      },
+      preferExistingTab: false
+    });
+    if (preferredClaim.ok) {
+      const preferredState = env.page === undefined ? undefined : await readPageState(env.page).catch(() => undefined);
+      const preferredObservedId = preferredState?.conversationId ?? conversationIdFromUrl(preferredState?.url);
+      if (preferredObservedId === candidate.conversationId) {
+        return recoveryCandidateSuccess(candidate, preferredClaim, preferredState);
+      }
+      const restored = await restoreRecoveryProbe(env, probe);
+      if (restored !== undefined) return restored;
+    } else if (preferredClaim.blocker?.code !== "existing_tab_not_found") {
+      return commandFailureAsOpenThread(makeExistingTabRetryResumable(preferredClaim, true));
+    }
+  }
+  const claim = await bootstrap(env, {
+    existingTab: {
+      target: { type: "conversationId", conversationId: candidate.conversationId },
+      ifMissing: "block",
+      ifMultiple: "block",
+      requireChatGPT: true
+    },
+    preferExistingTab: false
+  });
+  if (claim.ok) {
+    const state = env.page === undefined ? undefined : await readPageState(env.page).catch(() => undefined);
+    const observedId = state?.conversationId ?? conversationIdFromUrl(state?.url)
+      ?? claim.context.conversationId ?? conversationIdFromUrl(claim.context.url);
+    if (observedId !== candidate.conversationId) {
+      const restored = await restoreRecoveryProbe(env, probe);
+      return restored ?? recoveryCandidateDrift(candidate, observedId, claim.context);
+    }
+    return recoveryCandidateSuccess(candidate, claim, state);
+  }
+  if (claim.blocker?.code !== "existing_tab_not_found") {
+    return commandFailureAsOpenThread(makeExistingTabRetryResumable(claim, true));
+  }
+  const restored = await restoreRecoveryProbe(env, probe);
+  if (restored !== undefined) return restored;
+  const opened = await openThread(env, { url: candidate.url, timeoutMs: RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS });
+  if (opened.context.tabId === undefined && probe.tabId !== undefined) opened.context.tabId = probe.tabId;
+  if (!opened.ok) {
+    const repaired = await restoreRecoveryProbe(env, probe);
+    return repaired ?? opened;
+  }
+  const state = env.page === undefined ? undefined : await readPageState(env.page).catch(() => undefined);
+  const observedId = state?.conversationId ?? conversationIdFromUrl(state?.url)
+    ?? opened.data?.conversationId ?? conversationIdFromUrl(opened.data?.url || opened.context.url)
+    ?? opened.context.conversationId;
+  if (observedId !== candidate.conversationId) {
+    const repaired = await restoreRecoveryProbe(env, probe);
+    return repaired ?? recoveryCandidateDrift(candidate, observedId, opened.context);
+  }
+  return opened;
+}
+
+async function restoreRecoveryProbe(
+  env: RuntimeEnv,
+  probe: RecoveryProbe
+): Promise<CommandResult<OpenThreadData> | undefined> {
+  if (probe.tabId !== undefined && env.expectedTabId !== probe.tabId) {
+    const restored = await bootstrap(env, {
+      existingTab: {
+        target: { type: "tabId", tabId: probe.tabId },
+        ifMissing: "block",
+        ifMultiple: "block",
+        requireChatGPT: true
+      },
+      preferExistingTab: false
+    });
+    if (!restored.ok) return commandFailureAsOpenThread(restored);
+  }
+  if (probe.url === undefined || env.page === undefined) return undefined;
+  const current = await readPageState(env.page).catch(() => undefined);
+  const currentId = current?.conversationId ?? conversationIdFromUrl(current?.url);
+  const alreadyRestored = probe.conversationId !== undefined
+    ? currentId === probe.conversationId
+    : current?.url === probe.url;
+  if (alreadyRestored) return undefined;
+  if (typeof env.page.goto !== "function") {
+    return recoveryProbeRestoreFailure(probe, "The bound recovery probe cannot navigate back to its original Chat target.");
+  }
+  try {
+    await env.page.goto(probe.url);
+  } catch (error) {
+    return recoveryProbeRestoreFailure(probe, `The bound recovery probe could not return to its original Chat target: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const restoredState = await readPageState(env.page).catch(() => undefined);
+  const restoredId = restoredState?.conversationId ?? conversationIdFromUrl(restoredState?.url);
+  if ((probe.conversationId !== undefined && restoredId !== probe.conversationId)
+    || (probe.conversationId === undefined && restoredState?.url !== probe.url)) {
+    return recoveryProbeRestoreFailure(probe, "The bound recovery probe did not return to its original Chat target.");
+  }
+  return undefined;
+}
+
+function recoveryCandidateSuccess(
+  candidate: { url: string; conversationId: string; title?: string },
+  claim: CommandResult<unknown>,
+  state: PageState | undefined
+): CommandResult<OpenThreadData> {
+  const title = state?.title ?? candidate.title;
+  return {
+    ok: true,
+    status: "ok",
+    data: {
+      url: state?.url ?? candidate.url,
+      conversationId: candidate.conversationId,
+      ...(title === undefined ? {} : { title })
+    },
+    warnings: claim.warnings,
+    context: {
+      ...claim.context,
+      url: state?.url ?? candidate.url,
+      conversationId: candidate.conversationId
+    }
+  };
+}
+
+function recoveryCandidateDrift(
+  candidate: { conversationId: string },
+  observedId: string | undefined,
+  context: CommandResult<unknown>["context"]
+): CommandResult<OpenThreadData> {
+  return {
     ok: false,
-    status: "not_found",
-    warnings: search.warnings,
+    status: "blocked",
+    warnings: [],
     blocker: {
-      kind: "not_found",
-      code: "review_thread_recovery_not_found",
-      message: "The provisional Chat conversation ID expired, and visible Chat search found no prompt-identical review thread.",
+      kind: "selector_drift",
+      code: "review_thread_recovery_candidate_drift",
+      message: `Recovery requested Chat conversation ${candidate.conversationId}, but the claimed or navigated page exposed ${observedId ?? "no canonical conversation ID"}.`,
       resumable: true
     },
-    context: search.context
+    context
+  };
+}
+
+function recoveryProbeRestoreFailure(probe: RecoveryProbe, message: string): CommandResult<OpenThreadData> {
+  return {
+    ok: false,
+    status: "blocked",
+    warnings: [],
+    blocker: {
+      kind: "selector_drift",
+      code: "review_thread_recovery_probe_restore_failed",
+      message,
+      resumable: true
+    },
+    context: {
+      timestamp: new Date().toISOString(),
+      ...(probe.url === undefined ? {} : { url: probe.url }),
+      ...(probe.conversationId === undefined ? {} : { conversationId: probe.conversationId }),
+      ...(probe.tabId === undefined ? {} : { tabId: probe.tabId })
+    }
+  };
+}
+
+function commandFailureAsOpenThread(result: CommandResult<unknown>): CommandResult<OpenThreadData> {
+  return {
+    ok: false,
+    status: result.status,
+    warnings: result.warnings,
+    ...(result.blocker === undefined ? {} : { blocker: result.blocker }),
+    ...(result.error === undefined ? {} : { error: result.error }),
+    context: result.context
+  };
+}
+
+function makeExistingTabRetryResumable<T>(result: CommandResult<T>, onResume: boolean): CommandResult<T> {
+  if (!onResume
+    || result.ok
+    || (result.blocker?.code !== "existing_tab_ambiguous"
+      && result.blocker?.code !== "existing_tab_temporarily_claimed")) return result;
+  return {
+    ...result,
+    blocker: { ...result.blocker, resumable: true }
   };
 }
 
@@ -1339,13 +2163,6 @@ function isKnownAttachmentEnvelope(prefix: string): boolean {
   if (prefix === "") return true;
   const labels = prefix.split(/\s+File(?=\s|$)/).map(label => label.trim()).filter(Boolean);
   return labels.length > 0 && labels.every(label => /^[^/\\\r\n]{1,240}\.[a-z0-9]{1,12}$/i.test(label));
-}
-
-function promptMatches(actual: string, expected: string, query: string): boolean {
-  if (actual === expected) return true;
-  if (!actual.includes(query) || !expected.includes(query)) return false;
-  const scope = expected.split("\n").find(line => line.startsWith("Scope: "));
-  return scope !== undefined && actual.includes(scope);
 }
 
 async function readArtifactDownloadCheckpoint(archiveDirectory: string): Promise<ReviewArtifact[]> {

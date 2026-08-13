@@ -117,7 +117,15 @@ const resumed = await chatgpt.reviews.codeReview({
 });
 ```
 
-Never submit the original prompt again after an attempted submission. The immutable submission receipt is authoritative: it restores and validates the canonical Chat conversation ID/URL, original packet manifest, artifact baseline, and configuration snapshot. Keep each browser-host call longer than `callTimeoutMs` (30 seconds is sufficient for the 20-second example). Pro can take minutes or more than an hour; `totalTimeoutMs` limits one invocation, not the repeated same-archive resume loop. Caller-supplied `conversationId` or `threadUrl` values are optional cross-checks and must match the receipt.
+Never submit the original prompt again after an attempted submission. The immutable submission receipt is authoritative: it restores and validates the canonical Chat conversation ID/URL, stable browser tab when available, original packet manifest, artifact baseline, and configuration snapshot. Keep each browser-host call longer than `callTimeoutMs` (30 seconds is sufficient for the 20-second example). Pro can take minutes or more than an hour; `totalTimeoutMs` limits one invocation, not the repeated same-archive resume loop. Caller-supplied `conversationId` or `threadUrl` values are optional cross-checks and must match the receipt.
+
+Keep every invocation on its bound canonical conversation and browser tab. A
+provisional `WEB:` receipt may adopt a canonical conversation only after exact
+archived-prompt ownership is proven. Require one exact recovery candidate, or
+one candidate uniquely selected by the archived tab ID; surface
+`review_thread_recovery_ambiguous` instead of guessing among repeated identical
+prompts. On any affinity blocker, preserve the archive and never create a
+replacement submission.
 
 Back off between separate resume invocations for the same archive. The calling agent—including any delegated subagent—owns this cadence: wait 30 seconds after the first `in_progress` result, then 60 seconds, 2 minutes, and 4 minutes; after that, poll no more often than every 5 minutes. Count only consecutive `in_progress` results for that archive and reset when it completes or reaches a blocker. Use the host's wait or wake-up mechanism between calls. Do not immediately recurse, busy-poll, or keep one browser-host call open during the delay. `pollMs` only samples visible DOM stability inside one bounded call; it is not the cross-invocation cadence.
 
@@ -126,6 +134,7 @@ Back off between separate resume invocations for the same archive. The calling a
 - Read [output-and-artifacts.md](references/output-and-artifacts.md).
 - In `full` mode, return `responseMarkdown` completely and exactly once. Do not summarize it away.
 - Surface every artifact path, hash, archive directory, thread URL, warning, and blocker.
+- Surface conversation, tab, prompt-affinity, recovery-ambiguity, and archive-terminal-commit blockers as recorded; do not reinterpret them as authentication or retry by resubmitting.
 - If Pro is unavailable, fallback is visible, or post-completion Pro verification fails, report the structured blocker and do not label the answer a verified Pro response. Configuration restoration is optional and disabled by default; if the caller explicitly enables it, require verified restoration.
 - Independently validate material findings against repository code and tests before editing. Clearly separate delegated findings from Codex-verified conclusions.
 - Never execute or automatically apply generated patches, scripts, or artifacts.

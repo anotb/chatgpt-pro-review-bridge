@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.11
+
+- Aligns the bundled Node runtime with canonical AskPro conversation/tab
+  affinity, unique provisional-thread recovery, terminal provenance ordering,
+  packet safety, and current logged-out-page detection.
+- Waits for the bounded backend process-exit diagnostic window after invalid
+  JSON or malformed response/event envelopes so delayed exit codes and stderr
+  are retained on supported Python versions, including Python 3.13.
+
 ## 0.7.10
 
 - Aligns with the shared backend's restricted-host-safe Windows PID probe.

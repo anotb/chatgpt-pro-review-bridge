@@ -18,10 +18,21 @@ Archive layout:
 ├── context/manifest.json
 ├── context/manifest.upload.json
 ├── context/packet-*.md
+├── thread-checkpoint.json (current conversation and opaque tab recovery hint)
 ├── response.md
-├── terminal-outcome.json (non-resumable blockers only)
+├── terminal-outcome.json (non-resumable blockers; published last)
+├── archive-commit-failure.json (only when terminal provenance cannot commit)
 ├── artifacts/manifest.json
 ├── configuration.json
 ├── receipt.json
 └── run-report.redacted.json
 ```
+
+Treat terminal provenance as an ordered commit. The workflow writes
+`configuration.json`, `run-report.redacted.json`, and `receipt.json` first, then
+publishes immutable `terminal-outcome.json` for a non-resumable blocker. If a
+late provenance write fails, it records non-resumable
+`archive_terminal_commit_failed` in
+`archive-commit-failure.json` when the filesystem permits. Future resume first
+validates the immutable archive bindings, then treats that failure marker as
+authoritative without contacting the browser.

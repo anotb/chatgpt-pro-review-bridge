@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.7.11 - 2026-08-13
+
+- Binds every AskPro invocation to one visible browser tab and canonical Chat
+  conversation through attachment, submission, polling, final response capture,
+  Pro verification, and artifact handling; conversation drift now fails closed.
+- Recovers a provisional `WEB:` receipt only from a uniquely prompt-identical
+  canonical conversation, using an archived tab ID only as a stable
+  discriminator. Ambiguous matches remain resumable instead of being guessed.
+- Commits terminal provenance before publishing the immutable terminal outcome.
+  A late provenance write failure is recorded as an authoritative,
+  non-resumable archive commit failure when the filesystem permits it.
+- Keeps binary, size, file-mode, generated-content, and hard-secret exclusions
+  active when changed-file source snapshots are disabled, while allowing
+  ordinary authentication-related application source and fixture paths.
+- Distinguishes explicit visible login controls from generic logged-out
+  navigation without overriding stronger authenticated account, history,
+  composer, or conversation evidence.
+- Preserves delayed backend exit status and stderr when Python receives invalid
+  JSON or malformed protocol envelopes, including on Python 3.13.
+
 ## 0.7.10 - 2026-08-13
 
 - Resolves Windows PID checks through the kernel `SystemRoot` device path when

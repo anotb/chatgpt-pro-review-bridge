@@ -1,9 +1,11 @@
 import json
+import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, call
 
 from codex_chatgpt_control.backend import (
     BACKEND_EVENT_SCHEMA_VERSION,
@@ -112,6 +114,100 @@ class StdioBackendTransportTests(unittest.TestCase):
             transport.close()
 
         self.assertIn("invalid JSON", str(error.exception))
+
+    def test_invalid_json_waits_for_delayed_exit_and_stderr(self) -> None:
+        transport = StdioBackendTransport(
+            command=fake_backend_command(
+                """
+                import sys
+                import time
+                sys.stdin.readline()
+                print("not-json", flush=True)
+                time.sleep(0.1)
+                sys.stderr.write("invalid response details")
+                sys.stderr.flush()
+                sys.exit(17)
+                """
+            )
+        )
+        try:
+            with self.assertRaises(BackendTransportError) as error:
+                transport.request(backend_request("backend.version"))
+        finally:
+            transport.close()
+
+        self.assertEqual(error.exception.returncode, 17)
+        self.assertIn("invalid response details", error.exception.stderr)
+
+    def test_eof_waits_for_delayed_exit_and_stderr(self) -> None:
+        transport = StdioBackendTransport(
+            command=fake_backend_command(
+                """
+                import os
+                import sys
+                import time
+                sys.stdin.readline()
+                os.close(sys.stdout.fileno())
+                time.sleep(0.1)
+                sys.stderr.write("closed stdout early")
+                sys.stderr.flush()
+                sys.exit(19)
+                """
+            )
+        )
+        try:
+            with self.assertRaises(BackendTransportError) as error:
+                transport.request(backend_request("backend.version"))
+        finally:
+            transport.close()
+
+        self.assertEqual(error.exception.returncode, 19)
+        self.assertIn("closed stdout early", error.exception.stderr)
+
+    def test_malformed_protocol_response_waits_for_delayed_exit_and_stderr(self) -> None:
+        transport = StdioBackendTransport(
+            command=fake_backend_command(
+                """
+                import json
+                import sys
+                import time
+                sys.stdin.readline()
+                print(json.dumps({"schemaVersion": "unsupported", "ok": True}), flush=True)
+                time.sleep(0.1)
+                sys.stderr.write("unsupported response details")
+                sys.stderr.flush()
+                sys.exit(23)
+                """
+            )
+        )
+        try:
+            with self.assertRaises(BackendTransportError) as error:
+                transport.request(backend_request("backend.version"))
+        finally:
+            transport.close()
+
+        self.assertEqual(error.exception.returncode, 23)
+        self.assertIn("unsupported schemaVersion", str(error.exception))
+        self.assertIn("unsupported response details", error.exception.stderr)
+
+    def test_process_error_polls_again_after_stderr_join(self) -> None:
+        transport = StdioBackendTransport(command=["unused"])
+        process = MagicMock(spec=subprocess.Popen)
+        process.poll.side_effect = [None, 29]
+        process.wait.side_effect = subprocess.TimeoutExpired(cmd="unused", timeout=1.0)
+        stderr_thread = MagicMock()
+        stderr_thread.is_alive.return_value = True
+        transport._process = process
+        transport._stderr_thread = stderr_thread
+        transport._stderr_buffer = "late process failure"
+
+        error = transport._process_error("Backend returned invalid JSON response.")
+
+        self.assertEqual(error.returncode, 29)
+        self.assertIn("late process failure", error.stderr)
+        self.assertEqual(process.poll.call_args_list, [call(), call()])
+        process.wait.assert_called_once_with(timeout=1.0)
+        stderr_thread.join.assert_called_once_with(timeout=0.5)
 
     def test_large_stderr_is_drained_while_waiting_for_stdout(self) -> None:
         transport = StdioBackendTransport(

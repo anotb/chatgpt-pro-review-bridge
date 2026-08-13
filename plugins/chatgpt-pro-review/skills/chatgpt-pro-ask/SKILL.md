@@ -10,7 +10,7 @@ Use the bundled bridge to send the caller's actual question to visible ChatGPT C
 ## Before invoking
 
 - Use the installed `browser:control-in-app-browser` skill to initialize the compatible visible browser runtime when `globalThis.agent` is absent.
-- A context-free question uploads nothing. When the caller intentionally adds repository packets, do not attach unexpectedly sensitive material without approval; conventional credential and browser-profile paths are excluded.
+- A context-free question uploads nothing. When the caller intentionally adds repository packets, do not attach unexpectedly sensitive material without approval. Hard credential and browser-profile paths are excluded; application source is not excluded merely because its path contains `credentials` or `secrets`.
 - A first file-backed run on each computer requires a visibly signed-in ChatGPT session, Codex Chrome uploads allowed for `chatgpt.com`, and Chrome's Codex extension allowed to access file URLs. Never change those settings for the user.
 
 ## Invoke
@@ -72,6 +72,13 @@ const resumed = await chatgpt.reviews.askPro({
 
 Never reattach files or resend the prompt. The archive's immutable receipt, original context, and thread checkpoint are authoritative. Keep each browser-host call longer than `callTimeoutMs` (30 seconds is sufficient for the 20-second example) and continue bounded resume calls until completion or a structured blocker. Pro can take minutes or more than an hour; `totalTimeoutMs` limits one invocation, not the repeated same-archive resume loop.
 
+Keep each invocation on its bound canonical conversation and browser tab. Let a
+provisional `WEB:` receipt adopt a canonical conversation only after exact
+archived-prompt ownership is proven. Require one exact recovery candidate, or
+one candidate uniquely selected by the archived tab ID; preserve and surface an
+ambiguity or affinity blocker instead of guessing, opening a replacement chat,
+or resubmitting.
+
 Back off between separate resume invocations for the same archive. The calling agent—including any delegated subagent—owns this cadence: wait 30 seconds after the first `in_progress` result, then 60 seconds, 2 minutes, and 4 minutes; after that, poll no more often than every 5 minutes. Count only consecutive `in_progress` results for that archive and reset when it completes or reaches a blocker. Use the host's wait or wake-up mechanism between calls. Do not immediately recurse, busy-poll, or keep one browser-host call open during the delay. `pollMs` only samples visible DOM stability inside one bounded call; it is not the cross-invocation cadence.
 
 ## Ask a follow-up in the same thread
@@ -120,6 +127,7 @@ Only do this when the caller or current session explicitly decides the running r
 - Normally return the complete `responseMarkdown` as the answer, plus any downloaded artifacts. The durable archive and hashes exist so the session can resume safely; surface them when the caller asks for provenance or when diagnosing a blocker, not as mandatory ceremony in every answer.
 - Require Pro verification before submission and after completion. Fail closed on unavailability or fallback.
 - The normal workflow leaves Chat on Pro. Restoration is opt-in only.
+- Preserve conversation, tab, prompt-affinity, recovery-ambiguity, and archive-terminal-commit blockers exactly as returned; do not reinterpret them as a login problem or a reason to resend the prompt.
 - Treat generated code and patches as proposals. Do not automatically execute or apply them; the current Codex task decides what to verify and implement.
 
 Read the sibling `chatgpt-pro-code-review` references when packet policy, output/artifact details, or troubleshooting guidance is needed.

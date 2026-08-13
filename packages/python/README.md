@@ -15,13 +15,13 @@ The first-class `reviews.askPro(...)` packet preparation and visible-session orc
 ## Install
 
 ```bash
-python -m pip install https://github.com/anotb/chatgpt-pro-review-bridge/releases/download/v0.7.10/chatgpt_pro_review_bridge-0.7.10-py3-none-any.whl
+python -m pip install https://github.com/anotb/chatgpt-pro-review-bridge/releases/download/v0.7.11/chatgpt_pro_review_bridge-0.7.11-py3-none-any.whl
 ```
 
 The Python package needs a Node backend command for browser-control workflows. Install or build the Node package too:
 
 ```bash
-npm install chatgpt-pro-review-bridge@0.7.10
+npm install chatgpt-pro-review-bridge@0.7.11
 ```
 
 ## Development Install
@@ -183,6 +183,13 @@ Override the backend command when needed:
 CHATGPT_BROWSER_BACKEND_COMMAND="node /absolute/path/to/bridge-enabled-backend.mjs" \
 python scripts/live_smoke.py --mode browser-bridge
 ```
+
+When the backend emits invalid JSON or a malformed protocol envelope and then
+exits, the transport waits for the bounded process-exit diagnostic window and
+captures the eventual return code and drained stderr. This preserves the real
+backend failure instead of reporting only a premature parse error. A valid
+`ok: false` response remains a normal protocol error and does not close a
+persistent session.
 
 ## Validation
 

@@ -1,6 +1,6 @@
 ---
 title: ChatGPT Pro Review Bridge
-date: 2026-08-11
+date: 2026-08-13
 type: guide
 status: stable
 ---
@@ -12,7 +12,7 @@ The bridge lets any Codex host invoke the same installed workflow while a caller
 ## Install a pinned release
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.2
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.11
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -25,6 +25,13 @@ visible browser and enable both upload gates:
    **Allow access to file URLs**.
 
 The workflow stops before submission when either permission is absent.
+
+Authentication preflight combines visible structural account, conversation
+history, composer, and conversation evidence. An exact visible login control
+outside message content still classifies the current shell as logged out, even
+when generic navigation such as **New chat** or **Search chats** is present.
+This avoids treating either one brittle selector or ordinary message text as an
+authentication decision.
 
 The current Chrome bridge opens Chat's hidden file input with an origin-scoped
 browser user gesture and then uses the approved native file chooser. It does
@@ -39,7 +46,7 @@ remove the installed plugin and marketplace snapshot, then add the new tag:
 ```bash
 codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
 codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.2
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.11
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -97,13 +104,40 @@ When `repositoryRoot` is present and `baseRef` is omitted, repository scope is i
 
 One invocation performs one bounded poll by default. If it returns `in_progress`, call the workflow again with `resume: { archiveDirectory }`; never resend the prompt. The calling agent waits 30 seconds before the first resume, then 60 seconds, 2 minutes, and 4 minutes, and thereafter resumes no more often than every 5 minutes. The delay happens outside browser-host calls. Pro can run for minutes or more than an hour, and `totalTimeoutMs` limits one invocation rather than the repeated resume loop. The immutable submission receipt holds the canonical `/c/<conversation-id>` URL and conversation ID. Optional caller-supplied `threadUrl` or `conversationId` values are treated only as mismatch-detecting cross-checks.
 
+Within each invocation, the workflow remains bound to the same visible browser
+tab and canonical conversation before attachment and submission and during
+every poll, final prompt/response read, post-completion Pro verification, and
+artifact operation. A conflicting known tab or conversation returns a
+structured affinity blocker; missing tab metadata alone does not imply drift.
+Pre-submit drift is non-resumable and requires a fresh request. Post-submit
+drift is resumable from the same archive and never permits resubmission.
+
+A provisional `WEB:` receipt is not treated as an immutable canonical route.
+Resume first claims an exact already-open tab when possible, then searches
+visible history for the exact archived prompt. It adopts a canonical
+conversation only when the proof is unique. If repeated identical prompts
+produce multiple exact candidates, the archived tab ID may select one stable
+candidate; otherwise `review_thread_recovery_ambiguous` stops without choosing
+or creating another conversation.
+
 When a running request has genuinely become obsolete, the session may explicitly stop and replace it. Open and verify the archived thread, call `chatgpt.messages.stop({ confirmStop: true })`, preserve the old archive/partial answer, then start a fresh `reviews.askPro(...)` request from the revised state. The bridge never auto-stops or silently edits an existing prompt.
 
 ## Archive and trust boundary
 
-The bridge keeps durable local state so a long answer can resume without duplicate submission. For packet-backed questions, that state includes the request, prompt, packets, complete response, artifacts, and enough receipt/configuration evidence to recover safely. Submission receipts bind the prompt, local and upload manifests, every packet, the configuration snapshot, and the artifact baseline. A non-resumable fallback or verification failure is recorded as a terminal outcome and cannot later be upgraded by resuming the archive. Normal callers can simply use the answer; archive paths and hashes are primarily for recovery, diagnostics, or explicit provenance requests. `.codex/pro-reviews/` is gitignored here and should normally remain uncommitted.
+The bridge keeps durable local state so a long answer can resume without duplicate submission. For packet-backed questions, that state includes the request, prompt, packets, complete response, artifacts, and enough receipt/configuration evidence to recover safely. Submission receipts bind the prompt, local and upload manifests, every packet, the configuration snapshot, artifact baseline, canonical conversation, and stable tab metadata when available. A non-resumable fallback or verification failure is recorded as a terminal outcome and cannot later be upgraded by resuming the archive. Normal callers can simply use the answer; archive paths and hashes are primarily for recovery, diagnostics, or explicit provenance requests. `.codex/pro-reviews/` is gitignored here and should normally remain uncommitted.
 
-The local `context/manifest.json` retains host provenance. ChatGPT receives `context/manifest.upload.json`, which removes the absolute repository path and suppresses sensitive excluded filenames. Packet text is explicitly marked as untrusted repository evidence. Credential-store paths, committed symlinks/gitlinks, generated content, binary files, and oversized sources are excluded consistently from source snapshots, path listings, and diffs.
+Terminal provenance is an ordered commit: `configuration.json`,
+`run-report.redacted.json`, and `receipt.json` are written first. For a
+non-resumable blocker, `terminal-outcome.json` is then published last. If the
+provenance commit fails, the workflow returns non-resumable
+`archive_terminal_commit_failed` and writes an authoritative
+`archive-commit-failure.json` marker when the filesystem still permits it.
+Future resume validates the immutable prompt, configuration, packet, and
+submission bindings before treating that marker as authoritative, without
+contacting the browser. If the filesystem refuses the failure marker too, the
+returned warning makes that loss of durable authority explicit.
+
+The local `context/manifest.json` retains host provenance. ChatGPT receives `context/manifest.upload.json`, which removes the absolute repository path and suppresses sensitive excluded filenames. Packet text is explicitly marked as untrusted repository evidence. Repository-root credential/secret stores, provider/browser store ancestry, hard secret filenames, committed symlinks/gitlinks, generated content, binary files, and oversized sources are excluded consistently from source snapshots, path listings, and diffs. Ordinary nested application source and test fixtures under names such as `src/credentials/`, `packages/service/secrets/`, and `tests/fixtures/auth.json` are not excluded by directory name alone; store ancestry and hard filename rules still take precedence over fixture-looking suffixes. Setting `includeChangedFiles: false` omits changed-file source snapshots; it does not bypass the safety inventory, safe diff evidence, or any exclusion.
 
 Archive creation requests owner-only directory/file modes (`0700`/`0600`) and never overwrites immutable records. Windows does not implement POSIX modes as an ACL boundary, so use a user-private workspace or an explicitly private NTFS directory when review packets contain confidential source.
 

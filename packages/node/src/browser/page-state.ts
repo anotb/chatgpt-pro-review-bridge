@@ -18,6 +18,7 @@ type AuthenticationSurface = {
   conversationLinkCount: number;
   hasComposer: boolean;
   hasConversationMessages: boolean;
+  loginControl: boolean;
 };
 
 type PageDomSnapshot = {
@@ -53,13 +54,16 @@ export async function readPageState(page: PageLike): Promise<PageState> {
     ? classifyVisibleText(blockerSurface.text)
     : (classifyVisibleText(blockerSurface.text) ?? fullPageBlocker);
   const structurallySignedIn = isStructurallySignedIn(snapshot.authenticationSurface);
-  const loginWall = classifiedBlocker?.kind === "login_required"
-    && isLikelyLoginWall(visibleText)
-    && !structurallySignedIn;
+  const explicitLoginWall = snapshot.authenticationSurface.loginControl && !structurallySignedIn;
+  const loginWall = !structurallySignedIn
+    && (explicitLoginWall
+      || (classifiedBlocker?.kind === "login_required" && isLikelyLoginWall(visibleText)));
   const signedIn = (isLikelySignedIn(visibleText) || structurallySignedIn) && !loginWall;
-  const blocker = classifiedBlocker?.kind === "login_required" && signedIn
-    ? undefined
-    : classifiedBlocker;
+  const blocker = explicitLoginWall && classifiedBlocker === undefined
+    ? loginRequiredBlocker(visibleText)
+    : (classifiedBlocker?.kind === "login_required" && signedIn
+      ? undefined
+      : classifiedBlocker);
   const conversationId = parseConversationId(url);
 
   const state: PageState = {
@@ -108,7 +112,7 @@ function isLikelySignedIn(visibleText: string): boolean {
 async function readPageSnapshot(page: PageLike): Promise<PageDomSnapshot> {
   if (typeof page.evaluate === "function") {
     try {
-      const value = await withTimeout(page.evaluate(() => {
+      const value = await withTimeout(page.evaluate((loginLabels: string[]) => {
         const messageSelector = "[data-message-author-role], [data-testid^='conversation-turn']";
         const systemSelector = [
           "[role='alert']",
@@ -140,7 +144,28 @@ async function readPageSnapshot(page: PageLike): Promise<PageDomSnapshot> {
           "[contenteditable='true'][data-testid*='composer' i]",
           "[contenteditable='true'][aria-label*='ChatGPT' i]"
         ].join(", ");
-        const hasConversationMessages = document.querySelector(messageSelector) !== null;
+        const isVisible = (element: Element): boolean => {
+          if (element.closest("[hidden], [aria-hidden='true']") !== null) return false;
+          const style = window.getComputedStyle(element);
+          return style.display !== "none"
+            && style.visibility !== "hidden"
+            && style.visibility !== "collapse"
+            && element.getClientRects().length > 0;
+        };
+        const normalizedLoginLabels = new Set(loginLabels.map(label => label.trim().toLocaleLowerCase()));
+        const loginControl = Array.from(document.querySelectorAll("button, a, [role='button'], input[type='button'], input[type='submit']"))
+          .filter(element => element.closest(messageSelector) === null)
+          .filter(isVisible)
+          .some(element => {
+            const names = [
+              element.getAttribute("aria-label"),
+              element.getAttribute("value"),
+              element instanceof HTMLElement ? element.innerText : element.textContent
+            ];
+            return names.some(name => typeof name === "string"
+              && normalizedLoginLabels.has(name.replace(/\s+/g, " ").trim().toLocaleLowerCase()));
+          });
+        const hasConversationMessages = Array.from(document.querySelectorAll(messageSelector)).some(isVisible);
         const text = Array.from(document.querySelectorAll(systemSelector))
           .filter(element => element.closest(messageSelector) === null)
           .map(element => (element.textContent ?? "") + " " + (element.getAttribute("aria-label") ?? ""))
@@ -149,16 +174,21 @@ async function readPageSnapshot(page: PageLike): Promise<PageDomSnapshot> {
           visibleText: document.body?.innerText ?? "",
           blockerSurface: { text, hasConversationMessages },
           authenticationSurface: {
-            accountControl: document.querySelector(accountControlSelector) !== null,
-            conversationLinkCount: document.querySelectorAll(conversationLinkSelector).length,
-            hasComposer: document.querySelector(composerSelector) !== null,
-            hasConversationMessages
+            accountControl: Array.from(document.querySelectorAll(accountControlSelector)).some(isVisible),
+            conversationLinkCount: Array.from(document.querySelectorAll(conversationLinkSelector)).filter(isVisible).length,
+            hasComposer: Array.from(document.querySelectorAll(composerSelector)).some(isVisible),
+            hasConversationMessages,
+            loginControl
           }
         };
-      }), 1000, "Timed out while reading the visible ChatGPT page state.");
+      }, [...localeLabels.loginBlocker]), 1000, "Timed out while reading the visible ChatGPT page state.");
       const normalized = normalizePageDomSnapshot(value);
       if (normalized !== undefined) {
         if (typeof value === "string") {
+          const htmlSnapshot = await readHtmlPageSnapshot(page);
+          if (htmlSnapshot !== undefined) {
+            return { ...htmlSnapshot, visibleText: value };
+          }
           normalized.blockerSurface = await readLegacyBlockerSurface(page);
         }
         return normalized;
@@ -169,15 +199,20 @@ async function readPageSnapshot(page: PageLike): Promise<PageDomSnapshot> {
   }
 
   if (typeof page.content === "function") {
-    try {
-      const html = await withTimeout(page.content(), 1000, "Timed out while reading page content.");
-      return snapshotFromHtml(html);
-    } catch {
-      return emptyPageDomSnapshot();
-    }
+    return await readHtmlPageSnapshot(page) ?? emptyPageDomSnapshot();
   }
 
   return emptyPageDomSnapshot();
+}
+
+async function readHtmlPageSnapshot(page: PageLike): Promise<PageDomSnapshot | undefined> {
+  if (typeof page.content !== "function") return undefined;
+  try {
+    const html = await withTimeout(page.content(), 1000, "Timed out while reading page content.");
+    return snapshotFromHtml(html);
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizePageDomSnapshot(value: unknown): PageDomSnapshot | undefined {
@@ -191,16 +226,23 @@ function normalizePageDomSnapshot(value: unknown): PageDomSnapshot | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const snapshot = value as Partial<PageDomSnapshot>;
   const blockerSurface = snapshot.blockerSurface;
-  const authenticationSurface = snapshot.authenticationSurface;
+  const authenticationSurface = normalizeAuthenticationSurface(snapshot.authenticationSurface);
   if (typeof snapshot.visibleText !== "string"
     || typeof blockerSurface !== "object"
     || blockerSurface === null
     || typeof blockerSurface.text !== "string"
     || typeof blockerSurface.hasConversationMessages !== "boolean"
-    || !isAuthenticationSurface(authenticationSurface)) {
+    || authenticationSurface === undefined) {
     return undefined;
   }
-  return snapshot as PageDomSnapshot;
+  return {
+    visibleText: snapshot.visibleText,
+    blockerSurface: {
+      text: blockerSurface.text,
+      hasConversationMessages: blockerSurface.hasConversationMessages
+    },
+    authenticationSurface
+  };
 }
 
 async function readLegacyBlockerSurface(page: PageLike): Promise<PageDomSnapshot["blockerSurface"]> {
@@ -236,35 +278,155 @@ async function readLegacyBlockerSurface(page: PageLike): Promise<PageDomSnapshot
 }
 
 function snapshotFromHtml(html: string): PageDomSnapshot {
+  const visibleHtml = htmlWithoutHiddenSubtrees(html);
   const messageSelectorPattern = /data-message-author-role=|data-testid=["']conversation-turn/i;
-  const hasConversationMessages = messageSelectorPattern.test(html);
-  const withoutMessages = html.replace(
+  const openingTags = visibleHtml.match(/<[a-z0-9-]+\b[^>]*>/gi) ?? [];
+  const visibleOpeningTags = openingTags.filter(tag => !htmlControlIsHidden(tag));
+  const hasConversationMessages = visibleOpeningTags.some(tag => messageSelectorPattern.test(tag));
+  const withoutMessages = visibleHtml.replace(
     /<([a-z0-9-]+)\b[^>]*(?:data-message-author-role|data-testid=["']conversation-turn)[^>]*>[\s\S]*?<\/\1>/gi,
     " "
   );
-  const conversationLinkCount = Array.from(html.matchAll(
-    /<a\b[^>]*href=["'](?:https:\/\/(?:www\.)?chatgpt\.com)?\/c\/[^"']+/gi
-  )).length;
-  const buttonLikeTags = html.match(/<(?:button\b[^>]*|[a-z0-9-]+\b(?=[^>]*\brole=["']button["'])[^>]*)>/gi) ?? [];
-  const accountControl = buttonLikeTags.some(tag =>
+  const conversationLinkCount = visibleOpeningTags.filter(tag => {
+    if (!/^<a\b/i.test(tag)) return false;
+    const href = htmlAttribute(tag, "href");
+    return typeof href === "string" && /^(?:https:\/\/(?:www\.)?chatgpt\.com)?\/c\//i.test(href);
+  }).length;
+  const buttonLikeTags = visibleHtml.match(/<(?:button\b[^>]*|[a-z0-9-]+\b(?=[^>]*\brole=["']button["'])[^>]*)>/gi) ?? [];
+  const accountControl = buttonLikeTags.filter(tag => !htmlControlIsHidden(tag)).some(tag =>
     /data-testid=["'][^"']*(?:profile|account)[^"']*["']/i.test(tag)
       || (/aria-haspopup=["']menu["']/i.test(tag)
         && /aria-label=["'][^"']*(?:profile|account)[^"']*["']/i.test(tag))
-  ) || /<button\b[^>]*aria-haspopup=["']menu["'][^>]*>[\s\S]{0,1000}?<img\b/i.test(html);
-  const hasComposer = /\bid=["']prompt-textarea["']/i.test(html)
-    || /\bdata-testid=["'][^"']*composer[^"']*["']/i.test(html)
-    || /contenteditable=["']true["'][^>]*(?:aria-label=["'][^"']*ChatGPT|role=["']textbox)/i.test(html);
+  ) || Array.from(visibleHtml.matchAll(/<button\b([^>]*)>[\s\S]{0,1000}?<img\b[\s\S]*?<\/button>/gi))
+    .some(match => !htmlControlIsHidden(match[1] ?? "") && /aria-haspopup=["']menu["']/i.test(match[1] ?? ""));
+  const hasComposer = visibleOpeningTags.some(tag =>
+    /\bid=["']prompt-textarea["']/i.test(tag)
+      || /\bdata-testid=["'][^"']*composer[^"']*["']/i.test(tag)
+      || (/contenteditable=["']true["']/i.test(tag)
+        && /(?:aria-label=["'][^"']*ChatGPT|role=["']textbox)/i.test(tag))
+  );
 
   return {
-    visibleText: htmlToText(html),
+    visibleText: htmlToText(visibleHtml),
     blockerSurface: { text: htmlToText(withoutMessages), hasConversationMessages },
     authenticationSurface: {
       accountControl,
       conversationLinkCount,
       hasComposer,
-      hasConversationMessages
+      hasConversationMessages,
+      loginControl: hasVisibleLoginControlInHtml(withoutMessages)
     }
   };
+}
+
+function htmlWithoutHiddenSubtrees(html: string): string {
+  const voidElements = new Set([
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"
+  ]);
+  const ancestors: Array<{ tagName: string; startsHiddenSubtree: boolean }> = [];
+  const visibleParts: string[] = [];
+  const tagPattern = /<!--[\s\S]*?-->|<![^>]*>|<\/?([a-z][a-z0-9-]*)\b[^>]*>/gi;
+  let hiddenDepth = 0;
+  let cursor = 0;
+
+  for (const match of html.matchAll(tagPattern)) {
+    const token = match[0];
+    const tokenIndex = match.index;
+    if (hiddenDepth === 0) visibleParts.push(html.slice(cursor, tokenIndex));
+
+    const rawTagName = match[1];
+    if (rawTagName === undefined) {
+      cursor = tokenIndex + token.length;
+      continue;
+    }
+
+    const tagName = rawTagName.toLocaleLowerCase();
+    if (/^<\//.test(token)) {
+      const hiddenDepthBeforeClose = hiddenDepth;
+      let matchingAncestor = -1;
+      for (let index = ancestors.length - 1; index >= 0; index -= 1) {
+        if (ancestors[index]?.tagName === tagName) {
+          matchingAncestor = index;
+          break;
+        }
+      }
+      if (matchingAncestor >= 0) {
+        for (let index = ancestors.length - 1; index >= matchingAncestor; index -= 1) {
+          if (ancestors[index]?.startsHiddenSubtree) hiddenDepth -= 1;
+        }
+        ancestors.length = matchingAncestor;
+      }
+      if (hiddenDepthBeforeClose === 0 && hiddenDepth === 0) visibleParts.push(token);
+    } else {
+      const startsHiddenSubtree = isInertHtmlSubtree(tagName) || htmlControlIsHidden(token);
+      if (hiddenDepth === 0 && !startsHiddenSubtree) visibleParts.push(token);
+      const selfClosing = /\/\s*>$/.test(token) || voidElements.has(tagName);
+      if (!selfClosing) {
+        ancestors.push({ tagName, startsHiddenSubtree });
+        if (startsHiddenSubtree) hiddenDepth += 1;
+      }
+    }
+
+    cursor = tokenIndex + token.length;
+  }
+
+  if (hiddenDepth === 0) visibleParts.push(html.slice(cursor));
+  return visibleParts.join("");
+}
+
+function isInertHtmlSubtree(tagName: string): boolean {
+  return tagName === "script"
+    || tagName === "style"
+    || tagName === "template"
+    || tagName === "noscript";
+}
+
+function hasVisibleLoginControlInHtml(html: string): boolean {
+  const loginLabels = new Set(localeLabels.loginBlocker.map(normalizeControlName));
+  const pairedControls = html.matchAll(
+    /<(button|a)\b([^>]*)>([\s\S]*?)<\/\1>|<([a-z][a-z0-9-]*)\b([^>]*\brole=["']button["'][^>]*)>([\s\S]*?)<\/\4>/gi
+  );
+  for (const match of pairedControls) {
+    const attributes = match[2] ?? match[5] ?? "";
+    const contents = match[3] ?? match[6] ?? "";
+    if (htmlControlIsHidden(attributes)) continue;
+    if (htmlControlNames(attributes, contents).some(name => loginLabels.has(normalizeControlName(name)))) {
+      return true;
+    }
+  }
+
+  for (const match of html.matchAll(/<input\b([^>]*)>/gi)) {
+    const attributes = match[1] ?? "";
+    if (htmlControlIsHidden(attributes)) continue;
+    const type = htmlAttribute(attributes, "type")?.toLocaleLowerCase();
+    if (type !== "button" && type !== "submit") continue;
+    if (htmlControlNames(attributes, "").some(name => loginLabels.has(normalizeControlName(name)))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function htmlControlNames(attributes: string, contents: string): string[] {
+  return [htmlAttribute(attributes, "aria-label"), htmlAttribute(attributes, "value"), htmlToText(contents)]
+    .filter((name): name is string => typeof name === "string" && name.trim().length > 0);
+}
+
+function htmlControlIsHidden(attributes: string): boolean {
+  const attributeNamesOnly = attributes.replace(/"[^"]*"|'[^']*'/g, "\"\"");
+  return /(?:^|[\s<])hidden(?=[\s=/>]|$)/i.test(attributeNamesOnly)
+    || /\baria-hidden\s*=\s*["']true["']/i.test(attributes)
+    || /\bstyle\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse))/i.test(attributes);
+}
+
+function htmlAttribute(attributes: string, name: string): string | undefined {
+  const match = attributes.match(new RegExp("\\b" + escapeRegExp(name) + "\\s*=\\s*([\\\"'])(.*?)\\1", "i"));
+  return match?.[2];
+}
+
+function normalizeControlName(value: string): string {
+  return value.replace(/\s+/g, " ").trim().toLocaleLowerCase();
 }
 
 function emptyPageDomSnapshot(): PageDomSnapshot {
@@ -280,19 +442,31 @@ function emptyAuthenticationSurface(): AuthenticationSurface {
     accountControl: false,
     conversationLinkCount: 0,
     hasComposer: false,
-    hasConversationMessages: false
+    hasConversationMessages: false,
+    loginControl: false
   };
 }
 
-function isAuthenticationSurface(value: unknown): value is AuthenticationSurface {
-  if (typeof value !== "object" || value === null) return false;
+function normalizeAuthenticationSurface(value: unknown): AuthenticationSurface | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
   const surface = value as Partial<AuthenticationSurface>;
-  return typeof surface.accountControl === "boolean"
+  const hasLoginControl = Object.prototype.hasOwnProperty.call(surface, "loginControl");
+  if (hasLoginControl && typeof surface.loginControl !== "boolean") return undefined;
+  if (!(typeof surface.accountControl === "boolean"
     && typeof surface.conversationLinkCount === "number"
     && Number.isInteger(surface.conversationLinkCount)
     && surface.conversationLinkCount >= 0
     && typeof surface.hasComposer === "boolean"
-    && typeof surface.hasConversationMessages === "boolean";
+    && typeof surface.hasConversationMessages === "boolean")) {
+    return undefined;
+  }
+  return {
+    accountControl: surface.accountControl,
+    conversationLinkCount: surface.conversationLinkCount,
+    hasComposer: surface.hasComposer,
+    hasConversationMessages: surface.hasConversationMessages,
+    loginControl: hasLoginControl ? surface.loginControl as boolean : false
+  };
 }
 
 function isStructurallySignedIn(surface: AuthenticationSurface): boolean {
@@ -304,4 +478,12 @@ function isLikelyLoginWall(visibleText: string): boolean {
   const labels = localeLabels.loginBlocker.map(escapeRegExp).join("|");
   const matches = visibleText.match(new RegExp("(?:" + labels + ")", "gi")) ?? [];
   return matches.length >= 2 || /\bsign\s?up\b|\bcreate (?:an )?account\b/i.test(visibleText);
+}
+
+function loginRequiredBlocker(visibleText: string): NonNullable<PageState["blocker"]> {
+  return {
+    kind: "login_required",
+    message: "ChatGPT requires the user to sign in before continuing.",
+    visibleText: compactVisibleText(visibleText)
+  };
 }

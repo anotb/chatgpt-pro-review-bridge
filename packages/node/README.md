@@ -7,7 +7,7 @@ Unofficial project: not affiliated with, endorsed by, or sponsored by OpenAI. Th
 ## Install
 
 ```bash
-npm install chatgpt-pro-review-bridge@0.7.10
+npm install chatgpt-pro-review-bridge@0.7.11
 ```
 
 ## Usage
@@ -152,6 +152,24 @@ Generic `preferExistingTab` discovery is best-effort: if an unrelated user tab
 is still claimed by another browser-host invocation, a new workflow may open a
 fresh ChatGPT home tab. Explicit `existingTab` targets remain strict and return
 a resumable claim conflict instead of opening a duplicate conversation.
+
+The first-class `reviews.askPro(...)` workflow also maintains invocation-level
+conversation and tab affinity before submission and throughout polling,
+response capture, verification, and artifact handling. A provisional `WEB:`
+receipt can move to a canonical conversation only after exact prompt ownership
+is proven. Recovery accepts one exact candidate (or one selected by the stable
+archived tab ID); otherwise it returns a resumable ambiguity blocker.
+
+For review packets, `includeChangedFiles: false` omits changed-file source
+snapshots only. The safety inventory and safe diff evidence remain, and the same
+hard-secret, generated, binary, oversized, symlink, and gitlink exclusions are
+still applied.
+
+Secret-path policy excludes repository-root `credentials/` and `secrets/`
+stores, provider/browser store ancestry, and hard secret filenames. Nested
+application source directories with credential- or secret-themed names remain
+reviewable; store ancestry and hard filename rules take precedence over a
+fixture-looking suffix such as `tests/fixtures/auth.json`.
 
 ## Validation
 
