@@ -304,8 +304,27 @@ async function selectExistingUserTab(
   }
 
   const selected = matches[0]!;
-  const page = normalizePage(await claimTab.call(browser.user, selected));
+  let page: PageLike;
+  try {
+    page = normalizePage(await claimTab.call(browser.user, selected));
+  } catch (error) {
+    if (isExistingTabClaimConflict(error)) {
+      throw new ExistingTabSelectionError(
+        "A matching ChatGPT tab is still claimed by another browser-host invocation. Resume after that invocation exits; no duplicate tab was opened.",
+        "existing_tab_temporarily_claimed",
+        [selected],
+        diagnostics,
+        true
+      );
+    }
+    throw error;
+  }
   return diagnostics === undefined ? { page } : { page, diagnostics };
+}
+
+function isExistingTabClaimConflict(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\balready\b.{0,80}\b(?:browser session|claimed|controlled)\b|\bclaimed\b.{0,80}\b(?:browser session|another session)\b/i.test(message);
 }
 
 function userTabMatchesTarget(tab: BrowserUserTabInfo, policy: ExistingTabPolicy): boolean {
@@ -486,7 +505,7 @@ async function findExistingChatGPTTab(browser: BrowserLike): Promise<PageLike | 
     target: { type: "selected", host: "chatgpt" },
     ifMultiple: "first",
     requireChatGPT: true
-  }, false).catch(() => ({ page: undefined }));
+  }, false);
   if (userTab.page !== undefined) {
     return userTab.page;
   }
@@ -498,7 +517,8 @@ class ExistingTabSelectionError extends ChatGPTControlError {
     message: string,
     code: string,
     candidates: BrowserUserTabInfo[] = [],
-    diagnostics?: ExistingTabDiagnostics
+    diagnostics?: ExistingTabDiagnostics,
+    resumable = false
   ) {
     const details: ConstructorParameters<typeof ChatGPTControlError>[4] = {
       code,
@@ -517,6 +537,7 @@ class ExistingTabSelectionError extends ChatGPTControlError {
       ]
     };
     if (diagnostics !== undefined) details.diagnostics = { existingTab: diagnostics };
+    if (resumable) details.resumable = true;
     super(message, "not_found", true, undefined, details);
   }
 }

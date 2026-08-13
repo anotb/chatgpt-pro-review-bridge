@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.7
+
+- Aligns the parity package with the shared backend's canonical AskPro resume,
+  authenticated-page detection, and duplicate-tab prevention fixes.
+
 ## 0.7.6
 
 - Aligns the parity package version with the corrected gated release path.

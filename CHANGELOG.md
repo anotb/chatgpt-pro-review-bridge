@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.7 - 2026-08-13
+
+- Reconciles a confirmed provisional `WEB:` submission receipt with the
+  prompt-identical canonical `/c/<uuid>` conversation during resume, without
+  attaching, composing, or submitting a second time.
+- Recognizes current authenticated Chat surfaces from structural account,
+  history, composer, and conversation evidence while retaining real login-wall
+  detection.
+- Returns a resumable tab-claim conflict instead of opening a duplicate
+  canonical conversation, and covers safe dead-owner lease reclamation.
+
 ## 0.7.6 - 2026-08-12
 
 - Makes the stable GitHub release job explicitly run after a successful release

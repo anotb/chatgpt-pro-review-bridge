@@ -109,7 +109,7 @@ describe("existing Chrome tab bootstrap", () => {
     expect(created).toEqual(["https://chatgpt.com/"]);
   });
 
-  it("falls back to a fresh tab when implicit user-tab reuse is already claimed", async () => {
+  it("does not open a duplicate when an implicit user tab is temporarily claimed", async () => {
     const created: string[] = [];
     const browser: BrowserLike = {
       name: "chrome",
@@ -131,9 +131,13 @@ describe("existing Chrome tab bootstrap", () => {
 
     const result = await bootstrap({ browser }, { preferExistingTab: true });
 
-    expect(result.ok).toBe(true);
-    expect(result.context.tabId).toBe("fresh-tab");
-    expect(created).toEqual(["https://chatgpt.com/"]);
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("blocked");
+    expect(result.blocker).toMatchObject({
+      code: "existing_tab_temporarily_claimed",
+      resumable: true
+    });
+    expect(created).toEqual([]);
   });
 
   it("claims an exact open user ChatGPT tab by conversation id without navigating", async () => {

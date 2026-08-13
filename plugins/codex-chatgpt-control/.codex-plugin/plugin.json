@@ -1,6 +1,6 @@
 {
   "name": "codex-chatgpt-control",
-  "version": "0.7.6+codex.20260812",
+  "version": "0.7.7+codex.20260813",
   "description": "Control visible ChatGPT Chat and Work from Codex with verified configuration, task progress, files, artifacts, and safe blockers.",
   "author": {
     "name": "Adam Allcock",

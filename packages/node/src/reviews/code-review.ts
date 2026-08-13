@@ -199,20 +199,35 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
       const checkpoint = await readOptionalThreadCheckpoint(args.resume.archiveDirectory);
       validateThreadCheckpoint(checkpoint, archivedSubmission, prepared);
+      const receiptThreadId = archivedSubmission.thread.id ?? conversationIdFromUrl(archivedSubmission.thread.url);
+      const receiptIsProvisional = isProvisionalConversationId(receiptThreadId);
       const archivedTarget = checkpoint !== undefined
-        && (archivedSubmission.state !== "confirmed" || isProvisionalConversationId(archivedSubmission.thread.id))
+        && (archivedSubmission.state !== "confirmed" || receiptIsProvisional)
         ? checkpoint.current
         : archivedSubmission.thread;
       const archivedThreadId = archivedTarget.id ?? conversationIdFromUrl(archivedTarget.url);
       const suppliedUrlId = conversationIdFromUrl(threadUrl);
-      if (threadId !== undefined && archivedThreadId !== undefined && threadId !== archivedThreadId) {
-        throw new ReviewPreparationError("resume.conversationId does not match the immutable archived submission receipt.", "resume_thread_mismatch");
+      if (threadId !== undefined && suppliedUrlId !== undefined && threadId !== suppliedUrlId) {
+        throw new ReviewPreparationError("resume.conversationId and resume.threadUrl refer to different Chat conversations.", "resume_thread_mismatch");
       }
-      if (suppliedUrlId !== undefined && archivedThreadId !== undefined && suppliedUrlId !== archivedThreadId) {
-        throw new ReviewPreparationError("resume.threadUrl does not match the immutable archived submission receipt.", "resume_thread_mismatch");
+      const suppliedThreadId = threadId ?? suppliedUrlId;
+      if (!receiptIsProvisional && suppliedThreadId !== undefined && archivedThreadId !== undefined && suppliedThreadId !== archivedThreadId) {
+        throw new ReviewPreparationError("The caller-supplied resume thread does not match the immutable archived submission receipt.", "resume_thread_mismatch");
       }
-      threadId = archivedThreadId ?? threadId ?? suppliedUrlId;
-      threadUrl = archivedTarget.url ?? threadUrl;
+      if (receiptIsProvisional
+        && archivedThreadId !== undefined
+        && !isProvisionalConversationId(archivedThreadId)
+        && suppliedThreadId !== undefined
+        && suppliedThreadId !== archivedThreadId) {
+        throw new ReviewPreparationError("The caller-supplied resume thread does not match the prompt-verified canonical thread checkpoint.", "resume_thread_mismatch");
+      }
+      const useSuppliedCanonicalTarget = receiptIsProvisional
+        && suppliedThreadId !== undefined
+        && !isProvisionalConversationId(suppliedThreadId);
+      threadId = useSuppliedCanonicalTarget ? suppliedThreadId : (archivedThreadId ?? suppliedThreadId);
+      threadUrl = useSuppliedCanonicalTarget
+        ? (suppliedUrlId === suppliedThreadId ? threadUrl : undefined)
+        : (archivedTarget.url ?? threadUrl);
       if (args.resume.artifactBaseline !== undefined
         && sha256Text(JSON.stringify(args.resume.artifactBaseline)) !== sha256Text(JSON.stringify(archivedSubmission.artifactBaseline))) {
         throw new ReviewPreparationError("resume.artifactBaseline does not match the immutable archived submission baseline.", "resume_artifact_baseline_mismatch");
@@ -240,13 +255,14 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       threadUrl = opened.data.url || opened.context.url;
       threadId = opened.data.conversationId ?? opened.context.conversationId;
     } else {
-      const unconfirmedNeedsRecovery = archivedSubmission !== undefined
-        && archivedSubmission.state !== "confirmed"
-        && (threadId === undefined || isProvisionalConversationId(threadId));
-      const visibleRecovery = unconfirmedNeedsRecovery
+      const needsThreadRecovery = isProvisionalConversationId(threadId)
+        || (archivedSubmission !== undefined
+          && archivedSubmission.state !== "confirmed"
+          && threadId === undefined);
+      const visibleRecovery = needsThreadRecovery
         ? await recoverCurrentVisibleThread(port, prepared!.prompt)
         : undefined;
-      let openResult = unconfirmedNeedsRecovery
+      const openResult = needsThreadRecovery
         ? await runStep("RECOVER_THREAD", () => visibleRecovery === undefined
             ? port.recoverThread(recoveryQuery!, prepared!.prompt)
             : Promise.resolve(visibleRecovery))
@@ -254,9 +270,6 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
             ...(threadId === undefined ? {} : { conversationId: threadId }),
             ...(threadUrl === undefined ? {} : { url: threadUrl })
           }));
-      if (!openResult.ok && isProvisionalConversationId(threadId) && recoveryQuery !== undefined) {
-        openResult = await runStep("RECOVER_THREAD", () => port.recoverThread(recoveryQuery!, prepared!.prompt));
-      }
       const opened = requireData(openResult, openResult.ok ? "OPEN_CHAT" : "RECOVER_THREAD");
       const openedThreadId = opened.data.conversationId ?? conversationIdFromUrl(opened.data.url || opened.context.url);
       const expectedThreadId = archivedSubmission?.thread.id ?? conversationIdFromUrl(archivedSubmission?.thread.url);
@@ -268,7 +281,6 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       }
       threadUrl = opened.data.url || opened.context.url || threadUrl;
       threadId = opened.data.conversationId ?? opened.context.conversationId;
-      await persistThreadCheckpoint(archiveDirectory!, prepared!, threadUrl, threadId, port.now());
       const latestUser = requireData(await port.readLatestUser(), "POLL_METADATA");
       const observedUserSha256 = sha256Text(normalizeVisiblePrompt(latestUser.data.text));
       const visiblePromptProven = archivedSubmission?.userTurnSha256 !== undefined
@@ -276,11 +288,24 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           || visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared!.prompt)
         : visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared!.prompt);
       if (!visiblePromptProven) {
-        throw new ReviewPreparationError(
-          "The latest visible user turn is not the archived submitted review prompt. Resume refused to capture a later or ambiguous response.",
-          "resume_user_turn_mismatch"
-        );
+        const message = "The latest visible user turn is not the archived submitted review prompt. Resume refused to capture a later or ambiguous response.";
+        if (isProvisionalConversationId(expectedThreadId)) {
+          throw new ReviewWorkflowError({
+            ok: false,
+            status: "blocked",
+            warnings: [],
+            blocker: {
+              kind: "unknown",
+              code: "resume_recovered_thread_prompt_mismatch",
+              message: message + " The provisional receipt remains resumable and was not rebound to this candidate.",
+              resumable: true
+            },
+            context: { timestamp: port.now().toISOString(), ...(threadUrl === undefined ? {} : { url: threadUrl }) }
+          }, "RECOVER_THREAD");
+        }
+        throw new ReviewPreparationError(message, "resume_user_turn_mismatch");
       }
+      await persistThreadCheckpoint(archiveDirectory!, prepared!, threadUrl, threadId, port.now());
       if (archivedSubmission !== undefined && archivedSubmission.state !== "confirmed" && archiveDirectory !== undefined) {
         await writeImmutableJson(join(archiveDirectory, "submission-confirmation.json"), {
           schemaVersion: archivedSubmission.schemaVersion === 3 ? 3 : 2,

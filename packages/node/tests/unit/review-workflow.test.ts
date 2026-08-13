@@ -791,6 +791,122 @@ describe("Pro review state machine", () => {
     expect(calls).not.toContain("submit");
   });
 
+  it("canonicalizes a confirmed provisional receipt on resume without resubmitting", async () => {
+    const repo = await fixtureRepository();
+    const provisionalUrl = "https://chatgpt.com/c/WEB:confirmed-fixture";
+    const canonicalUrl = "https://chatgpt.com/c/canonical-fixture";
+    let submittedPrompt = "";
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      newThread: async () => success({
+        url: provisionalUrl,
+        conversationId: "WEB:confirmed-fixture"
+      }),
+      submit: async (prompt: string) => {
+        submittedPrompt = prompt;
+        return {
+          ...success({
+            submitted: true,
+            userTurnText: prompt,
+            turnCount: 2,
+            submissionState: "submitted_generating"
+          }),
+          context: context(provisionalUrl)
+        };
+      },
+      readLatestUser: async () => success({
+        role: "user",
+        text: submittedPrompt,
+        format: "normalized_text"
+      }),
+      pageState: async () => ({
+        url: provisionalUrl,
+        conversationId: "WEB:confirmed-fixture",
+        visibleText: "Stop generating",
+        signedIn: true
+      }),
+      waitMetadata: async () => failure("timeout", {
+        complete: false,
+        assistantTurnCount: 0,
+        elapsedMs: 10,
+        responseContent: "metadata"
+      })
+    }));
+    expect(first.status).toBe("in_progress");
+    expect(JSON.parse(await readFile(join(first.archiveDirectory!, "submission.json"), "utf8"))).toMatchObject({
+      state: "confirmed",
+      thread: { url: provisionalUrl, id: "WEB:confirmed-fixture" }
+    });
+
+    const archivedPrompt = await readFile(join(first.archiveDirectory!, "prompt.md"), "utf8");
+    const mismatchedCalls: string[] = [];
+    const mismatched = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(mismatchedCalls, {
+      pageState: async () => ({
+        url: provisionalUrl,
+        conversationId: "WEB:confirmed-fixture",
+        visibleText: "Chat history",
+        signedIn: true
+      }),
+      recoverThread: async () => success({
+        url: canonicalUrl,
+        conversationId: "canonical-fixture"
+      }),
+      readLatestUser: async () => success({
+        role: "user",
+        text: "A different visible prompt",
+        format: "normalized_text"
+      })
+    }));
+
+    expect(mismatched.status).toBe("blocked");
+    expect(mismatched.blocker).toMatchObject({ code: "resume_recovered_thread_prompt_mismatch", resumable: true });
+    expect(mismatchedCalls).not.toContain("submit");
+    expect(JSON.parse(await readFile(join(first.archiveDirectory!, "thread-checkpoint.json"), "utf8"))).toMatchObject({
+      current: { url: provisionalUrl, id: "WEB:confirmed-fixture" }
+    });
+
+    const calls: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls, {
+      bootstrap: async target => {
+        expect(target).toBeUndefined();
+        return success({});
+      },
+      pageState: async () => ({
+        url: canonicalUrl,
+        conversationId: "canonical-fixture",
+        title: "Canonical fixture",
+        visibleText: "Chat history",
+        signedIn: true
+      }),
+      readLatestUser: async () => success({
+        role: "user",
+        text: archivedPrompt,
+        format: "normalized_text"
+      })
+    }));
+
+    expect(resumed.status).toBe("completed_with_warnings");
+    expect(resumed.thread).toEqual({ url: canonicalUrl, id: "canonical-fixture" });
+    expect(calls).toContain("pageState");
+    expect(calls).not.toContain("recoverThread");
+    expect(calls).not.toContain("openThread");
+    expect(calls).not.toContain("submit");
+    expect(JSON.parse(await readFile(join(first.archiveDirectory!, "thread-checkpoint.json"), "utf8"))).toMatchObject({
+      current: { url: canonicalUrl, id: "canonical-fixture" }
+    });
+  });
+
   it("fails closed when a later user turn makes resume response ownership ambiguous", async () => {
     const repo = await fixtureRepository();
     const first = await runCodeReviewWithPort({
@@ -966,6 +1082,43 @@ describe("Pro review state machine", () => {
     expect(calls).toContain("bootstrap");
     await expect(readFile(join(archiveDirectory, ".workflow.lock"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     if (owner.exitCode === null) owner.kill();
+  });
+
+  it("reclaims a fresh lease after its browser-host owner has exited", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([]));
+    const archiveDirectory = first.archiveDirectory!;
+    const prompt = await readFile(join(archiveDirectory, "prompt.md"), "utf8");
+    const owner = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+    if (owner.pid === undefined) throw new Error("Unable to start the exited lease-owner fixture.");
+    const ownerPid = owner.pid;
+    await new Promise<void>((resolve, reject) => {
+      if (owner.exitCode !== null) {
+        resolve();
+        return;
+      }
+      owner.once("exit", () => resolve());
+      owner.once("error", reject);
+    });
+    await writeFile(join(archiveDirectory, ".workflow.lock"), JSON.stringify({
+      schemaVersion: 1,
+      pid: ownerPid,
+      acquiredAt: new Date().toISOString(),
+      renewedAt: new Date().toISOString()
+    }));
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory }
+    }, makePort(calls, {
+      readLatestUser: async () => success({ role: "user", text: prompt, format: "normalized_text" })
+    }));
+
+    expect(resumed.status).toBe("completed");
+    expect(calls).toContain("bootstrap");
+    await expect(readFile(join(archiveDirectory, ".workflow.lock"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("does not evict a live lease owner merely because its timestamp is old", async () => {

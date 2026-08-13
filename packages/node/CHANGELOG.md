@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.7
+
+- Canonicalizes confirmed provisional AskPro receipts to a prompt-identical
+  visible UUID conversation during resume without resubmission.
+- Detects the current authenticated Chat DOM from multiple structural signals
+  and pauses resumably when an existing canonical tab is temporarily claimed.
+- Adds regressions for canonical timeout recovery, authenticated-page
+  classification, duplicate-tab prevention, and dead-owner lease reclamation.
+
 ## 0.7.6
 
 - Ensures a successful exact-artifact release gate schedules the stable GitHub

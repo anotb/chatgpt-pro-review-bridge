@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <nav aria-label="Chat history">
+      <a href="/c/canonical-fixture">Login flow review</a>
+      <a href="/c/another-fixture">Login recovery notes</a>
+    </nav>
+    <main>
+      <article data-testid="conversation-turn-1" data-message-author-role="user">
+        Review the authentication state.
+      </article>
+      <article data-testid="conversation-turn-2" data-message-author-role="assistant">
+        The review is complete.
+      </article>
+      <div id="prompt-textarea" contenteditable="true" role="textbox" aria-label="Ask ChatGPT"></div>
+    </main>
+    <button data-testid="accounts-profile-button" aria-haspopup="menu" aria-label="Open profile menu">
+      <img alt="Profile image" src="/fixture-avatar.png">
+      <span>ChatGPT Pro</span>
+    </button>
+  </body>
+</html>

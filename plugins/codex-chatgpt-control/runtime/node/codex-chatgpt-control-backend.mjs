@@ -3098,14 +3098,14 @@ async function readPageState(page) {
   const url = typeof rawUrl === "string" ? rawUrl : "";
   const rawTitle = typeof page.title === "function" ? await page.title().catch(() => void 0) : void 0;
   const title = typeof rawTitle === "string" ? rawTitle : void 0;
-  const [visibleText, blockerSurface] = await Promise.all([
-    readVisibleText(page),
-    readBlockerSurface(page)
-  ]);
+  const snapshot = await readPageSnapshot(page);
+  const visibleText = snapshot.visibleText;
+  const blockerSurface = snapshot.blockerSurface;
   const fullPageBlocker = classifyVisibleText(visibleText);
   const classifiedBlocker = blockerSurface.hasConversationMessages ? classifyVisibleText(blockerSurface.text) : classifyVisibleText(blockerSurface.text) ?? fullPageBlocker;
-  const loginWall = classifiedBlocker?.kind === "login_required" && isLikelyLoginWall(visibleText);
-  const signedIn = isLikelySignedIn(visibleText) && !loginWall;
+  const structurallySignedIn = isStructurallySignedIn(snapshot.authenticationSurface);
+  const loginWall = classifiedBlocker?.kind === "login_required" && isLikelyLoginWall(visibleText) && !structurallySignedIn;
+  const signedIn = (isLikelySignedIn(visibleText) || structurallySignedIn) && !loginWall;
   const blocker = classifiedBlocker?.kind === "login_required" && signedIn ? void 0 : classifiedBlocker;
   const conversationId = parseConversationId(url);
   const state = {
@@ -3124,42 +3124,17 @@ async function readPageState(page) {
   }
   return state;
 }
-async function readVisibleText(page) {
-  if (typeof page.evaluate === "function") {
-    try {
-      return await withTimeout(
-        page.evaluate(() => document.body?.innerText ?? ""),
-        1e3,
-        "Timed out while reading visible page text."
-      );
-    } catch {
-    }
-  }
-  if (typeof page.content === "function") {
-    try {
-      const html = await withTimeout(
-        page.content(),
-        1e3,
-        "Timed out while reading page content."
-      );
-      return htmlToText(html);
-    } catch {
-      return "";
-    }
-  }
-  return "";
-}
 function htmlToText(html) {
   return html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\s+/g, " ").trim();
 }
 function isLikelySignedIn(visibleText) {
   const markers = localeLabels.signedInMarkers.map(escapeRegExp).join("|");
-  return new RegExp(`\\b(${markers})\\b`, "i").test(visibleText);
+  return new RegExp("\\b(" + markers + ")\\b", "i").test(visibleText);
 }
-async function readBlockerSurface(page) {
+async function readPageSnapshot(page) {
   if (typeof page.evaluate === "function") {
     try {
-      const snapshot = await withTimeout(page.evaluate(() => {
+      const value = await withTimeout(page.evaluate(() => {
         const messageSelector = "[data-message-author-role], [data-testid^='conversation-turn']";
         const systemSelector = [
           "[role='alert']",
@@ -3171,32 +3146,153 @@ async function readBlockerSurface(page) {
           "[class*='toast' i]",
           "[class*='banner' i]"
         ].join(", ");
-        const text = Array.from(document.querySelectorAll(systemSelector)).filter((element) => element.closest(messageSelector) === null).map((element) => `${element.textContent ?? ""} ${element.getAttribute("aria-label") ?? ""}`).join(" ");
+        const accountControlSelector = [
+          "button[data-testid*='profile' i]",
+          "button[data-testid*='account' i]",
+          "[role='button'][data-testid*='profile' i]",
+          "[role='button'][data-testid*='account' i]",
+          "button[aria-haspopup='menu'][aria-label*='profile' i]",
+          "button[aria-haspopup='menu'][aria-label*='account' i]",
+          "button[aria-haspopup='menu'] img"
+        ].join(", ");
+        const conversationLinkSelector = [
+          "a[href^='/c/']",
+          "a[href^='https://chatgpt.com/c/']",
+          "a[href^='https://www.chatgpt.com/c/']"
+        ].join(", ");
+        const composerSelector = [
+          "#prompt-textarea",
+          "textarea[data-id='root']",
+          "[contenteditable='true'][data-testid*='composer' i]",
+          "[contenteditable='true'][aria-label*='ChatGPT' i]"
+        ].join(", ");
+        const hasConversationMessages = document.querySelector(messageSelector) !== null;
+        const text = Array.from(document.querySelectorAll(systemSelector)).filter((element) => element.closest(messageSelector) === null).map((element) => (element.textContent ?? "") + " " + (element.getAttribute("aria-label") ?? "")).join(" ");
         return {
-          text,
-          hasConversationMessages: document.querySelector(messageSelector) !== null
+          visibleText: document.body?.innerText ?? "",
+          blockerSurface: { text, hasConversationMessages },
+          authenticationSurface: {
+            accountControl: document.querySelector(accountControlSelector) !== null,
+            conversationLinkCount: document.querySelectorAll(conversationLinkSelector).length,
+            hasComposer: document.querySelector(composerSelector) !== null,
+            hasConversationMessages
+          }
         };
-      }), 1e3, "Timed out while reading system blocker surfaces.");
-      if (typeof snapshot === "object" && snapshot !== null && typeof snapshot.text === "string" && typeof snapshot.hasConversationMessages === "boolean") {
-        return snapshot;
+      }), 1e3, "Timed out while reading the visible ChatGPT page state.");
+      const normalized = normalizePageDomSnapshot(value);
+      if (normalized !== void 0) {
+        if (typeof value === "string") {
+          normalized.blockerSurface = await readLegacyBlockerSurface(page);
+        }
+        return normalized;
       }
     } catch {
     }
   }
   if (typeof page.content === "function") {
     try {
-      const html = await withTimeout(page.content(), 1e3, "Timed out while reading blocker surfaces.");
-      const hasConversationMessages = /data-message-author-role=|data-testid=["']conversation-turn/i.test(html);
-      const withoutMessages = html.replace(/<([a-z0-9-]+)\b[^>]*(?:data-message-author-role|data-testid=["']conversation-turn)[^>]*>[\s\S]*?<\/\1>/gi, " ");
-      return { text: htmlToText(withoutMessages), hasConversationMessages };
+      const html = await withTimeout(page.content(), 1e3, "Timed out while reading page content.");
+      return snapshotFromHtml(html);
     } catch {
+      return emptyPageDomSnapshot();
     }
+  }
+  return emptyPageDomSnapshot();
+}
+function normalizePageDomSnapshot(value) {
+  if (typeof value === "string") {
+    return {
+      visibleText: value,
+      blockerSurface: { text: value, hasConversationMessages: false },
+      authenticationSurface: emptyAuthenticationSurface()
+    };
+  }
+  if (typeof value !== "object" || value === null) return void 0;
+  const snapshot = value;
+  const blockerSurface = snapshot.blockerSurface;
+  const authenticationSurface = snapshot.authenticationSurface;
+  if (typeof snapshot.visibleText !== "string" || typeof blockerSurface !== "object" || blockerSurface === null || typeof blockerSurface.text !== "string" || typeof blockerSurface.hasConversationMessages !== "boolean" || !isAuthenticationSurface(authenticationSurface)) {
+    return void 0;
+  }
+  return snapshot;
+}
+async function readLegacyBlockerSurface(page) {
+  if (typeof page.evaluate !== "function") return { text: "", hasConversationMessages: false };
+  try {
+    const value = await withTimeout(page.evaluate(() => {
+      const messageSelector = "[data-message-author-role], [data-testid^='conversation-turn']";
+      const systemSelector = [
+        "[role='alert']",
+        "[role='status']",
+        "[role='dialog']",
+        "[aria-live='assertive']",
+        "[data-testid*='toast' i]",
+        "[data-testid*='banner' i]",
+        "[class*='toast' i]",
+        "[class*='banner' i]"
+      ].join(", ");
+      const text = Array.from(document.querySelectorAll(systemSelector)).filter((element) => element.closest(messageSelector) === null).map((element) => `${element.textContent ?? ""} ${element.getAttribute("aria-label") ?? ""}`).join(" ");
+      return { text, hasConversationMessages: document.querySelector(messageSelector) !== null };
+    }), 1e3, "Timed out while reading legacy blocker surfaces.");
+    if (typeof value === "object" && value !== null && typeof value.text === "string" && typeof value.hasConversationMessages === "boolean") {
+      return value;
+    }
+  } catch {
   }
   return { text: "", hasConversationMessages: false };
 }
+function snapshotFromHtml(html) {
+  const messageSelectorPattern = /data-message-author-role=|data-testid=["']conversation-turn/i;
+  const hasConversationMessages = messageSelectorPattern.test(html);
+  const withoutMessages = html.replace(
+    /<([a-z0-9-]+)\b[^>]*(?:data-message-author-role|data-testid=["']conversation-turn)[^>]*>[\s\S]*?<\/\1>/gi,
+    " "
+  );
+  const conversationLinkCount = Array.from(html.matchAll(
+    /<a\b[^>]*href=["'](?:https:\/\/(?:www\.)?chatgpt\.com)?\/c\/[^"']+/gi
+  )).length;
+  const buttonLikeTags = html.match(/<(?:button\b[^>]*|[a-z0-9-]+\b(?=[^>]*\brole=["']button["'])[^>]*)>/gi) ?? [];
+  const accountControl = buttonLikeTags.some(
+    (tag) => /data-testid=["'][^"']*(?:profile|account)[^"']*["']/i.test(tag) || /aria-haspopup=["']menu["']/i.test(tag) && /aria-label=["'][^"']*(?:profile|account)[^"']*["']/i.test(tag)
+  ) || /<button\b[^>]*aria-haspopup=["']menu["'][^>]*>[\s\S]{0,1000}?<img\b/i.test(html);
+  const hasComposer = /\bid=["']prompt-textarea["']/i.test(html) || /\bdata-testid=["'][^"']*composer[^"']*["']/i.test(html) || /contenteditable=["']true["'][^>]*(?:aria-label=["'][^"']*ChatGPT|role=["']textbox)/i.test(html);
+  return {
+    visibleText: htmlToText(html),
+    blockerSurface: { text: htmlToText(withoutMessages), hasConversationMessages },
+    authenticationSurface: {
+      accountControl,
+      conversationLinkCount,
+      hasComposer,
+      hasConversationMessages
+    }
+  };
+}
+function emptyPageDomSnapshot() {
+  return {
+    visibleText: "",
+    blockerSurface: { text: "", hasConversationMessages: false },
+    authenticationSurface: emptyAuthenticationSurface()
+  };
+}
+function emptyAuthenticationSurface() {
+  return {
+    accountControl: false,
+    conversationLinkCount: 0,
+    hasComposer: false,
+    hasConversationMessages: false
+  };
+}
+function isAuthenticationSurface(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const surface = value;
+  return typeof surface.accountControl === "boolean" && typeof surface.conversationLinkCount === "number" && Number.isInteger(surface.conversationLinkCount) && surface.conversationLinkCount >= 0 && typeof surface.hasComposer === "boolean" && typeof surface.hasConversationMessages === "boolean";
+}
+function isStructurallySignedIn(surface) {
+  return surface.accountControl || surface.conversationLinkCount > 0 && (surface.hasComposer || surface.hasConversationMessages);
+}
 function isLikelyLoginWall(visibleText) {
   const labels = localeLabels.loginBlocker.map(escapeRegExp).join("|");
-  const matches = visibleText.match(new RegExp(`(?:${labels})`, "gi")) ?? [];
+  const matches = visibleText.match(new RegExp("(?:" + labels + ")", "gi")) ?? [];
   return matches.length >= 2 || /\bsign\s?up\b|\bcreate (?:an )?account\b/i.test(visibleText);
 }
 
@@ -4497,8 +4593,26 @@ async function selectExistingUserTab(browser, policy, collectDiagnostics) {
     );
   }
   const selected = matches[0];
-  const page = normalizePage(await claimTab.call(browser.user, selected));
+  let page;
+  try {
+    page = normalizePage(await claimTab.call(browser.user, selected));
+  } catch (error) {
+    if (isExistingTabClaimConflict(error)) {
+      throw new ExistingTabSelectionError(
+        "A matching ChatGPT tab is still claimed by another browser-host invocation. Resume after that invocation exits; no duplicate tab was opened.",
+        "existing_tab_temporarily_claimed",
+        [selected],
+        diagnostics,
+        true
+      );
+    }
+    throw error;
+  }
   return diagnostics === void 0 ? { page } : { page, diagnostics };
+}
+function isExistingTabClaimConflict(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\balready\b.{0,80}\b(?:browser session|claimed|controlled)\b|\bclaimed\b.{0,80}\b(?:browser session|another session)\b/i.test(message);
 }
 function userTabMatchesTarget(tab, policy) {
   const target = policy.target ?? { type: "selected", host: "chatgpt" };
@@ -4646,14 +4760,14 @@ async function findExistingChatGPTTab(browser) {
     target: { type: "selected", host: "chatgpt" },
     ifMultiple: "first",
     requireChatGPT: true
-  }, false).catch(() => ({ page: void 0 }));
+  }, false);
   if (userTab.page !== void 0) {
     return userTab.page;
   }
   return void 0;
 }
 var ExistingTabSelectionError = class extends ChatGPTControlError {
-  constructor(message, code, candidates = [], diagnostics) {
+  constructor(message, code, candidates = [], diagnostics, resumable = false) {
     const details = {
       code,
       candidates: candidates.map((tab) => ({ label: userTabCandidateLabel(tab) })),
@@ -4671,6 +4785,7 @@ var ExistingTabSelectionError = class extends ChatGPTControlError {
       ]
     };
     if (diagnostics !== void 0) details.diagnostics = { existingTab: diagnostics };
+    if (resumable) details.resumable = true;
     super(message, "not_found", true, void 0, details);
   }
 };
@@ -14818,17 +14933,24 @@ async function runCodeReviewWithPort(args, port) {
       archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
       const checkpoint = await readOptionalThreadCheckpoint(args.resume.archiveDirectory);
       validateThreadCheckpoint(checkpoint, archivedSubmission, prepared);
-      const archivedTarget = checkpoint !== void 0 && (archivedSubmission.state !== "confirmed" || isProvisionalConversationId(archivedSubmission.thread.id)) ? checkpoint.current : archivedSubmission.thread;
+      const receiptThreadId = archivedSubmission.thread.id ?? conversationIdFromUrl(archivedSubmission.thread.url);
+      const receiptIsProvisional = isProvisionalConversationId(receiptThreadId);
+      const archivedTarget = checkpoint !== void 0 && (archivedSubmission.state !== "confirmed" || receiptIsProvisional) ? checkpoint.current : archivedSubmission.thread;
       const archivedThreadId = archivedTarget.id ?? conversationIdFromUrl(archivedTarget.url);
       const suppliedUrlId = conversationIdFromUrl(threadUrl);
-      if (threadId !== void 0 && archivedThreadId !== void 0 && threadId !== archivedThreadId) {
-        throw new ReviewPreparationError("resume.conversationId does not match the immutable archived submission receipt.", "resume_thread_mismatch");
+      if (threadId !== void 0 && suppliedUrlId !== void 0 && threadId !== suppliedUrlId) {
+        throw new ReviewPreparationError("resume.conversationId and resume.threadUrl refer to different Chat conversations.", "resume_thread_mismatch");
       }
-      if (suppliedUrlId !== void 0 && archivedThreadId !== void 0 && suppliedUrlId !== archivedThreadId) {
-        throw new ReviewPreparationError("resume.threadUrl does not match the immutable archived submission receipt.", "resume_thread_mismatch");
+      const suppliedThreadId = threadId ?? suppliedUrlId;
+      if (!receiptIsProvisional && suppliedThreadId !== void 0 && archivedThreadId !== void 0 && suppliedThreadId !== archivedThreadId) {
+        throw new ReviewPreparationError("The caller-supplied resume thread does not match the immutable archived submission receipt.", "resume_thread_mismatch");
       }
-      threadId = archivedThreadId ?? threadId ?? suppliedUrlId;
-      threadUrl = archivedTarget.url ?? threadUrl;
+      if (receiptIsProvisional && archivedThreadId !== void 0 && !isProvisionalConversationId(archivedThreadId) && suppliedThreadId !== void 0 && suppliedThreadId !== archivedThreadId) {
+        throw new ReviewPreparationError("The caller-supplied resume thread does not match the prompt-verified canonical thread checkpoint.", "resume_thread_mismatch");
+      }
+      const useSuppliedCanonicalTarget = receiptIsProvisional && suppliedThreadId !== void 0 && !isProvisionalConversationId(suppliedThreadId);
+      threadId = useSuppliedCanonicalTarget ? suppliedThreadId : archivedThreadId ?? suppliedThreadId;
+      threadUrl = useSuppliedCanonicalTarget ? suppliedUrlId === suppliedThreadId ? threadUrl : void 0 : archivedTarget.url ?? threadUrl;
       if (args.resume.artifactBaseline !== void 0 && sha256Text2(JSON.stringify(args.resume.artifactBaseline)) !== sha256Text2(JSON.stringify(archivedSubmission.artifactBaseline))) {
         throw new ReviewPreparationError("resume.artifactBaseline does not match the immutable archived submission baseline.", "resume_artifact_baseline_mismatch");
       }
@@ -14850,15 +14972,12 @@ async function runCodeReviewWithPort(args, port) {
       threadUrl = opened.data.url || opened.context.url;
       threadId = opened.data.conversationId ?? opened.context.conversationId;
     } else {
-      const unconfirmedNeedsRecovery = archivedSubmission !== void 0 && archivedSubmission.state !== "confirmed" && (threadId === void 0 || isProvisionalConversationId(threadId));
-      const visibleRecovery = unconfirmedNeedsRecovery ? await recoverCurrentVisibleThread(port, prepared.prompt) : void 0;
-      let openResult = unconfirmedNeedsRecovery ? await runStep("RECOVER_THREAD", () => visibleRecovery === void 0 ? port.recoverThread(recoveryQuery, prepared.prompt) : Promise.resolve(visibleRecovery)) : await runStep("OPEN_CHAT", () => port.openThread({
+      const needsThreadRecovery = isProvisionalConversationId(threadId) || archivedSubmission !== void 0 && archivedSubmission.state !== "confirmed" && threadId === void 0;
+      const visibleRecovery = needsThreadRecovery ? await recoverCurrentVisibleThread(port, prepared.prompt) : void 0;
+      const openResult = needsThreadRecovery ? await runStep("RECOVER_THREAD", () => visibleRecovery === void 0 ? port.recoverThread(recoveryQuery, prepared.prompt) : Promise.resolve(visibleRecovery)) : await runStep("OPEN_CHAT", () => port.openThread({
         ...threadId === void 0 ? {} : { conversationId: threadId },
         ...threadUrl === void 0 ? {} : { url: threadUrl }
       }));
-      if (!openResult.ok && isProvisionalConversationId(threadId) && recoveryQuery !== void 0) {
-        openResult = await runStep("RECOVER_THREAD", () => port.recoverThread(recoveryQuery, prepared.prompt));
-      }
       const opened = requireData(openResult, openResult.ok ? "OPEN_CHAT" : "RECOVER_THREAD");
       const openedThreadId = opened.data.conversationId ?? conversationIdFromUrl(opened.data.url || opened.context.url);
       const expectedThreadId = archivedSubmission?.thread.id ?? conversationIdFromUrl(archivedSubmission?.thread.url);
@@ -14867,16 +14986,28 @@ async function runCodeReviewWithPort(args, port) {
       }
       threadUrl = opened.data.url || opened.context.url || threadUrl;
       threadId = opened.data.conversationId ?? opened.context.conversationId;
-      await persistThreadCheckpoint(archiveDirectory, prepared, threadUrl, threadId, port.now());
       const latestUser = requireData(await port.readLatestUser(), "POLL_METADATA");
       const observedUserSha256 = sha256Text2(normalizeVisiblePrompt(latestUser.data.text));
       const visiblePromptProven = archivedSubmission?.userTurnSha256 !== void 0 ? observedUserSha256 === archivedSubmission.userTurnSha256 || visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared.prompt) : visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared.prompt);
       if (!visiblePromptProven) {
-        throw new ReviewPreparationError(
-          "The latest visible user turn is not the archived submitted review prompt. Resume refused to capture a later or ambiguous response.",
-          "resume_user_turn_mismatch"
-        );
+        const message = "The latest visible user turn is not the archived submitted review prompt. Resume refused to capture a later or ambiguous response.";
+        if (isProvisionalConversationId(expectedThreadId)) {
+          throw new ReviewWorkflowError({
+            ok: false,
+            status: "blocked",
+            warnings: [],
+            blocker: {
+              kind: "unknown",
+              code: "resume_recovered_thread_prompt_mismatch",
+              message: message + " The provisional receipt remains resumable and was not rebound to this candidate.",
+              resumable: true
+            },
+            context: { timestamp: port.now().toISOString(), ...threadUrl === void 0 ? {} : { url: threadUrl } }
+          }, "RECOVER_THREAD");
+        }
+        throw new ReviewPreparationError(message, "resume_user_turn_mismatch");
       }
+      await persistThreadCheckpoint(archiveDirectory, prepared, threadUrl, threadId, port.now());
       if (archivedSubmission !== void 0 && archivedSubmission.state !== "confirmed" && archiveDirectory !== void 0) {
         await writeImmutableJson(join6(archiveDirectory, "submission-confirmation.json"), {
           schemaVersion: archivedSubmission.schemaVersion === 3 ? 3 : 2,
