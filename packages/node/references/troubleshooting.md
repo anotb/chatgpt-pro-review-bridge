@@ -102,6 +102,12 @@ changing panes from an active task.
 
 When `existingTab` targeting cannot select one already-open tab, inspect `blocker.diagnostics.existingTab` or the rendered blocker explanation. Diagnostics are metadata-only: requested target, whether user-open tabs were available, candidate tab IDs, URLs, titles, conversation IDs, omitted candidate count, and mismatch reason. They must not include page text or chat content.
 
+`preferExistingTab` is a soft preference for untargeted bootstrap. If an
+unrelated user tab is temporarily claimed, bootstrap may open a fresh ChatGPT
+home tab so a new workflow can proceed. An explicit `existingTab` target or an
+AskPro resume remains fail-closed and resumable; retry that exact conversation
+after its current browser-host owner exits rather than opening a duplicate.
+
 ## File Upload Permission
 
 File uploads have two separate permission gates:

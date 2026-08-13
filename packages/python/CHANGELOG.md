@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.8
+
+- Aligns the parity package with the shared backend's soft preferred-tab
+  recovery while preserving duplicate-safe exact conversation resumes.
+
 ## 0.7.7
 
 - Aligns the parity package with the shared backend's canonical AskPro resume,

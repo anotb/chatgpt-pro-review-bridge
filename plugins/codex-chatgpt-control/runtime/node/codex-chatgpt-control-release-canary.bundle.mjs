@@ -3726,11 +3726,19 @@ async function findExistingChatGPTTab(browser) {
       }
     }
   }
-  const userTab = await selectExistingUserTab(browser, {
-    target: { type: "selected", host: "chatgpt" },
-    ifMultiple: "first",
-    requireChatGPT: true
-  }, false);
+  let userTab;
+  try {
+    userTab = await selectExistingUserTab(browser, {
+      target: { type: "selected", host: "chatgpt" },
+      ifMultiple: "first",
+      requireChatGPT: true
+    }, false);
+  } catch (error) {
+    if (!(error instanceof ExistingTabSelectionError) || error.blockerDetails.code !== "existing_tab_temporarily_claimed") {
+      throw error;
+    }
+    userTab = {};
+  }
   if (userTab.page !== void 0) {
     return userTab.page;
   }

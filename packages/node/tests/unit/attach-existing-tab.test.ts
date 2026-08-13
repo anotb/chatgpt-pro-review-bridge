@@ -109,7 +109,7 @@ describe("existing Chrome tab bootstrap", () => {
     expect(created).toEqual(["https://chatgpt.com/"]);
   });
 
-  it("does not open a duplicate when an implicit user tab is temporarily claimed", async () => {
+  it("falls back to a fresh tab when an implicitly preferred user tab is temporarily claimed", async () => {
     const created: string[] = [];
     const browser: BrowserLike = {
       name: "chrome",
@@ -130,6 +130,38 @@ describe("existing Chrome tab bootstrap", () => {
     };
 
     const result = await bootstrap({ browser }, { preferExistingTab: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.context.tabId).toBe("fresh-tab");
+    expect(created).toEqual(["https://chatgpt.com/"]);
+  });
+
+  it("does not open a duplicate when an exact existing conversation is temporarily claimed", async () => {
+    const created: string[] = [];
+    const browser: BrowserLike = {
+      name: "chrome",
+      user: {
+        openTabs: async () => [
+          { id: "claimed-tab", url: "https://chatgpt.com/c/abc-123", title: "Already Claimed" }
+        ],
+        claimTab: async () => {
+          throw new Error("Tab claimed-tab is already part of browser session existing-session");
+        }
+      },
+      tabs: {
+        create: async url => {
+          created.push(url);
+          return fakeChatGPTPage("fresh-tab", url, "ChatGPT");
+        }
+      }
+    };
+
+    const result = await bootstrap({ browser }, {
+      existingTab: {
+        target: { type: "conversationId", conversationId: "abc-123" },
+        ifMissing: "open"
+      }
+    });
 
     expect(result.ok).toBe(false);
     expect(result.status).toBe("blocked");

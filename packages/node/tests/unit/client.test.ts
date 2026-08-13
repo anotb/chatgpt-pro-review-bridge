@@ -330,6 +330,36 @@ describe("createChatGPT", () => {
     expect(result.data?.checks.upload?.remediation?.join(" ")).toContain("Allow access to file URLs");
   });
 
+  it("doctor opens a fresh tab when an unrelated preferred ChatGPT tab is already claimed", async () => {
+    const created: string[] = [];
+    const browser: BrowserLike = {
+      name: "chrome",
+      user: {
+        openTabs: async () => [
+          { id: "claimed-tab", url: "https://chatgpt.com/c/unrelated", title: "Unrelated review" }
+        ],
+        claimTab: async () => {
+          throw new Error("Tab claimed-tab is already part of browser session existing-session");
+        }
+      },
+      tabs: {
+        create: async url => {
+          created.push(url);
+          return fakeChatGPTPage();
+        }
+      }
+    };
+    const chatgpt = createChatGPT({ browser });
+
+    const result = await chatgpt.doctor({ check: ["bridge", "login", "upload"] });
+
+    expect(result.ok).toBe(true);
+    expect(result.data?.checks.bridge?.status).toBe("ok");
+    expect(result.data?.checks.login?.status).toBe("ok");
+    expect(result.data?.checks.upload?.status).toBe("unknown");
+    expect(created).toEqual(["https://chatgpt.com/"]);
+  });
+
   it("doctor preserves the lightweight default checks", async () => {
     const page = fakeChatGPTPage();
     const browser: BrowserLike = { name: "chrome", tabs: { selected: () => page } };

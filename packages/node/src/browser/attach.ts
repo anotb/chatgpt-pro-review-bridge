@@ -501,11 +501,24 @@ async function findExistingChatGPTTab(browser: BrowserLike): Promise<PageLike | 
     }
   }
 
-  const userTab = await selectExistingUserTab(browser, {
-    target: { type: "selected", host: "chatgpt" },
-    ifMultiple: "first",
-    requireChatGPT: true
-  }, false);
+  let userTab: ExistingTabSelectionOutcome;
+  try {
+    userTab = await selectExistingUserTab(browser, {
+      target: { type: "selected", host: "chatgpt" },
+      ifMultiple: "first",
+      requireChatGPT: true
+    }, false);
+  } catch (error) {
+    if (!(error instanceof ExistingTabSelectionError)
+      || error.blockerDetails.code !== "existing_tab_temporarily_claimed") {
+      throw error;
+    }
+    // Generic reuse is only a preference. A tab claimed by another live
+    // invocation must not prevent an unrelated new workflow from opening its
+    // own ChatGPT home tab. Exact existing-tab targets take the explicit path
+    // above and remain fail-closed so resumes never open duplicates.
+    userTab = {};
+  }
   if (userTab.page !== undefined) {
     return userTab.page;
   }

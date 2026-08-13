@@ -7,7 +7,7 @@ Unofficial project: not affiliated with, endorsed by, or sponsored by OpenAI. Th
 ## Install
 
 ```bash
-npm install chatgpt-pro-review-bridge@0.7.7
+npm install chatgpt-pro-review-bridge@0.7.8
 ```
 
 ## Usage
@@ -147,6 +147,11 @@ if (!result.ok) {
 ```
 
 `explainBlocker` preserves the original `result.blocker` fields and adds conservative retry/resume guidance. Existing-tab blockers include metadata such as requested target, candidate tab IDs, URLs, titles, conversation IDs, and mismatch reason; they do not include page text or chat content.
+
+Generic `preferExistingTab` discovery is best-effort: if an unrelated user tab
+is still claimed by another browser-host invocation, a new workflow may open a
+fresh ChatGPT home tab. Explicit `existingTab` targets remain strict and return
+a resumable claim conflict instead of opening a duplicate conversation.
 
 ## Validation
 

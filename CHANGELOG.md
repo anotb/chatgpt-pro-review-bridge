@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.8 - 2026-08-13
+
+- Lets a new doctor or AskPro workflow open its own ChatGPT home tab when an
+  unrelated user tab is still claimed by another browser-host invocation.
+- Keeps exact conversation resumes fail-closed and resumable, so this
+  availability fix never opens a duplicate canonical review thread.
+
 ## 0.7.7 - 2026-08-13
 
 - Reconciles a confirmed provisional `WEB:` submission receipt with the

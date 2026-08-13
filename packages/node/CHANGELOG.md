@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.8
+
+- Treats a claim conflict as a miss only for generic preferred-tab discovery,
+  allowing new workflows and doctor checks to use a fresh ChatGPT home tab.
+- Preserves strict claim conflicts for exact existing-tab targets and AskPro
+  resumes, with regressions covering both paths.
+
 ## 0.7.7
 
 - Canonicalizes confirmed provisional AskPro receipts to a prompt-identical
