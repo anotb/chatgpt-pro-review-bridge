@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.3 - 2026-08-12
+
+- Treats bounded partial assistant text captured while Pro is still generating
+  as resumable `in_progress`, matching the visible “Pro is thinking” state.
+- Keeps explicitly stopped or interrupted partial output terminal instead of
+  conflating it with an ordinary long-running review.
+
 ## 0.7.2 - 2026-08-12
 
 - Adds first-class full-repository packet scope, including repositories with no

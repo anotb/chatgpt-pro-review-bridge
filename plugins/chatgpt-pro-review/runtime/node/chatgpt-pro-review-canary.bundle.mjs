@@ -15000,7 +15000,8 @@ async function runCodeReviewWithPort(args, port) {
         complete = true;
         break;
       }
-      if (wait.status !== "timeout") requireOk(wait, "POLL_METADATA");
+      const resumablePoll = wait.status === "timeout" || wait.status === "partial" && wait.data?.completionState !== "stopped";
+      if (!resumablePoll) requireOk(wait, "POLL_METADATA");
     }
     if (!complete) throw new ReviewInProgress();
     const archivedResponse = archiveDirectory === void 0 ? void 0 : await readFile5(join6(archiveDirectory, "response.md"), "utf8").catch(() => void 0);

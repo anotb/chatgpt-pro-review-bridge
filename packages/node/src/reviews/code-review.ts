@@ -482,7 +482,15 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         complete = true;
         break;
       }
-      if (wait.status !== "timeout") requireOk(wait, "POLL_METADATA");
+      // A bounded wait that observed assistant text reports `partial`, while a
+      // wait that observed no text reports `timeout`. Both mean the same thing
+      // to this resumable workflow unless the DOM explicitly proved that
+      // generation was stopped: Pro has not produced a complete answer yet.
+      // Do not turn an ordinary "Pro is thinking" snapshot into a terminal
+      // workflow failure merely because some partial text is already visible.
+      const resumablePoll = wait.status === "timeout"
+        || (wait.status === "partial" && wait.data?.completionState !== "stopped");
+      if (!resumablePoll) requireOk(wait, "POLL_METADATA");
     }
     if (!complete) throw new ReviewInProgress();
 

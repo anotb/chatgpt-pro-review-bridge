@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.3
+
+- Aligns the parity package version with the shared backend fix that maps
+  actively generating partial Pro responses to resumable `in_progress`.
+
 ## 0.7.2
 
 - Aligns the parity package with the shared Node backend/runtime release and

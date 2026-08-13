@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.3
+
+- Normalizes bounded partial polling snapshots from an actively generating Pro
+  answer to the review workflow's resumable `in_progress` outcome.
+- Preserves terminal handling for explicitly stopped partial responses.
+
 ## 0.7.2
 
 - Adds ergonomic committed and first-commit full-repository packets with an

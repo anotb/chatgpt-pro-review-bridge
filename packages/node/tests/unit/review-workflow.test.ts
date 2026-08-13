@@ -192,6 +192,60 @@ describe("Pro review state machine", () => {
     expect(JSON.parse(await readFile(join(result.archiveDirectory!, "artifacts", "manifest.json"), "utf8"))).toHaveLength(2);
   });
 
+  it("returns in_progress when a bounded poll captures partial text while Pro is still thinking", async () => {
+    const repo = await fixtureRepository();
+    const calls: string[] = [];
+    const result = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort(calls, {
+      waitMetadata: async () => failure("partial", {
+        complete: false,
+        assistantTurnCount: 1,
+        elapsedMs: 10,
+        responseChars: 217,
+        responseSha256: "abc",
+        responseContent: "metadata",
+        completionState: "generating",
+        generationActive: true,
+        generationSignals: ["stop_control"]
+      })
+    }));
+
+    expect(result).toMatchObject({
+      status: "in_progress",
+      submitted: true,
+      resubmitAllowed: false,
+      nextAction: "poll_same_thread"
+    });
+    expect(calls.filter(call => call === "submit")).toHaveLength(1);
+    expect(calls.filter(call => call === "waitMetadata")).toHaveLength(1);
+    expect(calls).not.toContain("readFullMarkdown");
+  });
+
+  it("does not resume an explicitly stopped partial response as though Pro were still thinking", async () => {
+    const repo = await fixtureRepository();
+    const result = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD"
+    }, makePort([], {
+      waitMetadata: async () => failure("partial", {
+        complete: false,
+        assistantTurnCount: 1,
+        elapsedMs: 10,
+        responseChars: 217,
+        responseContent: "metadata",
+        completionState: "stopped",
+        generationActive: false,
+        generationSignals: ["stopped_assistant"]
+      })
+    }));
+
+    expect(result.status).toBe("failed");
+    expect(result.nextAction).toBeUndefined();
+  });
+
   it("checkpoints each artifact and resumes partial or completed downloads without duplicates", async () => {
     const repo = await fixtureRepository();
     const delta = {
