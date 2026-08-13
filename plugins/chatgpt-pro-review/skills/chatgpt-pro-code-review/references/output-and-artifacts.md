@@ -13,10 +13,13 @@ Archive layout:
 ├── request.md
 ├── prompt.md
 ├── configuration.before.json
+├── submission-intent.json
 ├── submission.json
 ├── context/manifest.json
+├── context/manifest.upload.json
 ├── context/packet-*.md
 ├── response.md
+├── terminal-outcome.json (non-resumable blockers only)
 ├── artifacts/manifest.json
 ├── configuration.json
 ├── receipt.json

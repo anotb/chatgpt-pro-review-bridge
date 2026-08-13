@@ -110,7 +110,7 @@ describe("Pro review state machine", () => {
     ]));
   });
 
-  it("requires strict verification even when the visible selection says Pro", async () => {
+  it("keeps strict verification invariant when legacy callers pass false safety flags", async () => {
     const repo = await fixtureRepository();
     const calls: string[] = [];
     const unverifiedProSnapshot: ConfigurationSnapshotData = {
@@ -118,7 +118,17 @@ describe("Pro review state machine", () => {
       selection: { intelligence: "Pro" },
       inspection: { ...proInspection, verified: false }
     };
-    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort(calls, {
+    const result = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      target: { strict: false },
+      safeguards: {
+        submitOnce: false,
+        verifyTargetBeforeSubmit: false,
+        verifyTargetAfterCompletion: false,
+        failOnFallback: false
+      }
+    }, makePort(calls, {
       snapshotConfiguration: async () => success(unverifiedProSnapshot)
     }));
 
@@ -310,6 +320,27 @@ describe("Pro review state machine", () => {
     expect(result.provenance.responseSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(await readFile(join(result.archiveDirectory!, "response.md"), "utf8")).toContain("# Complete review");
     expect(calls).toContain("restoreConfiguration");
+
+    const terminal = JSON.parse(await readFile(join(result.archiveDirectory!, "terminal-outcome.json"), "utf8"));
+    expect(terminal).toMatchObject({
+      schemaVersion: 1,
+      status: "blocked",
+      submitted: true,
+      blocker: { kind: "model_fallback", code: "pro_postcondition_unverified", resumable: false },
+      response: { sha256: result.provenance.responseSha256 }
+    });
+    const resumeCalls: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: result.archiveDirectory! }
+    }, makePort(resumeCalls));
+    expect(resumed).toMatchObject({
+      status: "blocked",
+      submitted: true,
+      blocker: { kind: "model_fallback", code: "pro_postcondition_unverified", resumable: false }
+    });
+    expect(resumeCalls).toEqual([]);
   });
 
   it("resumes the same archived thread without attaching or submitting again", async () => {
@@ -345,6 +376,38 @@ describe("Pro review state machine", () => {
     expect(resumeCalls).not.toContain("compose");
     expect(resumeCalls).not.toContain("submit");
     expect(resumeCalls.filter(call => call === "readFullMarkdown")).toHaveLength(1);
+    expect(JSON.parse(await readFile(join(first.archiveDirectory!, "submission.json"), "utf8"))).toMatchObject({
+      schemaVersion: 3,
+      promptSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      manifestSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      uploadManifestSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      configurationSnapshotSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      artifactBaselineSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      packetBindings: expect.any(Array)
+    });
+  });
+
+  it("rejects a mutated upload manifest before opening a browser on resume", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    await writeFile(join(first.archiveDirectory!, "context", "manifest.upload.json"), "{}\n");
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls));
+
+    expect(resumed.status).toBe("blocked");
+    expect(resumed.blocker?.code).toBe("resume_submission_integrity_mismatch");
+    expect(calls).not.toContain("bootstrap");
   });
 
   it("rejects a caller-supplied conversation id that disagrees with the archived receipt", async () => {
@@ -787,7 +850,7 @@ describe("Pro review state machine", () => {
     if (owner.exitCode === null) owner.kill();
   });
 
-  it("reclaims an expired lease whose PID has been reused by a live process", async () => {
+  it("does not evict a live lease owner merely because its timestamp is old", async () => {
     const repo = await fixtureRepository();
     const first = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([]));
     const archiveDirectory = first.archiveDirectory!;
@@ -810,11 +873,15 @@ describe("Pro review state machine", () => {
         readLatestUser: async () => success({ role: "user", text: prompt, format: "normalized_text" })
       }));
 
-      expect(resumed.status).toBe("completed");
-      expect(calls).toContain("bootstrap");
-      await expect(readFile(join(archiveDirectory, ".workflow.lock"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+      expect(resumed).toMatchObject({
+        status: "blocked",
+        blocker: { code: "review_archive_locked", resumable: true }
+      });
+      expect(calls).not.toContain("bootstrap");
+      await expect(readFile(join(archiveDirectory, ".workflow.lock"), "utf8")).resolves.toContain(String(reusedOwner.pid));
     } finally {
       if (reusedOwner.exitCode === null) reusedOwner.kill();
+      await rm(join(archiveDirectory, ".workflow.lock"), { force: true });
     }
   });
 

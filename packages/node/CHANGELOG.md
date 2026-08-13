@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.2
+
+- Adds ergonomic committed and first-commit full-repository packets with an
+  opt-in working-tree overlay for committed repositories.
+- Hardens packet privacy, NUL-safe path handling, packet budgets/fences,
+  immutable resume bindings, terminal fallback outcomes, and renewable leases.
+- Preserves caller-defined AskPro questions instead of narrowing the workflow
+  to diff reviews or a mandatory output schema.
+
 ## 0.7.1
 
 - Treats a completed archive's final artifact manifest as authoritative on

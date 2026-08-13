@@ -30,7 +30,7 @@ const result = await chatgpt.reviews.askPro({
   request: {
     additionalInstructions: "<faithful caller-defined question or task>"
   },
-  target: { experience: "chat", intelligence: "Pro", strict: true },
+  target: { experience: "chat", intelligence: "Pro" },
   output: {
     mode: "full",
     archive: true,
@@ -39,10 +39,6 @@ const result = await chatgpt.reviews.askPro({
     returnFullMarkdown: true
   },
   safeguards: {
-    submitOnce: true,
-    verifyTargetBeforeSubmit: true,
-    verifyTargetAfterCompletion: true,
-    failOnFallback: true,
     restorePreviousConfiguration: false
   },
   polling: {
@@ -55,7 +51,9 @@ const result = await chatgpt.reviews.askPro({
 
 This context-free form sends the question itself as the visible user turn and performs no Git commands or uploads. Pass the caller's question faithfully. Add context, focus, or output instructions only when the caller or current session wants them.
 
-When repository material is useful, use the sibling `chatgpt-pro-code-review` skill. Change reviews add `repositoryRoot`, `baseRef`, `headRef`, and `context: { mode: "review-packets", scope: "changes", ... }`. Full-repository reviews omit `baseRef` and use `scope: "repository"`; this also works before the repository's first commit when the working tree is included.
+Submit-once behavior, pre/post Pro verification, and fallback rejection are invariants. Legacy boolean fields for those safeguards remain accepted but cannot disable them; only configuration restoration is caller-selectable.
+
+When repository material is useful, use the sibling `chatgpt-pro-code-review` skill. Change reviews add `repositoryRoot`, `baseRef`, `headRef`, and `context: { mode: "review-packets", scope: "changes", ... }`. Full-repository reviews omit `baseRef` and use `scope: "repository"`; committed repositories default to commit-only evidence, while repositories before their first commit default to the index and working tree.
 
 ## Resume without duplication
 
@@ -86,7 +84,7 @@ const followUp = await chatgpt.reviews.askPro({
   request: {
     additionalInstructions: "<caller-defined follow-up>"
   },
-  target: { experience: "chat", intelligence: "Pro", strict: true },
+  target: { experience: "chat", intelligence: "Pro" },
   output: {
     mode: "full",
     archive: true,
@@ -95,10 +93,6 @@ const followUp = await chatgpt.reviews.askPro({
     returnFullMarkdown: true
   },
   safeguards: {
-    submitOnce: true,
-    verifyTargetBeforeSubmit: true,
-    verifyTargetAfterCompletion: true,
-    failOnFallback: true,
     restorePreviousConfiguration: false
   },
   polling: {

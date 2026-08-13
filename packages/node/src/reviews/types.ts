@@ -27,6 +27,7 @@ export type ProCodeReviewArgs = {
   target?: {
     experience?: "chat";
     intelligence?: "Pro";
+    /** @deprecated Chat + Pro verification is always strict. */
     strict?: boolean;
   };
   context?: {
@@ -34,6 +35,7 @@ export type ProCodeReviewArgs = {
     mode?: "none" | "review-packets";
     /** Defaults to changes when baseRef is present and repository when it is omitted. */
     scope?: ReviewScope;
+    /** Defaults to true for changes, false for committed repository scope, and true for an unborn repository. */
     includeWorkingTree?: boolean;
     includeInstructions?: boolean;
     includeChangedFiles?: boolean;
@@ -56,9 +58,13 @@ export type ProCodeReviewArgs = {
     hardTransportLimitBytes?: number;
   };
   safeguards?: {
+    /** @deprecated Submit-once is an invariant and cannot be disabled. */
     submitOnce?: boolean;
+    /** @deprecated Pre-submit target verification is an invariant and cannot be disabled. */
     verifyTargetBeforeSubmit?: boolean;
+    /** @deprecated Post-completion target verification is an invariant and cannot be disabled. */
     verifyTargetAfterCompletion?: boolean;
+    /** @deprecated Fallback always fails closed. */
     failOnFallback?: boolean;
     restorePreviousConfiguration?: boolean;
   };
@@ -166,6 +172,8 @@ export type PreparedReviewContext = {
   promptPath: string;
   packetPaths: string[];
   manifestPath: string;
+  /** Sanitized manifest attached to visible Chat; local manifestPath retains full local provenance. */
+  uploadManifestPath: string;
   manifest: ReviewPacketManifest;
   manifestSha256: string;
   prompt: string;

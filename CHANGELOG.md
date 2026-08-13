@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.2 - 2026-08-12
 
 - Adds first-class full-repository packet scope, including repositories with no
   commits yet, without requiring callers to manufacture an empty commit.
@@ -8,6 +8,19 @@
   `baseRef`, while preserving base/head merge-base behavior for change reviews.
 - Makes cross-invocation polling cadence explicit for calling agents and
   delegated subagents: 30s, 60s, 2m, 4m, then no more than once every 5m.
+- Defaults committed full-repository requests to commit-only evidence while
+  retaining explicit working-tree overlays and first-commit repository support.
+- Excludes credential stores, symlinks/gitlinks, generated files, binaries, and
+  oversized sources consistently from attached path and diff evidence; uploads
+  a path-sanitized manifest and uses NUL-safe Git parsing and balanced fences.
+- Binds resumable submissions to their prompt, manifests, packets,
+  configuration snapshot, and artifact baseline; non-resumable fallback
+  outcomes can no longer be upgraded by a later resume.
+- Renews active archive leases without evicting a live owner and makes archive
+  names collision-resistant for simultaneous same-head requests.
+- Keeps AskPro caller-directed and multi-purpose: review, design, explanation,
+  brainstorming, and patch proposals remain supported without a fixed finding
+  schema or diff-only restriction.
 
 ## 0.7.1
 

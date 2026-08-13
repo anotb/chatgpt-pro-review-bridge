@@ -89,6 +89,13 @@ class ReviewInProgress extends Error {
   }
 }
 
+class ArchivedTerminalOutcomeError extends Error {
+  constructor(readonly outcome: ArchivedTerminalOutcome) {
+    super(outcome.blocker.message);
+    this.name = "ArchivedTerminalOutcomeError";
+  }
+}
+
 export async function codeReview(env: RuntimeEnv, args: ProCodeReviewArgs): Promise<ProCodeReviewResult> {
   return runCodeReviewWithPort(args, defaultReviewWorkflowPort(env));
 }
@@ -118,6 +125,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
   let recoveryQuery: string | undefined;
   let releaseLease: (() => Promise<void>) | undefined;
   let archivedSubmission: ArchivedSubmission | undefined;
+  let terminalOutcomeAlreadyFinal = false;
 
   const runStep = async <T>(state: ReviewState, operation: () => Promise<T>): Promise<T> => {
     const startedAt = port.now().toISOString();
@@ -164,6 +172,10 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       archiveDirectory = args.resume.archiveDirectory;
       releaseLease = await acquireReviewLease(archiveDirectory);
       prepared = await readArchivedPreparedContext(args.resume.archiveDirectory);
+      terminalOutcomeAlreadyFinal = await stat(join(args.resume.archiveDirectory, "terminal-outcome.json"))
+        .then(() => true)
+        .catch(() => false);
+      const terminalOutcome = await readArchivedTerminalOutcome(args.resume.archiveDirectory);
       try {
         configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
       } catch (error) {
@@ -172,7 +184,13 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           "resume_configuration_snapshot_invalid"
         );
       }
-      archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, sha256Text(normalizePrompt(prepared.prompt)));
+      if (terminalOutcome !== undefined && terminalOutcome.blocker.resumable === false) {
+        if (terminalOutcome.submitted) {
+          archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
+        }
+        throw new ArchivedTerminalOutcomeError(terminalOutcome);
+      }
+      archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
       const checkpoint = await readOptionalThreadCheckpoint(args.resume.archiveDirectory);
       validateThreadCheckpoint(checkpoint, archivedSubmission, prepared);
       const archivedTarget = checkpoint !== undefined
@@ -258,7 +276,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       }
       if (archivedSubmission !== undefined && archivedSubmission.state !== "confirmed" && archiveDirectory !== undefined) {
         await writeImmutableJson(join(archiveDirectory, "submission-confirmation.json"), {
-          schemaVersion: 2,
+          schemaVersion: archivedSubmission.schemaVersion === 3 ? 3 : 2,
           state: "confirmed",
           submitted: true,
           resubmitAllowed: false,
@@ -269,6 +287,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           baselineTurnCount: archivedSubmission.baselineTurnCount,
           baselineAssistantCount: archivedSubmission.baselineAssistantCount,
           artifactBaseline: archivedSubmission.artifactBaseline,
+          ...submissionIntegrityFields(archivedSubmission),
           reconciliation: "visible_prompt_match"
         });
         archivedSubmission = {
@@ -343,16 +362,19 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     let baselineAssistantCount = 0;
     if (args.resume === undefined) {
       if (prepared!.mode === "review-packets") {
-        const attachments = [prepared!.manifestPath, ...prepared!.packetPaths];
+        const attachments = [prepared!.uploadManifestPath, ...prepared!.packetPaths];
         requireOk(await runStep("ATTACH_PACKETS", () => port.attach(attachments)), "ATTACH_PACKETS");
       }
       const beforeMessage = requireData(await port.messageStatus(), "SUBMIT_ONCE");
       baselineAssistantCount = beforeMessage.data.assistantTurnCount;
       requireOk(await port.compose(prepared!.prompt), "SUBMIT_ONCE");
       await assertPageSafe(port, "VERIFY_PRO_BEFORE_SUBMIT");
+      const submissionIntegrity = archiveDirectory === undefined
+        ? undefined
+        : await createSubmissionIntegrity(prepared!, archiveDirectory, configurationBefore!, artifactBaseline!);
       if (archiveDirectory !== undefined) {
         await writeImmutableJson(join(archiveDirectory, "submission-intent.json"), {
-          schemaVersion: 2,
+          schemaVersion: 3,
           state: "intent",
           resubmitAllowed: false,
           createdAt: port.now().toISOString(),
@@ -360,7 +382,8 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           thread: { url: threadUrl, id: threadId },
           baselineTurnCount: beforeMessage.data.turnCount,
           baselineAssistantCount,
-          artifactBaseline
+          artifactBaseline,
+          ...submissionIntegrity
         });
       }
 
@@ -395,7 +418,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       submitted = submissionState !== "failed";
       if (archiveDirectory !== undefined) {
         await writeImmutableJson(join(archiveDirectory, "submission.json"), {
-          schemaVersion: 2,
+          schemaVersion: 3,
           state: submissionState,
           submitted,
           resubmitAllowed: false,
@@ -406,6 +429,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           baselineTurnCount: beforeMessage.data.turnCount,
           baselineAssistantCount,
           artifactBaseline,
+          ...submissionIntegrity,
           result: redactReportValue(submitResult ?? { error: submitError instanceof Error ? { name: submitError.name, message: submitError.message } : String(submitError) })
         });
         await persistThreadCheckpoint(archiveDirectory, prepared!, threadUrl, threadId, port.now());
@@ -568,7 +592,16 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     terminalStatus = warnings.length > 0 ? "completed_with_warnings" : "completed";
   } catch (error) {
     primaryError = error;
-    if (error instanceof ReviewInProgress) {
+    if (error instanceof ArchivedTerminalOutcomeError) {
+      terminalOutcomeAlreadyFinal = true;
+      terminalStatus = error.outcome.status;
+      submitted = error.outcome.submitted;
+      blocker = error.outcome.blocker;
+      warnings.push(...error.outcome.warnings);
+      threadUrl = error.outcome.thread?.url ?? threadUrl;
+      threadId = error.outcome.thread?.id ?? threadId;
+      responseSha256 = error.outcome.response?.sha256;
+    } else if (error instanceof ReviewInProgress) {
       terminalStatus = "in_progress";
     } else if (error instanceof ReviewPreparationError) {
       archiveDirectory = error.archiveDirectory ?? archiveDirectory;
@@ -679,7 +712,9 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
   }
 
   try {
-    if (archiveDirectory !== undefined && (releaseLease !== undefined || result.blocker?.code !== "review_archive_locked")) {
+    if (archiveDirectory !== undefined
+      && !terminalOutcomeAlreadyFinal
+      && (releaseLease !== undefined || result.blocker?.code !== "review_archive_locked")) {
       const configurationRecord = {
         before: configurationBefore,
         requested,
@@ -696,6 +731,23 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         primaryError: primaryError instanceof Error ? { name: primaryError.name, message: primaryError.message } : undefined
       };
       try {
+        if (result.blocker?.resumable === false && result.status !== "in_progress") {
+          const terminalOutcome: ArchivedTerminalOutcome = {
+            schemaVersion: 1,
+            finalizedAt: port.now().toISOString(),
+            status: result.status,
+            ok: result.ok,
+            submitted: result.submitted,
+            resubmitAllowed: false,
+            blocker: result.blocker,
+            warnings: result.warnings,
+            ...(result.thread === undefined ? {} : { thread: result.thread }),
+            ...(responseMarkdown === undefined || responseSha256 === undefined
+              ? {}
+              : { response: { bytes: Buffer.byteLength(responseMarkdown), sha256: responseSha256 } })
+          };
+          await writeImmutableJson(join(archiveDirectory, "terminal-outcome.json"), terminalOutcome);
+        }
         await writeJsonReplacing(join(archiveDirectory, "configuration.json"), configurationRecord);
         await writeJsonReplacing(join(archiveDirectory, "run-report.redacted.json"), redactReportValue(receipt));
         await writeJsonReplacing(join(archiveDirectory, "receipt.json"), receipt);
@@ -827,19 +879,66 @@ async function readArchivedConfigurationSnapshot(archiveDirectory: string): Prom
 
 async function readArchivedPreparedContext(archiveDirectory: string): Promise<PreparedReviewContext> {
   const manifestPath = join(archiveDirectory, "context", "manifest.json");
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as PreparedReviewContext["manifest"];
-  if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.packets)) throw new Error("Archived review packet manifest is invalid.");
+  let manifest: PreparedReviewContext["manifest"];
+  try {
+    manifest = JSON.parse(await readFile(manifestPath, "utf8")) as PreparedReviewContext["manifest"];
+  } catch {
+    throw new ReviewPreparationError("Archived review packet manifest is missing or invalid.", "resume_packet_manifest_invalid");
+  }
+  if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.packets)) {
+    throw new ReviewPreparationError("Archived review packet manifest is invalid.", "resume_packet_manifest_invalid");
+  }
   const promptPath = join(archiveDirectory, "prompt.md");
+  const contextDirectory = resolve(archiveDirectory, "context");
+  const packetPaths: string[] = [];
+  for (const packet of manifest.packets) {
+    if (typeof packet.path !== "string" || typeof packet.sha256 !== "string" || !Number.isInteger(packet.sizeBytes)) {
+      throw new ReviewPreparationError("Archived review packet metadata is invalid.", "resume_packet_manifest_invalid");
+    }
+    const packetPath = resolve(contextDirectory, packet.path);
+    try {
+      assertPathInside(contextDirectory, packetPath);
+    } catch {
+      throw new ReviewPreparationError("Archived review packet path escapes the context directory.", "resume_packet_path_escape");
+    }
+    const packetMatches = await stat(packetPath)
+      .then(async packetStat => packetStat.isFile()
+        && packetStat.size === packet.sizeBytes
+        && await sha256File(packetPath) === packet.sha256)
+      .catch(() => false);
+    if (!packetMatches) {
+      throw new ReviewPreparationError(`Archived review packet failed size/hash verification: ${packet.path}`, "resume_packet_integrity_mismatch");
+    }
+    packetPaths.push(packetPath);
+  }
+  const candidateUploadManifestPath = join(contextDirectory, "manifest.upload.json");
+  let uploadManifestPath = candidateUploadManifestPath;
+  try {
+    const uploadManifestStat = await stat(candidateUploadManifestPath);
+    if (!uploadManifestStat.isFile()) throw new Error("Archived upload manifest is not a regular file.");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new ReviewPreparationError("Archived upload manifest is invalid.", "resume_upload_manifest_invalid");
+    }
+    uploadManifestPath = manifestPath;
+  }
+  let prompt: string;
+  try {
+    prompt = await readFile(promptPath, "utf8");
+  } catch {
+    throw new ReviewPreparationError("Archived submitted prompt is missing or unreadable.", "resume_prompt_invalid");
+  }
   return {
     mode: manifest.mode === "none" ? "none" : "review-packets",
     archiveDirectory,
     requestPath: join(archiveDirectory, "request.md"),
     promptPath,
-    packetPaths: manifest.packets.map(packet => join(archiveDirectory, "context", packet.path)),
+    packetPaths,
     manifestPath,
+    uploadManifestPath,
     manifest,
     manifestSha256: await sha256File(manifestPath),
-    prompt: await readFile(promptPath, "utf8")
+    prompt
   };
 }
 
@@ -852,14 +951,32 @@ async function readArchivedArtifactBaseline(archiveDirectory: string): Promise<A
 type ArchivedSubmission = {
   submitted: boolean;
   resubmitAllowed: false;
-  schemaVersion?: 1 | 2;
+  schemaVersion?: 1 | 2 | 3;
   state: "confirmed" | "intent" | "ambiguous";
   promptSha256?: string;
+  manifestSha256?: string;
+  uploadManifestSha256?: string;
+  configurationSnapshotSha256?: string;
+  artifactBaselineSha256?: string;
+  packetBindings?: Array<{ path: string; sizeBytes: number; sha256: string }>;
   userTurnSha256?: string;
   baselineTurnCount?: number;
   baselineAssistantCount?: number;
   thread: { url?: string; id?: string };
   artifactBaseline: ArtifactInventoryData;
+};
+
+type ArchivedTerminalOutcome = {
+  schemaVersion: 1;
+  finalizedAt: string;
+  status: Exclude<ProCodeReviewResult["status"], "in_progress">;
+  ok: boolean;
+  submitted: boolean;
+  resubmitAllowed: false;
+  blocker: NonNullable<ProCodeReviewResult["blocker"]>;
+  warnings: string[];
+  thread?: { url?: string; id?: string };
+  response?: { bytes: number; sha256: string };
 };
 
 type ThreadCheckpoint = {
@@ -870,7 +987,7 @@ type ThreadCheckpoint = {
   updatedAt: string;
 };
 
-async function readArchivedSubmission(archiveDirectory: string, expectedPromptSha256: string): Promise<ArchivedSubmission> {
+async function readArchivedSubmission(archiveDirectory: string, prepared: PreparedReviewContext): Promise<ArchivedSubmission> {
   const confirmation = await readOptionalJson(join(archiveDirectory, "submission-confirmation.json"));
   const submittedRecord = confirmation ?? await readOptionalJson(join(archiveDirectory, "submission.json"));
   const intentOnly = submittedRecord === undefined;
@@ -884,6 +1001,7 @@ async function readArchivedSubmission(archiveDirectory: string, expectedPromptSh
     || (state !== "confirmed" && state !== "intent" && state !== "ambiguous")) {
     throw new ReviewPreparationError("The archived submission receipt does not prove a submit-once, non-resubmittable review.", "resume_submission_unverified");
   }
+  const expectedPromptSha256 = sha256Text(normalizePrompt(prepared.prompt));
   if (value.promptSha256 !== undefined && value.promptSha256 !== expectedPromptSha256) {
     throw new ReviewPreparationError("The archived submission prompt hash does not match prompt.md.", "resume_prompt_hash_mismatch");
   }
@@ -893,7 +1011,90 @@ async function readArchivedSubmission(archiveDirectory: string, expectedPromptSh
   if (value.artifactBaseline === undefined || !Array.isArray(value.artifactBaseline.items)) {
     throw new ReviewPreparationError("The archived submission receipt has no valid artifact baseline.", "resume_artifact_baseline_invalid");
   }
+  if (value.schemaVersion === 3) {
+    const expectedIntegrity = await createSubmissionIntegrity(
+      prepared,
+      archiveDirectory,
+      await readArchivedConfigurationSnapshot(archiveDirectory),
+      value.artifactBaseline
+    );
+    const actualIntegrity = submissionIntegrityFields(value);
+    if (value.promptSha256 !== expectedPromptSha256
+      || actualIntegrity.manifestSha256 !== expectedIntegrity.manifestSha256
+      || actualIntegrity.uploadManifestSha256 !== expectedIntegrity.uploadManifestSha256
+      || actualIntegrity.configurationSnapshotSha256 !== expectedIntegrity.configurationSnapshotSha256
+      || actualIntegrity.artifactBaselineSha256 !== expectedIntegrity.artifactBaselineSha256
+      || sha256Text(JSON.stringify(actualIntegrity.packetBindings)) !== sha256Text(JSON.stringify(expectedIntegrity.packetBindings))) {
+      throw new ReviewPreparationError("The immutable submission receipt no longer matches the archived prompt, packet set, manifest, configuration snapshot, or artifact baseline.", "resume_submission_integrity_mismatch");
+    }
+  }
   return { ...value, state, submitted: state !== "intent" } as ArchivedSubmission;
+}
+
+async function createSubmissionIntegrity(
+  prepared: PreparedReviewContext,
+  archiveDirectory: string,
+  configurationBefore: ConfigurationSnapshotData,
+  artifactBaseline: ArtifactInventoryData
+): Promise<Required<Pick<ArchivedSubmission,
+  "manifestSha256" | "uploadManifestSha256" | "configurationSnapshotSha256" | "artifactBaselineSha256" | "packetBindings">>> {
+  const configurationPath = join(archiveDirectory, "configuration.before.json");
+  // Ensure the caller is binding the exact archived snapshot, not merely an
+  // equivalent in-memory value supplied during resume.
+  const archivedConfiguration = await readArchivedConfigurationSnapshot(archiveDirectory);
+  if (sha256Text(JSON.stringify(configurationBefore)) !== sha256Text(JSON.stringify(archivedConfiguration))) {
+    throw new ReviewPreparationError("The in-memory configuration snapshot does not match configuration.before.json.", "submission_configuration_snapshot_mismatch");
+  }
+  return {
+    manifestSha256: await sha256File(prepared.manifestPath),
+    uploadManifestSha256: await sha256File(prepared.uploadManifestPath),
+    configurationSnapshotSha256: await sha256File(configurationPath),
+    artifactBaselineSha256: sha256Text(JSON.stringify(artifactBaseline)),
+    packetBindings: prepared.manifest.packets.map(packet => ({
+      path: packet.path,
+      sizeBytes: packet.sizeBytes,
+      sha256: packet.sha256
+    }))
+  };
+}
+
+function submissionIntegrityFields(value: Partial<ArchivedSubmission>): Partial<ArchivedSubmission> {
+  return {
+    ...(value.manifestSha256 === undefined ? {} : { manifestSha256: value.manifestSha256 }),
+    ...(value.uploadManifestSha256 === undefined ? {} : { uploadManifestSha256: value.uploadManifestSha256 }),
+    ...(value.configurationSnapshotSha256 === undefined ? {} : { configurationSnapshotSha256: value.configurationSnapshotSha256 }),
+    ...(value.artifactBaselineSha256 === undefined ? {} : { artifactBaselineSha256: value.artifactBaselineSha256 }),
+    ...(value.packetBindings === undefined ? {} : { packetBindings: value.packetBindings })
+  };
+}
+
+async function readArchivedTerminalOutcome(archiveDirectory: string): Promise<ArchivedTerminalOutcome | undefined> {
+  const value = await readOptionalJson(join(archiveDirectory, "terminal-outcome.json"));
+  if (value === undefined) return undefined;
+  if (value.schemaVersion !== 1
+    || typeof value.finalizedAt !== "string"
+    || (value.status !== "blocked" && value.status !== "failed" && value.status !== "completed" && value.status !== "completed_with_warnings")
+    || typeof value.ok !== "boolean"
+    || typeof value.submitted !== "boolean"
+    || value.resubmitAllowed !== false
+    || !isRecord(value.blocker)
+    || typeof value.blocker.kind !== "string"
+    || typeof value.blocker.code !== "string"
+    || typeof value.blocker.message !== "string"
+    || typeof value.blocker.resumable !== "boolean"
+    || !Array.isArray(value.warnings)
+    || !value.warnings.every(item => typeof item === "string")
+    || (value.thread !== undefined && (!isRecord(value.thread)
+      || (value.thread.url !== undefined && typeof value.thread.url !== "string")
+      || (value.thread.id !== undefined && typeof value.thread.id !== "string")))
+    || (value.response !== undefined && (!isRecord(value.response)
+      || !Number.isInteger(value.response.bytes)
+      || (value.response.bytes as number) < 0
+      || typeof value.response.sha256 !== "string"
+      || !/^[a-f0-9]{64}$/.test(value.response.sha256)))) {
+    throw new ReviewPreparationError("The archived terminal outcome is invalid.", "resume_terminal_outcome_invalid");
+  }
+  return value as unknown as ArchivedTerminalOutcome;
 }
 
 async function readOptionalJson(path: string): Promise<Record<string, unknown> | undefined> {
@@ -1224,6 +1425,7 @@ function validateRequestedThread(args: ProCodeReviewArgs): void {
 }
 
 const REVIEW_LEASE_MAX_AGE_MS = 5 * 60_000;
+const REVIEW_LEASE_RENEW_MS = Math.floor(REVIEW_LEASE_MAX_AGE_MS / 3);
 
 async function acquireReviewLease(archiveDirectory: string): Promise<() => Promise<void>> {
   const leasePath = join(archiveDirectory, ".workflow.lock");
@@ -1249,16 +1451,27 @@ async function acquireReviewLease(archiveDirectory: string): Promise<() => Promi
   }
   if (handle === undefined) throw new Error("Unable to acquire the review archive lease.");
   const acquiredAt = new Date();
-  await handle.writeFile(`${JSON.stringify({
+  const leaseRecord = (now: Date) => `${JSON.stringify({
     schemaVersion: 1,
     pid: process.pid,
     acquiredAt: acquiredAt.toISOString(),
-    expiresAt: new Date(acquiredAt.getTime() + REVIEW_LEASE_MAX_AGE_MS).toISOString()
-  })}\n`);
+    renewedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + REVIEW_LEASE_MAX_AGE_MS).toISOString()
+  })}\n`;
+  await handle.writeFile(leaseRecord(acquiredAt));
   let released = false;
+  const renewal = setInterval(() => {
+    if (released) return;
+    const record = Buffer.from(leaseRecord(new Date()));
+    void handle.write(record, 0, record.length, 0)
+      .then(() => handle.truncate(record.length))
+      .catch(() => undefined);
+  }, REVIEW_LEASE_RENEW_MS);
+  renewal.unref();
   return async () => {
     if (released) return;
     released = true;
+    clearInterval(renewal);
     await handle.close().catch(() => undefined);
     await rm(leasePath, { force: true });
   };
@@ -1279,15 +1492,10 @@ async function removeLeaseIfOwnerExitedOrExpired(leasePath: string): Promise<boo
     }
   }
   if (!isRecord(value) || value.schemaVersion !== 1 || !Number.isInteger(value.pid) || (value.pid as number) <= 0) return false;
-  const acquiredAt = typeof value.acquiredAt === "string" ? Date.parse(value.acquiredAt) : Number.NaN;
-  const expiresAt = typeof value.expiresAt === "string" ? Date.parse(value.expiresAt) : Number.NaN;
-  const expired = Number.isFinite(expiresAt)
-    ? Date.now() >= expiresAt
-    : Number.isFinite(acquiredAt) && Date.now() - acquiredAt >= REVIEW_LEASE_MAX_AGE_MS;
-  if (expired) {
-    await rm(leasePath, { force: true });
-    return true;
-  }
+  // An expiry timestamp is a stale-record cleanup aid, not authority to evict
+  // a demonstrably live owner. Long visible Pro generations can legitimately
+  // outlast the lease window; the owner renews periodically, and a delayed
+  // renewal must never permit concurrent mutation of the same archive.
   try {
     process.kill(value.pid as number, 0);
     return false;

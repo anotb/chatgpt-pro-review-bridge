@@ -79,8 +79,8 @@ package together with the release-equivalent Python wheel.
 Create a tag that exactly matches the package version:
 
 ```bash
-git tag v0.7.1
-git push origin v0.7.1
+git tag v0.7.2
+git push origin v0.7.2
 ```
 
 The release workflow reruns the complete preflight and clean-package smoke on
@@ -95,7 +95,7 @@ npm run release:verify-published
 Finally, install the tag as a user would:
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.1
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.2
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 

@@ -21,12 +21,22 @@ export async function createReviewArchive(
 ): Promise<string> {
   const root = isAbsolute(archiveRoot) ? resolve(archiveRoot) : resolve(repositoryRoot, archiveRoot);
   const timestamp = now.toISOString().replace(/[:.]/g, "-");
-  const suffix = headSha?.slice(0, 12) ?? randomBytes(6).toString("hex");
-  const path = join(root, `${timestamp}-${suffix}`);
-  await mkdir(join(path, "context"), { recursive: true, mode: 0o700 });
-  await mkdir(join(path, "artifacts"), { recursive: true, mode: 0o700 });
-  await Promise.all([path, join(path, "context"), join(path, "artifacts")].map(directory => chmod(directory, 0o700)));
-  return path;
+  const revision = headSha?.slice(0, 12) ?? "unborn";
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const path = join(root, `${timestamp}-${revision}-${randomBytes(6).toString("hex")}`);
+    try {
+      await mkdir(path, { recursive: false, mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+      throw error;
+    }
+    await mkdir(join(path, "context"), { recursive: false, mode: 0o700 });
+    await mkdir(join(path, "artifacts"), { recursive: false, mode: 0o700 });
+    await Promise.all([path, join(path, "context"), join(path, "artifacts")].map(directory => chmod(directory, 0o700)));
+    return path;
+  }
+  throw new Error("Unable to allocate an exclusive review archive directory.");
 }
 
 export async function writeImmutableFile(path: string, data: string | Buffer): Promise<void> {

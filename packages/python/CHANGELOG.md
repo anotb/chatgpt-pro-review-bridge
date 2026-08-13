@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.2
+
+- Aligns the parity package with the shared Node backend/runtime release and
+  clarifies that first-class review packet orchestration remains Node/plugin
+  functionality rather than a divergent Python browser implementation.
+
 ## 0.7.1
 
 - Aligns the parity client with stable completed-archive artifact recovery in

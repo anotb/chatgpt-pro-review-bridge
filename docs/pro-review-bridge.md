@@ -12,7 +12,7 @@ The bridge lets any Codex host invoke the same installed workflow while a caller
 ## Install a pinned release
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.1
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.2
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -39,7 +39,7 @@ remove the installed plugin and marketplace snapshot, then add the new tag:
 ```bash
 codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
 codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.1
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.2
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -69,7 +69,7 @@ const result = await chatgpt.reviews.askPro({
   request: {
     additionalInstructions: "<faithful caller-defined question or task>"
   },
-  target: { experience: "chat", intelligence: "Pro", strict: true },
+  target: { experience: "chat", intelligence: "Pro" },
   output: {
     mode: "full",
     archive: true,
@@ -78,10 +78,6 @@ const result = await chatgpt.reviews.askPro({
     returnFullMarkdown: true
   },
   safeguards: {
-    submitOnce: true,
-    verifyTargetBeforeSubmit: true,
-    verifyTargetAfterCompletion: true,
-    failOnFallback: true,
     restorePreviousConfiguration: false
   },
   polling: {
@@ -92,12 +88,12 @@ const result = await chatgpt.reviews.askPro({
 });
 ```
 
-That form sends the caller's question as the visible user turn, performs no Git commands, and uploads nothing. Add repository evidence in one of two explicit scopes:
+That form sends the caller's question as the visible user turn, performs no Git commands, and uploads nothing. Submit-once behavior, strict pre/post Pro verification, and fallback rejection are invariants rather than optional switches; only prior-configuration restoration is caller-selectable. Add repository evidence in one of two explicit scopes:
 
 - Change review: add `repositoryRoot`, `baseRef`, optional `headRef`, and `context: { mode: "review-packets", scope: "changes", ... }`.
 - Full repository: add `repositoryRoot` and `context: { mode: "review-packets", scope: "repository", ... }`, and omit `baseRef`.
 
-When `repositoryRoot` is present and `baseRef` is omitted, repository scope is inferred. It uses Git's empty tree internally as a diff baseline without requiring callers to invent an unattached commit. A repository with no commits is supported when `includeWorkingTree` is true.
+When `repositoryRoot` is present and `baseRef` is omitted, repository scope is inferred. It uses Git's empty tree internally as a diff baseline without requiring callers to invent an unattached commit. A committed repository defaults to a commit-only snapshot, so local edits and untracked filenames are not uploaded accidentally. Set `includeWorkingTree: true` when the caller wants that overlay. A repository with no commits is supported directly and defaults to including its index and working tree.
 
 One invocation performs one bounded poll by default. If it returns `in_progress`, call the workflow again with `resume: { archiveDirectory }`; never resend the prompt. The calling agent waits 30 seconds before the first resume, then 60 seconds, 2 minutes, and 4 minutes, and thereafter resumes no more often than every 5 minutes. The delay happens outside browser-host calls. Pro can run for minutes or more than an hour, and `totalTimeoutMs` limits one invocation rather than the repeated resume loop. The immutable submission receipt holds the canonical `/c/<conversation-id>` URL and conversation ID. Optional caller-supplied `threadUrl` or `conversationId` values are treated only as mismatch-detecting cross-checks.
 
@@ -105,7 +101,9 @@ When a running request has genuinely become obsolete, the session may explicitly
 
 ## Archive and trust boundary
 
-The bridge keeps durable local state so a long answer can resume without duplicate submission. For packet-backed questions, that state includes the request, prompt, packets, complete response, artifacts, and enough receipt/configuration evidence to recover safely. Normal callers can simply use the answer; archive paths and hashes are primarily for recovery, diagnostics, or explicit provenance requests. `.codex/pro-reviews/` is gitignored here and should normally remain uncommitted.
+The bridge keeps durable local state so a long answer can resume without duplicate submission. For packet-backed questions, that state includes the request, prompt, packets, complete response, artifacts, and enough receipt/configuration evidence to recover safely. Submission receipts bind the prompt, local and upload manifests, every packet, the configuration snapshot, and the artifact baseline. A non-resumable fallback or verification failure is recorded as a terminal outcome and cannot later be upgraded by resuming the archive. Normal callers can simply use the answer; archive paths and hashes are primarily for recovery, diagnostics, or explicit provenance requests. `.codex/pro-reviews/` is gitignored here and should normally remain uncommitted.
+
+The local `context/manifest.json` retains host provenance. ChatGPT receives `context/manifest.upload.json`, which removes the absolute repository path and suppresses sensitive excluded filenames. Packet text is explicitly marked as untrusted repository evidence. Credential-store paths, committed symlinks/gitlinks, generated content, binary files, and oversized sources are excluded consistently from source snapshots, path listings, and diffs.
 
 Archive creation requests owner-only directory/file modes (`0700`/`0600`) and never overwrites immutable records. Windows does not implement POSIX modes as an ACL boundary, so use a user-private workspace or an explicitly private NTFS directory when review packets contain confidential source.
 

@@ -35,7 +35,7 @@ const review = await chatgpt.reviews.askPro({
   request: {
     additionalInstructions: "<faithful caller-defined question or task>"
   },
-  target: { experience: "chat", intelligence: "Pro", strict: true },
+  target: { experience: "chat", intelligence: "Pro" },
   context: {
     mode: "review-packets",
     scope: "changes",
@@ -55,10 +55,6 @@ const review = await chatgpt.reviews.askPro({
     returnFullMarkdown: true
   },
   safeguards: {
-    submitOnce: true,
-    verifyTargetBeforeSubmit: true,
-    verifyTargetAfterCompletion: true,
-    failOnFallback: true,
     restorePreviousConfiguration: false
   },
   polling: {
@@ -70,6 +66,8 @@ const review = await chatgpt.reviews.askPro({
 ```
 
 Pass the user's actual question faithfully. Use `focus` when the caller or session agent wants named areas of emphasis. `reviews.codeReview(...)` remains a compatibility alias for `reviews.askPro(...)`.
+
+Submit-once behavior, pre/post Pro verification, and fallback rejection are workflow invariants. Older boolean fields for those safeguards remain accepted for compatibility but cannot weaken them; only configuration restoration is caller-selectable.
 
 For a full-repository review—including a Git repository with no commits yet—omit `baseRef` and select repository scope:
 
@@ -89,7 +87,7 @@ const review = await chatgpt.reviews.askPro({
 });
 ```
 
-`repositoryRoot` without `baseRef` also defaults to repository scope. Set `scope: "repository"` explicitly in skill-driven calls so the archived intent is obvious. An unborn repository requires `includeWorkingTree: true`; committed full-repository reviews may set it to false for a commit-only snapshot.
+`repositoryRoot` without `baseRef` also defaults to repository scope. Set `scope: "repository"` explicitly in skill-driven calls so the archived intent is obvious. Committed repository scope defaults to a commit-only snapshot; set `includeWorkingTree: true` only when the caller wants local changes included. An unborn repository defaults to its index and working tree because no committed snapshot exists.
 
 Do not branch on the selected Codex host model. Do not replace this call with a model-written repository summary.
 

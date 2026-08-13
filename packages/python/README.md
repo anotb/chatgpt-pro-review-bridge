@@ -10,16 +10,18 @@ Python SDK -> backend protocol -> Node runtime -> browser bridge -> visible chat
 
 The current browser-control runtime is Node/TypeScript. Python talks to it through a long-lived local stdio backend service. This is intentionally not a pure-Python browser-control runtime yet.
 
+The first-class `reviews.askPro(...)` packet preparation and visible-session orchestration API currently lives on the Node client and in the Codex plugin. Python remains a parity client for the shared backend command protocol; it does not implement a separate review packet builder or browser automation path.
+
 ## Install
 
 ```bash
-python -m pip install https://github.com/anotb/chatgpt-pro-review-bridge/releases/download/v0.7.1/chatgpt_pro_review_bridge-0.7.1-py3-none-any.whl
+python -m pip install https://github.com/anotb/chatgpt-pro-review-bridge/releases/download/v0.7.2/chatgpt_pro_review_bridge-0.7.2-py3-none-any.whl
 ```
 
 The Python package needs a Node backend command for browser-control workflows. Install or build the Node package too:
 
 ```bash
-npm install chatgpt-pro-review-bridge@0.7.1
+npm install chatgpt-pro-review-bridge@0.7.2
 ```
 
 ## Development Install

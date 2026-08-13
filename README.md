@@ -26,7 +26,7 @@ The easiest option is to give this repository to Codex or another assistant that
 
 > Install the latest tagged release of https://github.com/anotb/chatgpt-pro-review-bridge as a Codex plugin, then verify that the ChatGPT Pro Review skills are available in a new task.
 
-For a manual install, add this repository as a marketplace pinned to `v0.7.1` with `codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.1`, then install it with `codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge`.
+For a manual install, add this repository as a marketplace pinned to `v0.7.2` with `codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.2`, then install it with `codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge`.
 
 Start a new Codex task after installation.
 
@@ -54,7 +54,9 @@ Ask naturally from any Codex task:
 
 Codex will choose the general AskPro skill or the repository-aware review skill based on the request. You can also name `$chatgpt-pro-ask` or `$chatgpt-pro-code-review` directly.
 
-Pro work can take minutes or more than an hour. Codex polls the same conversation and can resume after a timeout or restart. It does not send the prompt again while a review is already running.
+Pro work can take minutes or more than an hour. Codex polls the same conversation with increasing delays—30 seconds, 60 seconds, 2 minutes, 4 minutes, then at most once every 5 minutes—and can resume after a timeout or restart. It does not send the prompt again while a request is already running.
+
+Supplying only `repositoryRoot` reviews the complete committed repository; it does not require a fake base commit. Working-tree files are included only when requested (and automatically for a repository with no commits yet), so an ordinary full-repository request does not unexpectedly upload local edits or untracked filenames.
 
 ## Results and recovery
 

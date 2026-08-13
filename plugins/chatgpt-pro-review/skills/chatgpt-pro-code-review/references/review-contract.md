@@ -21,11 +21,11 @@ Treat `in_progress` as durable state:
 }
 ```
 
-Resume with the same thread URL and archive directory. The workflow reloads the original packet manifest, configuration snapshot, and artifact baseline from the archive.
+Resume with the same thread URL and archive directory. The immutable submission receipt binds the original prompt, local and upload manifests, every packet size/hash, configuration snapshot, and artifact baseline. Resume verifies those bindings before browser contact. A non-resumable target/fallback outcome is recorded durably and cannot later be accepted by resuming the archive.
 
 One workflow invocation performs one bounded polling call by default, then returns `in_progress`. Keep that default in browser-hosted execution. `maxPollCallsPerInvocation` is an explicit local ceiling, not permission to exceed the host call budget.
 
-The calling agent owns cross-invocation backoff for each archive: 30 seconds, 60 seconds, 2 minutes, 4 minutes, then a maximum frequency of once every 5 minutes while consecutive results remain `in_progress`. A delegated subagent follows the same schedule. Wait outside browser-host calls; never immediately loop or hold the browser bridge open just to delay. This cadence is intentionally an agent contract rather than an SDK-enforced timer.
+The calling agent owns cross-invocation backoff for each archive: 30 seconds, 60 seconds, 2 minutes, 4 minutes, then a maximum frequency of once every 5 minutes while consecutive results remain `in_progress`. A delegated subagent follows the same schedule. Wait outside browser-host calls; never immediately loop or hold the browser bridge open just to delay. This cadence is intentionally a clear agent contract rather than an SDK-enforced timer, so direct SDK callers are not artificially delayed. The archive lease renews during a live invocation and never expires out from under a demonstrably live owner.
 
 ## Result interpretation
 
