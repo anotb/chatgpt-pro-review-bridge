@@ -1,8 +1,8 @@
 // src/scripts/pro-review-canary-module.ts
 import { spawn as spawn2 } from "node:child_process";
-import { createHash as createHash7, randomUUID as randomUUID3 } from "node:crypto";
-import { mkdir as mkdir5, mkdtemp as mkdtemp2, readFile as readFile6, writeFile as writeFile5 } from "node:fs/promises";
-import { join as join7, resolve as resolve6 } from "node:path";
+import { createHash as createHash7, randomUUID as randomUUID4 } from "node:crypto";
+import { mkdir as mkdir6, mkdtemp as mkdtemp2, readFile as readFile7, writeFile as writeFile5 } from "node:fs/promises";
+import { join as join8, resolve as resolve6 } from "node:path";
 
 // src/commands/artifacts.ts
 import { copyFile as copyFile2, mkdir as mkdir2, stat as stat2, writeFile } from "node:fs/promises";
@@ -13695,11 +13695,10 @@ function runItemEventName(item) {
 }
 
 // src/reviews/code-review.ts
-import { mkdtemp, open, readFile as readFile5, rename, rm as rm2, stat as stat8, writeFile as writeFile4 } from "node:fs/promises";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { mkdtemp, readFile as readFile6, rename, rm as rm2, stat as stat8, writeFile as writeFile4 } from "node:fs/promises";
+import { randomUUID as randomUUID3 } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join as join6, resolve as resolve5 } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { join as join7, resolve as resolve5 } from "node:path";
 
 // src/reviews/archive.ts
 import { createHash as createHash5, randomBytes } from "node:crypto";
@@ -14819,6 +14818,279 @@ function requireNonEmpty(value, name) {
   return trimmed;
 }
 
+// src/reviews/review-lease.ts
+import { lstat as lstat2, mkdir as mkdir5, open, readFile as readFile5, readdir, rmdir, unlink as unlink2 } from "node:fs/promises";
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { dirname as dirname4, join as join6 } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+
+// src/reviews/process-liveness.ts
+import { execFile as execFile2 } from "node:child_process";
+import process2 from "node:process";
+import { win32 } from "node:path";
+import { promisify as promisify2 } from "node:util";
+var execFileAsync2 = promisify2(execFile2);
+async function probeProcessLiveness(pid, options = {}) {
+  const platform = options.platform ?? process2.platform;
+  const signal = options.signal ?? ((targetPid) => {
+    process2.kill(targetPid, 0);
+  });
+  try {
+    signal(pid);
+    return "live";
+  } catch (error) {
+    const code = error.code;
+    if (code === "ESRCH") return "dead";
+    if (platform !== "win32") {
+      return code === "EPERM" || code === "EACCES" ? "live" : "unknown";
+    }
+  }
+  return (options.queryWindowsPid ?? queryWindowsPid)(pid);
+}
+function windowsTasklistPath(environment = process2.env) {
+  const systemRoot = environment.SystemRoot;
+  if (systemRoot === void 0 || systemRoot.includes("\0") || !win32.isAbsolute(systemRoot)) return void 0;
+  const normalizedRoot = win32.resolve(systemRoot);
+  const executable = win32.join(normalizedRoot, "System32", "tasklist.exe");
+  const relative3 = win32.relative(normalizedRoot, executable);
+  if (relative3.startsWith("..") || win32.isAbsolute(relative3)) return void 0;
+  return executable;
+}
+async function queryWindowsPid(pid, options = {}) {
+  const executable = windowsTasklistPath(options.environment);
+  if (executable === void 0) return "unknown";
+  const args = ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"];
+  try {
+    const stdout = options.execute === void 0 ? (await execFileAsync2(executable, args, {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024,
+      timeout: 2e3,
+      windowsHide: true
+    })).stdout : await options.execute(executable, args);
+    return tasklistPidResult(stdout, pid);
+  } catch {
+    return "unknown";
+  }
+}
+function tasklistPidResult(output, pid) {
+  let sawPlainTextResult = false;
+  let sawCsvResult = false;
+  for (const line of output.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const match = /^"[^"]*","(\d+)"(?:,|$)/u.exec(trimmed);
+    if (match !== null && Number(match[1]) === pid) return "live";
+    if (trimmed.startsWith('"')) sawCsvResult = true;
+    else sawPlainTextResult = true;
+  }
+  return sawPlainTextResult && !sawCsvResult ? "dead" : "unknown";
+}
+
+// src/reviews/review-lease.ts
+var REVIEW_LEASE_MAX_AGE_MS = 5 * 6e4;
+var REVIEW_LEASE_RENEW_MS = Math.floor(REVIEW_LEASE_MAX_AGE_MS / 3);
+function isRecord6(value) {
+  return typeof value === "object" && value !== null;
+}
+async function acquireReviewLease(archiveDirectory) {
+  const leasePath = join6(archiveDirectory, ".workflow.lock");
+  const leaseId = randomUUID2();
+  const acquiredAt = /* @__PURE__ */ new Date();
+  const leaseRecord = `${JSON.stringify({
+    schemaVersion: 1,
+    leaseId,
+    pid: process.pid,
+    acquiredAt: acquiredAt.toISOString()
+  })}
+`;
+  let ownerPath;
+  let handle;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await mkdir5(leasePath, { mode: 448 });
+      ownerPath = join6(leasePath, `${leaseId}.json`);
+      break;
+    } catch (error) {
+      const code = error.code;
+      if (code === "EEXIST" && attempt === 0 && await waitForLeaseTurnover(leasePath)) {
+        continue;
+      }
+      if (code === "EEXIST") {
+        throw new ReviewPreparationError(
+          "Another process or task already holds the exclusive lease for this review archive.",
+          "review_archive_locked",
+          void 0,
+          archiveDirectory
+        );
+      }
+      throw error;
+    }
+  }
+  if (ownerPath === void 0) throw new Error("Unable to acquire the review archive lease.");
+  try {
+    handle = await open(ownerPath, "wx", 384);
+    await handle.writeFile(leaseRecord);
+    await handle.sync();
+  } catch (error) {
+    await handle?.close().catch(() => void 0);
+    await unlink2(ownerPath).catch(() => void 0);
+    await rmdir(leasePath).catch(() => void 0);
+    throw error;
+  }
+  if (handle === void 0) throw new Error("Unable to initialize the review archive lease.");
+  const ownerHandle = handle;
+  let released = false;
+  const renewal = setInterval(() => {
+    if (released) return;
+    const renewedAt = /* @__PURE__ */ new Date();
+    void ownerHandle.utimes(renewedAt, renewedAt).catch(() => void 0);
+  }, REVIEW_LEASE_RENEW_MS);
+  renewal.unref();
+  return async () => {
+    if (released) return;
+    released = true;
+    clearInterval(renewal);
+    await ownerHandle.close().catch(() => void 0);
+    await removeDirectoryLeaseOwner(leasePath, ownerPath);
+  };
+}
+async function removeDirectoryLeaseOwner(leasePath, ownerPath) {
+  try {
+    await unlink2(ownerPath);
+  } catch {
+    return false;
+  }
+  try {
+    await rmdir(leasePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function removeLegacyLeaseTextIfUnchanged(leasePath, expected) {
+  try {
+    if (await readFile5(leasePath, "utf8") !== expected) return false;
+    await unlink2(leasePath);
+    return true;
+  } catch (error) {
+    return error.code === "ENOENT";
+  }
+}
+async function readReviewLeaseSnapshot(leasePath) {
+  let leaseStat;
+  try {
+    leaseStat = await lstat2(leasePath);
+  } catch (error) {
+    if (error.code === "ENOENT") return void 0;
+    throw error;
+  }
+  if (!leaseStat.isDirectory()) {
+    if (!leaseStat.isFile()) return void 0;
+    const leaseText2 = await readFile5(leasePath, "utf8");
+    let value2;
+    try {
+      value2 = JSON.parse(leaseText2);
+    } catch {
+      value2 = void 0;
+    }
+    return { format: "legacy", leaseText: leaseText2, value: value2 };
+  }
+  const entries = (await readdir(leasePath)).filter((name) => name.endsWith(".json"));
+  if (entries.length !== 1) return void 0;
+  const ownerPath = join6(leasePath, entries[0]);
+  if (dirname4(ownerPath) !== leasePath || !(await lstat2(ownerPath)).isFile()) return void 0;
+  const leaseText = await readFile5(ownerPath, "utf8");
+  let value;
+  try {
+    value = JSON.parse(leaseText);
+  } catch {
+    value = void 0;
+  }
+  return { format: "directory", leaseText, ownerPath, value };
+}
+async function removeLeaseIfOwnerExitedOrExpired(leasePath, probeLiveness = probeProcessLiveness) {
+  let snapshot;
+  try {
+    snapshot = await readReviewLeaseSnapshot(leasePath);
+  } catch (error) {
+    return error.code === "ENOENT";
+  }
+  if (snapshot === void 0) {
+    try {
+      const leaseStat = await lstat2(leasePath);
+      if (Date.now() - leaseStat.mtimeMs < REVIEW_LEASE_MAX_AGE_MS) return false;
+      if (leaseStat.isDirectory()) {
+        try {
+          await rmdir(leasePath);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      if (!leaseStat.isFile()) return false;
+      const leaseText = await readFile5(leasePath, "utf8");
+      return removeLegacyLeaseTextIfUnchanged(leasePath, leaseText);
+    } catch {
+      return false;
+    }
+  }
+  const { value } = snapshot;
+  if (snapshot.format === "directory" && !isRecord6(value)) {
+    try {
+      const ownerStat = await lstat2(snapshot.ownerPath);
+      if (!ownerStat.isFile() || Date.now() - ownerStat.mtimeMs < REVIEW_LEASE_MAX_AGE_MS) return false;
+      return removeDirectoryLeaseOwner(leasePath, snapshot.ownerPath);
+    } catch {
+      return false;
+    }
+  }
+  if (snapshot.format === "legacy" && !isRecord6(value)) {
+    try {
+      const leaseStat = await lstat2(leasePath);
+      if (!leaseStat.isFile() || Date.now() - leaseStat.mtimeMs < REVIEW_LEASE_MAX_AGE_MS) return false;
+      return removeLegacyLeaseTextIfUnchanged(leasePath, snapshot.leaseText);
+    } catch {
+      return false;
+    }
+  }
+  if (!isRecord6(value) || value.schemaVersion !== 1 || !Number.isInteger(value.pid) || value.pid <= 0) return false;
+  if (snapshot.format === "directory") {
+    if (typeof value.leaseId !== "string" || snapshot.ownerPath !== join6(leasePath, `${value.leaseId}.json`)) return false;
+  }
+  if (await probeLiveness(value.pid) !== "dead") return false;
+  if (snapshot.format === "directory") {
+    if (await readFile5(snapshot.ownerPath, "utf8").catch(() => void 0) !== snapshot.leaseText) return false;
+    return removeDirectoryLeaseOwner(leasePath, snapshot.ownerPath);
+  }
+  return removeLegacyLeaseTextIfUnchanged(leasePath, snapshot.leaseText);
+}
+async function waitForLeaseTurnover(leasePath, timeoutMs = 3e3) {
+  if (await removeLeaseIfOwnerExitedOrExpired(leasePath)) return true;
+  let ownerPid;
+  try {
+    const value = (await readReviewLeaseSnapshot(leasePath))?.value;
+    if (isRecord6(value) && value.schemaVersion === 1 && Number.isInteger(value.pid) && value.pid > 0) {
+      ownerPid = value.pid;
+    }
+  } catch {
+    return false;
+  }
+  if (ownerPid === process.pid) return false;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    if (await removeLeaseIfOwnerExitedOrExpired(leasePath)) return true;
+    try {
+      await lstat2(leasePath);
+    } catch (error) {
+      if (error.code === "ENOENT") return true;
+      return false;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await delay(Math.min(100, remaining));
+  }
+}
+
 // src/reviews/code-review.ts
 var ReviewWorkflowError = class extends Error {
   constructor(result, state) {
@@ -14893,7 +15165,7 @@ async function runCodeReviewWithPort(args, port) {
         steps.push({ state, startedAt, endedAt, ok: true, data: value });
       }
       if (archiveDirectory !== void 0) {
-        await writeJsonReplacing(join6(archiveDirectory, "workflow-progress.json"), {
+        await writeJsonReplacing(join7(archiveDirectory, "workflow-progress.json"), {
           lastCompletedState: state,
           updatedAt: endedAt,
           steps
@@ -14904,7 +15176,7 @@ async function runCodeReviewWithPort(args, port) {
       const endedAt = port.now().toISOString();
       steps.push({ state, startedAt, endedAt, ok: false, status: error instanceof Error ? error.name : "error" });
       if (archiveDirectory !== void 0) {
-        await writeJsonReplacing(join6(archiveDirectory, "workflow-progress.json"), {
+        await writeJsonReplacing(join7(archiveDirectory, "workflow-progress.json"), {
           lastFailedState: state,
           updatedAt: endedAt,
           steps
@@ -14923,7 +15195,7 @@ async function runCodeReviewWithPort(args, port) {
       archiveDirectory = args.resume.archiveDirectory;
       releaseLease = await acquireReviewLease(archiveDirectory);
       prepared = await readArchivedPreparedContext(args.resume.archiveDirectory);
-      terminalOutcomeAlreadyFinal = await stat8(join6(args.resume.archiveDirectory, "terminal-outcome.json")).then(() => true).catch(() => false);
+      terminalOutcomeAlreadyFinal = await stat8(join7(args.resume.archiveDirectory, "terminal-outcome.json")).then(() => true).catch(() => false);
       const terminalOutcome = await readArchivedTerminalOutcome(args.resume.archiveDirectory);
       try {
         configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
@@ -15018,7 +15290,7 @@ async function runCodeReviewWithPort(args, port) {
       }
       await persistThreadCheckpoint(archiveDirectory, prepared, threadUrl, threadId, port.now());
       if (archivedSubmission !== void 0 && archivedSubmission.state !== "confirmed" && archiveDirectory !== void 0) {
-        await writeImmutableJson(join6(archiveDirectory, "submission-confirmation.json"), {
+        await writeImmutableJson(join7(archiveDirectory, "submission-confirmation.json"), {
           schemaVersion: archivedSubmission.schemaVersion === 3 ? 3 : 2,
           state: "confirmed",
           submitted: true,
@@ -15066,7 +15338,7 @@ async function runCodeReviewWithPort(args, port) {
       });
     }
     if (archiveDirectory !== void 0 && args.resume === void 0) {
-      await writeImmutableJson(join6(archiveDirectory, "configuration.before.json"), configurationBefore);
+      await writeImmutableJson(join7(archiveDirectory, "configuration.before.json"), configurationBefore);
     }
     let appliedData;
     if (configurationBefore.inspection.verified && configurationMatchesSelection(configurationBefore.inspection, { intelligence: "Pro" })) {
@@ -15109,7 +15381,7 @@ async function runCodeReviewWithPort(args, port) {
       await assertPageSafe(port, "VERIFY_PRO_BEFORE_SUBMIT");
       const submissionIntegrity = archiveDirectory === void 0 ? void 0 : await createSubmissionIntegrity(prepared, archiveDirectory, configurationBefore, artifactBaseline);
       if (archiveDirectory !== void 0) {
-        await writeImmutableJson(join6(archiveDirectory, "submission-intent.json"), {
+        await writeImmutableJson(join7(archiveDirectory, "submission-intent.json"), {
           schemaVersion: 3,
           state: "intent",
           resubmitAllowed: false,
@@ -15146,7 +15418,7 @@ async function runCodeReviewWithPort(args, port) {
       const submissionState = exactUserTurn ? "confirmed" : submitReported || pageAdvanced ? "ambiguous" : "failed";
       submitted = submissionState !== "failed";
       if (archiveDirectory !== void 0) {
-        await writeImmutableJson(join6(archiveDirectory, "submission.json"), {
+        await writeImmutableJson(join7(archiveDirectory, "submission.json"), {
           schemaVersion: 3,
           state: submissionState,
           submitted,
@@ -15208,7 +15480,7 @@ async function runCodeReviewWithPort(args, port) {
       if (!resumablePoll) requireOk(wait, "POLL_METADATA");
     }
     if (!complete) throw new ReviewInProgress();
-    const archivedResponse = archiveDirectory === void 0 ? void 0 : await readFile5(join6(archiveDirectory, "response.md"), "utf8").catch(() => void 0);
+    const archivedResponse = archiveDirectory === void 0 ? void 0 : await readFile6(join7(archiveDirectory, "response.md"), "utf8").catch(() => void 0);
     if (archivedResponse !== void 0) {
       responseMarkdown = archivedResponse;
       responseSha256 = sha256Text2(responseMarkdown);
@@ -15224,7 +15496,7 @@ async function runCodeReviewWithPort(args, port) {
       const read = requireData(await runStep("READ_FULL_MARKDOWN_ONCE", () => port.readFullMarkdown()), "READ_FULL_MARKDOWN_ONCE");
       responseMarkdown = read.data.markdown ?? read.data.text;
       responseSha256 = sha256Text2(responseMarkdown);
-      if (archiveDirectory !== void 0) await writeImmutableFile(join6(archiveDirectory, "response.md"), responseMarkdown);
+      if (archiveDirectory !== void 0) await writeImmutableFile(join7(archiveDirectory, "response.md"), responseMarkdown);
     }
     const after = requireData(await runStep("VERIFY_PRO_AFTER_COMPLETION", () => port.inspectConfiguration()), "VERIFY_PRO_AFTER_COMPLETION");
     await assertPageSafe(port, "VERIFY_PRO_AFTER_COMPLETION");
@@ -15248,7 +15520,7 @@ async function runCodeReviewWithPort(args, port) {
     } else if ((args.output?.downloadArtifacts ?? "all") === "all" && archiveDirectory !== void 0) {
       const artifactArchiveDirectory = archiveDirectory;
       await runStep("DOWNLOAD_AND_HASH_ARTIFACTS", async () => {
-        const staging = await mkdtemp(join6(tmpdir(), "chatgpt-pro-review-artifacts-"));
+        const staging = await mkdtemp(join7(tmpdir(), "chatgpt-pro-review-artifacts-"));
         const checkpointArtifacts = await readArtifactDownloadCheckpoint(artifactArchiveDirectory);
         artifacts.push(...checkpointArtifacts);
         const checkpointCount = checkpointArtifacts.length;
@@ -15280,7 +15552,7 @@ async function runCodeReviewWithPort(args, port) {
             }
             const saved = requireData(downloaded, "DOWNLOAD_AND_HASH_ARTIFACTS").data;
             artifacts.push(await preserveDownloadedArtifact(saved.path, artifactArchiveDirectory, desiredName, used, metadata));
-            await writeJsonReplacing(join6(artifactArchiveDirectory, "artifacts", "download-checkpoint.json"), {
+            await writeJsonReplacing(join7(artifactArchiveDirectory, "artifacts", "download-checkpoint.json"), {
               schemaVersion: 1,
               updatedAt: port.now().toISOString(),
               artifacts
@@ -15298,7 +15570,7 @@ async function runCodeReviewWithPort(args, port) {
       const completedArchiveDirectory = archiveDirectory;
       const archivedResponse2 = responseMarkdown;
       await runStep("ARCHIVE_RUN", async () => {
-        await writeImmutableJson(join6(completedArchiveDirectory, "artifacts", "manifest.json"), artifacts);
+        await writeImmutableJson(join7(completedArchiveDirectory, "artifacts", "manifest.json"), artifacts);
         return { responseSha256, responseBytes: Buffer.byteLength(archivedResponse2), artifacts: artifacts.length };
       });
     }
@@ -15411,7 +15683,7 @@ async function runCodeReviewWithPort(args, port) {
     } else {
       result.responseIndex = markdownSectionIndex(responseMarkdown);
       if (overHardLimit) {
-        result.warnings.push(`The complete response is archived at ${join6(archiveDirectory ?? "", "response.md")}, but its ${Buffer.byteLength(responseMarkdown)} bytes exceed the explicitly configured hard transport limit of ${hardLimit}. No content was summarized or truncated.`);
+        result.warnings.push(`The complete response is archived at ${join7(archiveDirectory ?? "", "response.md")}, but its ${Buffer.byteLength(responseMarkdown)} bytes exceed the explicitly configured hard transport limit of ${hardLimit}. No content was summarized or truncated.`);
         if (result.status === "completed") result.status = "completed_with_warnings";
       }
     }
@@ -15447,11 +15719,11 @@ async function runCodeReviewWithPort(args, port) {
             ...result.thread === void 0 ? {} : { thread: result.thread },
             ...responseMarkdown === void 0 || responseSha256 === void 0 ? {} : { response: { bytes: Buffer.byteLength(responseMarkdown), sha256: responseSha256 } }
           };
-          await writeImmutableJson(join6(archiveDirectory, "terminal-outcome.json"), terminalOutcome);
+          await writeImmutableJson(join7(archiveDirectory, "terminal-outcome.json"), terminalOutcome);
         }
-        await writeJsonReplacing(join6(archiveDirectory, "configuration.json"), configurationRecord);
-        await writeJsonReplacing(join6(archiveDirectory, "run-report.redacted.json"), redactReportValue(receipt));
-        await writeJsonReplacing(join6(archiveDirectory, "receipt.json"), receipt);
+        await writeJsonReplacing(join7(archiveDirectory, "configuration.json"), configurationRecord);
+        await writeJsonReplacing(join7(archiveDirectory, "run-report.redacted.json"), redactReportValue(receipt));
+        await writeJsonReplacing(join7(archiveDirectory, "receipt.json"), receipt);
       } catch (error) {
         const message = `Required terminal provenance could not be committed: ${error instanceof Error ? error.message : String(error)}`;
         result.ok = false;
@@ -15561,22 +15833,22 @@ function responseMetadata(value) {
   return text === void 0 ? value : { format: data.format, bytes: Buffer.byteLength(text), sha256: sha256Text2(text) };
 }
 async function readArchivedConfigurationSnapshot(archiveDirectory) {
-  const value = JSON.parse(await readFile5(join6(archiveDirectory, "configuration.before.json"), "utf8"));
+  const value = JSON.parse(await readFile6(join7(archiveDirectory, "configuration.before.json"), "utf8"));
   if (value.experience !== "chat" || typeof value.capturedAt !== "string") throw new Error("Archived configuration snapshot is invalid.");
   return value;
 }
 async function readArchivedPreparedContext(archiveDirectory) {
-  const manifestPath = join6(archiveDirectory, "context", "manifest.json");
+  const manifestPath = join7(archiveDirectory, "context", "manifest.json");
   let manifest;
   try {
-    manifest = JSON.parse(await readFile5(manifestPath, "utf8"));
+    manifest = JSON.parse(await readFile6(manifestPath, "utf8"));
   } catch {
     throw new ReviewPreparationError("Archived review packet manifest is missing or invalid.", "resume_packet_manifest_invalid");
   }
   if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.packets)) {
     throw new ReviewPreparationError("Archived review packet manifest is invalid.", "resume_packet_manifest_invalid");
   }
-  const promptPath = join6(archiveDirectory, "prompt.md");
+  const promptPath = join7(archiveDirectory, "prompt.md");
   const contextDirectory = resolve5(archiveDirectory, "context");
   const packetPaths = [];
   for (const packet of manifest.packets) {
@@ -15595,7 +15867,7 @@ async function readArchivedPreparedContext(archiveDirectory) {
     }
     packetPaths.push(packetPath);
   }
-  const candidateUploadManifestPath = join6(contextDirectory, "manifest.upload.json");
+  const candidateUploadManifestPath = join7(contextDirectory, "manifest.upload.json");
   let uploadManifestPath = candidateUploadManifestPath;
   try {
     const uploadManifestStat = await stat8(candidateUploadManifestPath);
@@ -15608,14 +15880,14 @@ async function readArchivedPreparedContext(archiveDirectory) {
   }
   let prompt;
   try {
-    prompt = await readFile5(promptPath, "utf8");
+    prompt = await readFile6(promptPath, "utf8");
   } catch {
     throw new ReviewPreparationError("Archived submitted prompt is missing or unreadable.", "resume_prompt_invalid");
   }
   return {
     mode: manifest.mode === "none" ? "none" : "review-packets",
     archiveDirectory,
-    requestPath: join6(archiveDirectory, "request.md"),
+    requestPath: join7(archiveDirectory, "request.md"),
     promptPath,
     packetPaths,
     manifestPath,
@@ -15626,15 +15898,15 @@ async function readArchivedPreparedContext(archiveDirectory) {
   };
 }
 async function readArchivedArtifactBaseline(archiveDirectory) {
-  const submission = JSON.parse(await readFile5(join6(archiveDirectory, "submission.json"), "utf8"));
+  const submission = JSON.parse(await readFile6(join7(archiveDirectory, "submission.json"), "utf8"));
   if (submission.artifactBaseline === void 0 || !Array.isArray(submission.artifactBaseline.items)) throw new Error("Archived artifact baseline is invalid.");
   return submission.artifactBaseline;
 }
 async function readArchivedSubmission(archiveDirectory, prepared) {
-  const confirmation = await readOptionalJson(join6(archiveDirectory, "submission-confirmation.json"));
-  const submittedRecord = confirmation ?? await readOptionalJson(join6(archiveDirectory, "submission.json"));
+  const confirmation = await readOptionalJson(join7(archiveDirectory, "submission-confirmation.json"));
+  const submittedRecord = confirmation ?? await readOptionalJson(join7(archiveDirectory, "submission.json"));
   const intentOnly = submittedRecord === void 0;
-  const value = submittedRecord ?? await readOptionalJson(join6(archiveDirectory, "submission-intent.json"));
+  const value = submittedRecord ?? await readOptionalJson(join7(archiveDirectory, "submission-intent.json"));
   if (value === void 0) {
     throw new ReviewPreparationError("The archive has no durable submission intent or confirmation record.", "resume_submission_unverified");
   }
@@ -15667,7 +15939,7 @@ async function readArchivedSubmission(archiveDirectory, prepared) {
   return { ...value, state, submitted: state !== "intent" };
 }
 async function createSubmissionIntegrity(prepared, archiveDirectory, configurationBefore, artifactBaseline) {
-  const configurationPath = join6(archiveDirectory, "configuration.before.json");
+  const configurationPath = join7(archiveDirectory, "configuration.before.json");
   const archivedConfiguration = await readArchivedConfigurationSnapshot(archiveDirectory);
   if (sha256Text2(JSON.stringify(configurationBefore)) !== sha256Text2(JSON.stringify(archivedConfiguration))) {
     throw new ReviewPreparationError("The in-memory configuration snapshot does not match configuration.before.json.", "submission_configuration_snapshot_mismatch");
@@ -15694,16 +15966,16 @@ function submissionIntegrityFields(value) {
   };
 }
 async function readArchivedTerminalOutcome(archiveDirectory) {
-  const value = await readOptionalJson(join6(archiveDirectory, "terminal-outcome.json"));
+  const value = await readOptionalJson(join7(archiveDirectory, "terminal-outcome.json"));
   if (value === void 0) return void 0;
-  if (value.schemaVersion !== 1 || typeof value.finalizedAt !== "string" || value.status !== "blocked" && value.status !== "failed" && value.status !== "completed" && value.status !== "completed_with_warnings" || typeof value.ok !== "boolean" || typeof value.submitted !== "boolean" || value.resubmitAllowed !== false || !isRecord6(value.blocker) || typeof value.blocker.kind !== "string" || typeof value.blocker.code !== "string" || typeof value.blocker.message !== "string" || typeof value.blocker.resumable !== "boolean" || !Array.isArray(value.warnings) || !value.warnings.every((item) => typeof item === "string") || value.thread !== void 0 && (!isRecord6(value.thread) || value.thread.url !== void 0 && typeof value.thread.url !== "string" || value.thread.id !== void 0 && typeof value.thread.id !== "string") || value.response !== void 0 && (!isRecord6(value.response) || !Number.isInteger(value.response.bytes) || value.response.bytes < 0 || typeof value.response.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.response.sha256))) {
+  if (value.schemaVersion !== 1 || typeof value.finalizedAt !== "string" || value.status !== "blocked" && value.status !== "failed" && value.status !== "completed" && value.status !== "completed_with_warnings" || typeof value.ok !== "boolean" || typeof value.submitted !== "boolean" || value.resubmitAllowed !== false || !isRecord7(value.blocker) || typeof value.blocker.kind !== "string" || typeof value.blocker.code !== "string" || typeof value.blocker.message !== "string" || typeof value.blocker.resumable !== "boolean" || !Array.isArray(value.warnings) || !value.warnings.every((item) => typeof item === "string") || value.thread !== void 0 && (!isRecord7(value.thread) || value.thread.url !== void 0 && typeof value.thread.url !== "string" || value.thread.id !== void 0 && typeof value.thread.id !== "string") || value.response !== void 0 && (!isRecord7(value.response) || !Number.isInteger(value.response.bytes) || value.response.bytes < 0 || typeof value.response.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.response.sha256))) {
     throw new ReviewPreparationError("The archived terminal outcome is invalid.", "resume_terminal_outcome_invalid");
   }
   return value;
 }
 async function readOptionalJson(path3) {
   try {
-    return JSON.parse(await readFile5(path3, "utf8"));
+    return JSON.parse(await readFile6(path3, "utf8"));
   } catch (error) {
     if (error.code === "ENOENT") return void 0;
     throw error;
@@ -15760,10 +16032,10 @@ async function persistThreadCheckpoint(archiveDirectory, prepared, url, id2, now
     promptSha256: sha256Text2(prepared.prompt),
     updatedAt: now.toISOString()
   };
-  await writeJsonReplacing(join6(archiveDirectory, "thread-checkpoint.json"), checkpoint);
+  await writeJsonReplacing(join7(archiveDirectory, "thread-checkpoint.json"), checkpoint);
 }
 async function readArchivedThreadCheckpoint(archiveDirectory) {
-  const value = JSON.parse(await readFile5(join6(archiveDirectory, "thread-checkpoint.json"), "utf8"));
+  const value = JSON.parse(await readFile6(join7(archiveDirectory, "thread-checkpoint.json"), "utf8"));
   if (value.schemaVersion !== 1 || value.current === void 0 || typeof value.recoveryQuery !== "string" || typeof value.promptSha256 !== "string") {
     throw new Error("Archived thread checkpoint is invalid.");
   }
@@ -15878,28 +16150,28 @@ function promptMatches(actual, expected, query) {
 }
 async function readArtifactDownloadCheckpoint(archiveDirectory) {
   const artifactsDirectory = resolve5(archiveDirectory, "artifacts");
-  const checkpointPath = join6(artifactsDirectory, "download-checkpoint.json");
-  const manifestPath = join6(artifactsDirectory, "manifest.json");
+  const checkpointPath = join7(artifactsDirectory, "download-checkpoint.json");
+  const manifestPath = join7(artifactsDirectory, "manifest.json");
   let value;
   try {
-    value = JSON.parse(await readFile5(checkpointPath, "utf8"));
+    value = JSON.parse(await readFile6(checkpointPath, "utf8"));
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
     try {
-      value = JSON.parse(await readFile5(manifestPath, "utf8"));
+      value = JSON.parse(await readFile6(manifestPath, "utf8"));
     } catch (manifestError) {
       if (manifestError.code === "ENOENT") return [];
       throw manifestError;
     }
   }
-  const entries = Array.isArray(value) ? value : isRecord6(value) && value.schemaVersion === 1 && Array.isArray(value.artifacts) ? value.artifacts : void 0;
+  const entries = Array.isArray(value) ? value : isRecord7(value) && value.schemaVersion === 1 && Array.isArray(value.artifacts) ? value.artifacts : void 0;
   if (entries === void 0) throw new Error("The archived artifact download checkpoint is invalid.");
   return verifyArchivedArtifacts(artifactsDirectory, entries);
 }
 async function verifyArchivedArtifacts(artifactsDirectory, entries) {
   const verified = [];
   for (const entry of entries) {
-    if (!isRecord6(entry) || typeof entry.name !== "string" || typeof entry.path !== "string" || typeof entry.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(entry.sha256) || entry.inventoryKey !== void 0 && typeof entry.inventoryKey !== "string") {
+    if (!isRecord7(entry) || typeof entry.name !== "string" || typeof entry.path !== "string" || typeof entry.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(entry.sha256) || entry.inventoryKey !== void 0 && typeof entry.inventoryKey !== "string") {
       throw new Error("The archived artifact download checkpoint contains an invalid entry.");
     }
     const expectedPath = resolve5(artifactsDirectory, sanitizeArtifactFilename(entry.name));
@@ -15929,15 +16201,15 @@ function sameResolvedPath(left, right) {
   const resolvedRight = resolve5(right);
   return process.platform === "win32" ? resolvedLeft.toLocaleLowerCase() === resolvedRight.toLocaleLowerCase() : resolvedLeft === resolvedRight;
 }
-function isRecord6(value) {
+function isRecord7(value) {
   return typeof value === "object" && value !== null;
 }
 async function readFinalizedArtifactManifest(archiveDirectory) {
   const artifactsDirectory = resolve5(archiveDirectory, "artifacts");
-  const manifestPath = join6(artifactsDirectory, "manifest.json");
+  const manifestPath = join7(artifactsDirectory, "manifest.json");
   let value;
   try {
-    value = JSON.parse(await readFile5(manifestPath, "utf8"));
+    value = JSON.parse(await readFile6(manifestPath, "utf8"));
   } catch (error) {
     if (error.code === "ENOENT") return void 0;
     throw error;
@@ -15962,109 +16234,8 @@ function validateRequestedThread(args) {
     throw new ReviewPreparationError("thread requires a canonical Chat conversation target.", "thread_target_provisional");
   }
 }
-var REVIEW_LEASE_MAX_AGE_MS = 5 * 6e4;
-var REVIEW_LEASE_RENEW_MS = Math.floor(REVIEW_LEASE_MAX_AGE_MS / 3);
-async function acquireReviewLease(archiveDirectory) {
-  const leasePath = join6(archiveDirectory, ".workflow.lock");
-  let handle;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      handle = await open(leasePath, "wx", 384);
-      break;
-    } catch (error) {
-      if (error.code === "EEXIST" && attempt === 0 && await waitForLeaseTurnover(leasePath)) {
-        continue;
-      }
-      if (error.code === "EEXIST") {
-        throw new ReviewPreparationError(
-          "Another process or task already holds the exclusive lease for this review archive.",
-          "review_archive_locked",
-          void 0,
-          archiveDirectory
-        );
-      }
-      throw error;
-    }
-  }
-  if (handle === void 0) throw new Error("Unable to acquire the review archive lease.");
-  const acquiredAt = /* @__PURE__ */ new Date();
-  const leaseRecord = (now) => `${JSON.stringify({
-    schemaVersion: 1,
-    pid: process.pid,
-    acquiredAt: acquiredAt.toISOString(),
-    renewedAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + REVIEW_LEASE_MAX_AGE_MS).toISOString()
-  })}
-`;
-  await handle.writeFile(leaseRecord(acquiredAt));
-  let released = false;
-  const renewal = setInterval(() => {
-    if (released) return;
-    const record = Buffer.from(leaseRecord(/* @__PURE__ */ new Date()));
-    void handle.write(record, 0, record.length, 0).then(() => handle.truncate(record.length)).catch(() => void 0);
-  }, REVIEW_LEASE_RENEW_MS);
-  renewal.unref();
-  return async () => {
-    if (released) return;
-    released = true;
-    clearInterval(renewal);
-    await handle.close().catch(() => void 0);
-    await rm2(leasePath, { force: true });
-  };
-}
-async function removeLeaseIfOwnerExitedOrExpired(leasePath) {
-  let value;
-  try {
-    value = JSON.parse(await readFile5(leasePath, "utf8"));
-  } catch {
-    try {
-      const leaseStat = await stat8(leasePath);
-      if (Date.now() - leaseStat.mtimeMs < REVIEW_LEASE_MAX_AGE_MS) return false;
-      await rm2(leasePath, { force: true });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  if (!isRecord6(value) || value.schemaVersion !== 1 || !Number.isInteger(value.pid) || value.pid <= 0) return false;
-  try {
-    process.kill(value.pid, 0);
-    return false;
-  } catch (error) {
-    const code = error.code;
-    if (code !== "ESRCH" && code !== "EINVAL") return false;
-  }
-  await rm2(leasePath, { force: true });
-  return true;
-}
-async function waitForLeaseTurnover(leasePath, timeoutMs = 3e3) {
-  if (await removeLeaseIfOwnerExitedOrExpired(leasePath)) return true;
-  let ownerPid;
-  try {
-    const value = JSON.parse(await readFile5(leasePath, "utf8"));
-    if (isRecord6(value) && value.schemaVersion === 1 && Number.isInteger(value.pid) && value.pid > 0) {
-      ownerPid = value.pid;
-    }
-  } catch {
-    return false;
-  }
-  if (ownerPid === process.pid) return false;
-  const deadline = Date.now() + timeoutMs;
-  while (true) {
-    if (await removeLeaseIfOwnerExitedOrExpired(leasePath)) return true;
-    try {
-      await stat8(leasePath);
-    } catch (error) {
-      if (error.code === "ENOENT") return true;
-      return false;
-    }
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return false;
-    await delay(Math.min(100, remaining));
-  }
-}
 async function writeJsonReplacing(path3, value) {
-  const temporary = `${path3}.next-${process.pid}-${randomUUID2()}`;
+  const temporary = `${path3}.next-${process.pid}-${randomUUID3()}`;
   await writeFile4(temporary, `${JSON.stringify(value, null, 2)}
 `, { flag: "wx", mode: 384 });
   try {
@@ -16528,7 +16699,7 @@ async function runPlanInvocation(plan, env, limits, defaults, reporting) {
       return maybeAttachReport(env, result, reportOptions(plan.report, reporting), limits);
     }
     if (!("steps" in plan) && plan.name === "redacted-run-report") {
-      const input = isRecord7(plan.input) ? plan.input : {};
+      const input = isRecord8(plan.input) ? plan.input : {};
       const result = input.result;
       if (!isCommandResult3(result)) {
         throw new Error('Named workflow "redacted-run-report" requires input.result to be a CommandResult.');
@@ -16668,7 +16839,7 @@ function planOpenThread(thread) {
   };
 }
 function planByName(name, args, defaults = {}) {
-  const input = isRecord7(args) ? args : {};
+  const input = isRecord8(args) ? args : {};
   switch (name) {
     case "new-ask-read":
       return planAskWorkflow({ prompt: stringInput(input, "prompt"), thread: { type: "new" } }, defaults);
@@ -16731,7 +16902,7 @@ function resultSummary(result) {
   };
 }
 function isCommandResult3(value) {
-  return isRecord7(value) && typeof value.ok === "boolean" && typeof value.status === "string" && Array.isArray(value.warnings) && isRecord7(value.context) && typeof value.context.timestamp === "string";
+  return isRecord8(value) && typeof value.ok === "boolean" && typeof value.status === "string" && Array.isArray(value.warnings) && isRecord8(value.context) && typeof value.context.timestamp === "string";
 }
 function bootstrapStepForWorkflow(thread, existingTab, preferExistingTab) {
   const args = bootstrapArgsForWorkflow(thread, existingTab, preferExistingTab);
@@ -16826,7 +16997,7 @@ function isTypedThread(thread) {
 function normalizeFileInputs(files) {
   return files.map((file) => typeof file === "string" ? file : file.path);
 }
-function isRecord7(value) {
+function isRecord8(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function stringInput(input, key) {
@@ -16849,8 +17020,8 @@ async function runProReviewCanaryStep(runtime, options = {}) {
   if (runtime.agent === void 0 || runtime.agent === null) {
     throw new Error("The Pro review canary must run in a visible Codex browser-bridge JavaScript context.");
   }
-  const reportDir = resolve6(options.reportDir ?? join7(process.cwd(), "reports", "pro-review-canary"));
-  await mkdir5(reportDir, { recursive: true });
+  const reportDir = resolve6(options.reportDir ?? join8(process.cwd(), "reports", "pro-review-canary"));
+  await mkdir6(reportDir, { recursive: true });
   const state = options.resume ?? await createFixture(reportDir, options.requireArtifact ?? false);
   const chatgpt = createChatGPT({ agent: runtime.agent, ...runtime.browser === void 0 ? {} : { browser: runtime.browser } });
   const artifactInstruction = state.requireArtifact ? `Also provide the findings as a downloadable Markdown file named review-canary-${state.token}.md and include the evidence reference ${state.token} in that file.` : "";
@@ -16865,7 +17036,7 @@ async function runProReviewCanaryStep(runtime, options = {}) {
     output: {
       mode: "full",
       archive: true,
-      archiveRoot: join7(reportDir, "runs"),
+      archiveRoot: join8(reportDir, "runs"),
       downloadArtifacts: "all",
       returnFullMarkdown: true
     },
@@ -16893,7 +17064,7 @@ async function runProReviewCanaryStep(runtime, options = {}) {
   };
   const failures = Object.entries(checks).filter(([, passed]) => !passed).map(([name]) => name);
   if (review.status === "in_progress") failures.length = 0;
-  const diagnosticPath = join7(reportDir, `canary-${state.token}.redacted.json`);
+  const diagnosticPath = join8(reportDir, `canary-${state.token}.redacted.json`);
   const resume = review.status === "in_progress" && review.thread?.url !== void 0 && review.archiveDirectory !== void 0 ? {
     repositoryRoot: state.repositoryRoot,
     token: state.token,
@@ -16916,16 +17087,16 @@ async function runProReviewCanaryStep(runtime, options = {}) {
   return result;
 }
 async function createFixture(reportDir, requireArtifact) {
-  const token = randomUUID3().replace(/-/g, "").slice(0, 16);
-  const repositoryRoot = await mkdtemp2(join7(reportDir, `fixture-${token}-`));
-  await mkdir5(join7(repositoryRoot, "src"), { recursive: true });
-  await writeFile5(join7(repositoryRoot, "src", "counter.js"), "export function next(value) { return value + 1; }\n", "utf8");
+  const token = randomUUID4().replace(/-/g, "").slice(0, 16);
+  const repositoryRoot = await mkdtemp2(join8(reportDir, `fixture-${token}-`));
+  await mkdir6(join8(repositoryRoot, "src"), { recursive: true });
+  await writeFile5(join8(repositoryRoot, "src", "counter.js"), "export function next(value) { return value + 1; }\n", "utf8");
   await runGit2(repositoryRoot, ["init", "-b", "main"]);
   await runGit2(repositoryRoot, ["config", "user.name", "Pro Review Canary"]);
   await runGit2(repositoryRoot, ["config", "user.email", "pro-review-canary@example.invalid"]);
   await runGit2(repositoryRoot, ["add", "."]);
   await runGit2(repositoryRoot, ["commit", "-m", "canary base"]);
-  await writeFile5(join7(repositoryRoot, "src", "counter.js"), "export function next(value) {\n  if (!Number.isFinite(value)) throw new TypeError('finite value required');\n  return value + 1;\n}\n", "utf8");
+  await writeFile5(join8(repositoryRoot, "src", "counter.js"), "export function next(value) {\n  if (!Number.isFinite(value)) throw new TypeError('finite value required');\n  return value + 1;\n}\n", "utf8");
   return { repositoryRoot, token, archiveDirectory: "", threadUrl: "", requireArtifact };
 }
 async function countVisibleUserPrompts(browser, threadUrl) {
@@ -16951,7 +17122,7 @@ async function countUserPrompts(page) {
 }
 async function fullResponseMatchesArchive(review) {
   if (review.responseMarkdown === void 0 || review.archiveDirectory === void 0) return false;
-  const archived = await readFile6(join7(review.archiveDirectory, "response.md")).catch(() => void 0);
+  const archived = await readFile7(join8(review.archiveDirectory, "response.md")).catch(() => void 0);
   if (archived === void 0) return false;
   const returned = Buffer.from(review.responseMarkdown, "utf8");
   const returnedHash = createHash7("sha256").update(returned).digest("hex");
@@ -16960,7 +17131,7 @@ async function fullResponseMatchesArchive(review) {
 }
 async function artifactContainsToken(review, token) {
   for (const artifact of review.artifacts) {
-    const body = await readFile6(artifact.path).catch(() => void 0);
+    const body = await readFile7(artifact.path).catch(() => void 0);
     if (body !== void 0 && body.includes(Buffer.from(token))) return true;
   }
   return false;

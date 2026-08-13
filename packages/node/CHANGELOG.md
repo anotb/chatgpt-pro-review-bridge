@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.9
+
+- Falls back to an exact Windows PID query when the runtime cannot determine
+  archive-lease owner liveness with a process signal probe.
+- Reclaims only a proven-dead owner's lease; live or ambiguous owners
+  remain locked so concurrent resumes still fail closed.
+- Resolves the Windows process tool from the trusted system directory and uses
+  a generation-specific directory lease to preserve concurrent-owner safety.
+
 ## 0.7.8
 
 - Treats a claim conflict as a miss only for generic preferred-tab discovery,

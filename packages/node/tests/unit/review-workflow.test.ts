@@ -1,10 +1,11 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, rmdir, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { runCodeReviewWithPort, type ReviewWorkflowPort } from "../../src/reviews/code-review.js";
+import { removeLeaseIfOwnerExitedOrExpired } from "../../src/reviews/review-lease.js";
 import type {
   ArtifactInventoryData,
   CommandResult,
@@ -1119,6 +1120,61 @@ describe("Pro review state machine", () => {
     expect(resumed.status).toBe("completed");
     expect(calls).toContain("bootstrap");
     await expect(readFile(join(archiveDirectory, ".workflow.lock"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not delete a successor lease installed while dead-owner liveness is being checked", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "chatgpt-pro-lease-replacement-"));
+    const leasePath = join(directory, ".workflow.lock");
+    const originalId = "11111111-1111-4111-8111-111111111111";
+    const successorId = "22222222-2222-4222-8222-222222222222";
+    const original = JSON.stringify({
+      schemaVersion: 1,
+      leaseId: originalId,
+      pid: 4242,
+      acquiredAt: "2026-08-11T12:00:00.000Z"
+    });
+    const successor = JSON.stringify({
+      schemaVersion: 1,
+      leaseId: successorId,
+      pid: process.pid,
+      acquiredAt: "2026-08-13T18:30:00.000Z"
+    });
+    await mkdir(leasePath);
+    await writeFile(join(leasePath, `${originalId}.json`), original);
+    let finishProbe!: () => void;
+    let probeStarted!: () => void;
+    const started = new Promise<void>(resolve => { probeStarted = resolve; });
+    const finish = new Promise<void>(resolve => { finishProbe = resolve; });
+    const removal = removeLeaseIfOwnerExitedOrExpired(leasePath, async () => {
+      probeStarted();
+      await finish;
+      return "dead";
+    });
+
+    await started;
+    await rm(join(leasePath, `${originalId}.json`));
+    await rmdir(leasePath);
+    await mkdir(leasePath);
+    await writeFile(join(leasePath, `${successorId}.json`), successor);
+    finishProbe();
+
+    await expect(removal).resolves.toBe(false);
+    await expect(readFile(join(leasePath, `${successorId}.json`), "utf8")).resolves.toBe(successor);
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("reclaims a stale corrupt directory marker left by interrupted initialization", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "chatgpt-pro-corrupt-directory-lease-"));
+    const leasePath = join(directory, ".workflow.lock");
+    const ownerPath = join(leasePath, "33333333-3333-4333-8333-333333333333.json");
+    await mkdir(leasePath);
+    await writeFile(ownerPath, "");
+    const staleTime = new Date(Date.now() - 10 * 60_000);
+    await utimes(ownerPath, staleTime, staleTime);
+
+    await expect(removeLeaseIfOwnerExitedOrExpired(leasePath)).resolves.toBe(true);
+    await expect(readFile(ownerPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await rm(directory, { recursive: true, force: true });
   });
 
   it("does not evict a live lease owner merely because its timestamp is old", async () => {

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.9
+
+- Aligns the parity package with the shared backend's conservative Windows
+  dead-owner lease recovery: only an exact missing PID unlocks the archive.
+
 ## 0.7.8
 
 - Aligns the parity package with the shared backend's soft preferred-tab

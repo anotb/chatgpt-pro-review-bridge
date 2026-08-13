@@ -1,8 +1,7 @@
-import { mkdtemp, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 
 import { parseConversationId, readPageState, type PageState } from "../browser/page-state.js";
 import { captureArtifactBaseline, captureArtifactDelta } from "../commands/artifact-inventory.js";
@@ -41,6 +40,7 @@ import {
   writeImmutableJson
 } from "./archive.js";
 import { prepareReviewContext, ReviewPreparationError } from "./packet-builder.js";
+import { acquireReviewLease } from "./review-lease.js";
 import type {
   PreparedReviewContext,
   ProCodeReviewArgs,
@@ -1461,121 +1461,6 @@ function validateRequestedThread(args: ProCodeReviewArgs): void {
   const requestedId = args.thread.id ?? urlId;
   if (requestedId === undefined || isProvisionalConversationId(requestedId)) {
     throw new ReviewPreparationError("thread requires a canonical Chat conversation target.", "thread_target_provisional");
-  }
-}
-
-const REVIEW_LEASE_MAX_AGE_MS = 5 * 60_000;
-const REVIEW_LEASE_RENEW_MS = Math.floor(REVIEW_LEASE_MAX_AGE_MS / 3);
-
-async function acquireReviewLease(archiveDirectory: string): Promise<() => Promise<void>> {
-  const leasePath = join(archiveDirectory, ".workflow.lock");
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      handle = await open(leasePath, "wx", 0o600);
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST" && attempt === 0 && await waitForLeaseTurnover(leasePath)) {
-        continue;
-      }
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        throw new ReviewPreparationError(
-          "Another process or task already holds the exclusive lease for this review archive.",
-          "review_archive_locked",
-          undefined,
-          archiveDirectory
-        );
-      }
-      throw error;
-    }
-  }
-  if (handle === undefined) throw new Error("Unable to acquire the review archive lease.");
-  const acquiredAt = new Date();
-  const leaseRecord = (now: Date) => `${JSON.stringify({
-    schemaVersion: 1,
-    pid: process.pid,
-    acquiredAt: acquiredAt.toISOString(),
-    renewedAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + REVIEW_LEASE_MAX_AGE_MS).toISOString()
-  })}\n`;
-  await handle.writeFile(leaseRecord(acquiredAt));
-  let released = false;
-  const renewal = setInterval(() => {
-    if (released) return;
-    const record = Buffer.from(leaseRecord(new Date()));
-    void handle.write(record, 0, record.length, 0)
-      .then(() => handle.truncate(record.length))
-      .catch(() => undefined);
-  }, REVIEW_LEASE_RENEW_MS);
-  renewal.unref();
-  return async () => {
-    if (released) return;
-    released = true;
-    clearInterval(renewal);
-    await handle.close().catch(() => undefined);
-    await rm(leasePath, { force: true });
-  };
-}
-
-async function removeLeaseIfOwnerExitedOrExpired(leasePath: string): Promise<boolean> {
-  let value: unknown;
-  try {
-    value = JSON.parse(await readFile(leasePath, "utf8"));
-  } catch {
-    try {
-      const leaseStat = await stat(leasePath);
-      if (Date.now() - leaseStat.mtimeMs < REVIEW_LEASE_MAX_AGE_MS) return false;
-      await rm(leasePath, { force: true });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  if (!isRecord(value) || value.schemaVersion !== 1 || !Number.isInteger(value.pid) || (value.pid as number) <= 0) return false;
-  // An expiry timestamp is a stale-record cleanup aid, not authority to evict
-  // a demonstrably live owner. Long visible Pro generations can legitimately
-  // outlast the lease window; the owner renews periodically, and a delayed
-  // renewal must never permit concurrent mutation of the same archive.
-  try {
-    process.kill(value.pid as number, 0);
-    return false;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ESRCH" && code !== "EINVAL") return false;
-  }
-  await rm(leasePath, { force: true });
-  return true;
-}
-
-async function waitForLeaseTurnover(leasePath: string, timeoutMs = 3_000): Promise<boolean> {
-  if (await removeLeaseIfOwnerExitedOrExpired(leasePath)) return true;
-  let ownerPid: number | undefined;
-  try {
-    const value: unknown = JSON.parse(await readFile(leasePath, "utf8"));
-    if (isRecord(value) && value.schemaVersion === 1 && Number.isInteger(value.pid) && (value.pid as number) > 0) {
-      ownerPid = value.pid as number;
-    }
-  } catch {
-    return false;
-  }
-  // A concurrent call in this process is definitely live; preserve the fast
-  // fail-closed path. A different process may be the browser evaluator that is
-  // still exiting after its bounded host call timed out, so allow that brief
-  // turnover to finish before declaring the archive locked.
-  if (ownerPid === process.pid) return false;
-
-  const deadline = Date.now() + timeoutMs;
-  while (true) {
-    if (await removeLeaseIfOwnerExitedOrExpired(leasePath)) return true;
-    try {
-      await stat(leasePath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
-      return false;
-    }
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return false;
-    await delay(Math.min(100, remaining));
   }
 }
 

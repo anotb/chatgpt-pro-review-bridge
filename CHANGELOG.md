@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.9 - 2026-08-13
+
+- Reclaims an abandoned AskPro archive lease on Windows when an exact PID query
+  proves that its recorded browser-host owner has exited.
+- Keeps live or ambiguous owners locked, preserving fail-closed exactly-once
+  resume behavior while preventing a dead host from locking an archive forever.
+- Uses a unique immutable directory-lease marker so competing resumptions
+  cannot remove a successor's lock, while retaining migration support for
+  pre-0.7.9 file leases.
+
 ## 0.7.8 - 2026-08-13
 
 - Lets a new doctor or AskPro workflow open its own ChatGPT home tab when an
