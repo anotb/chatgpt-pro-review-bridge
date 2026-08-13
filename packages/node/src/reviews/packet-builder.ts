@@ -65,6 +65,14 @@ type Section = { title: string; body: string; files: string[] };
 type RepositoryRoots = { canonical: string; lexical: string };
 type GitStatusEntry = { code: string; paths: string[] };
 type GitNameStatusEntry = { code: string; paths: string[] };
+type GitTreeEntry = { mode: string; oid: string; sizeBytes?: number };
+type ReadableCandidate = {
+  path: string;
+  category: string;
+  sizeBytes: number;
+  overlay: boolean;
+  oid?: string;
+};
 
 export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Date()): Promise<PreparedReviewContext> {
   if (args.output?.archive === false) {
@@ -129,7 +137,7 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
     const packetStatus = filterPacketStatus(initialStatus, archivePathPrefix);
     const dirty = packetStatus.visible.length > 0;
     const availableFiles = await snapshotFiles(repositoryRoot, headSha, includeWorkingTree, archivePathPrefix);
-    const committedModes = headSha === undefined ? new Map<string, string>() : await treeEntryModes(repositoryRoot, headSha);
+    const committedEntries = headSha === undefined ? new Map<string, GitTreeEntry>() : await treeEntries(repositoryRoot, headSha);
     const changedAll = reviewScope === "repository"
       ? availableFiles
       : await changedFiles(repositoryRoot, mergeBaseSha!, headSha!, includeWorkingTree, archivePathPrefix);
@@ -153,6 +161,7 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
     const sourceSections: Section[] = [];
     const dependencies = new Map<string, Set<string>>();
     const maxSourceBytes = positiveInteger(args.context?.maxSourceFileBytes, DEFAULT_SOURCE_BYTES);
+    const readableCandidates: ReadableCandidate[] = [];
 
     const candidates = collectCandidateFiles(availableFiles, changed, args, reviewScope);
     for (const candidate of candidates) {
@@ -163,7 +172,7 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
       }
       const generatedReason = generatedPathReason(normalized);
       if (generatedReason !== undefined) {
-        const generatedSize = await candidateSize(repositoryRoot, headSha, normalized, includeWorkingTree, overlayPaths).catch(() => undefined);
+        const generatedSize = await candidateSize(repositoryRoot, normalized, includeWorkingTree, overlayPaths, committedEntries).catch(() => undefined);
         fileRecords.push({
           path: normalized,
           category: candidate.category,
@@ -174,7 +183,7 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
         continue;
       }
       if (!overlayPaths.has(normalized)) {
-        const mode = committedModes.get(normalized);
+        const mode = committedEntries.get(normalized)?.mode;
         if (mode === "120000" || mode === "160000") {
           fileRecords.push({
             path: normalized,
@@ -187,7 +196,7 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
       }
       let sizeBytes: number;
       try {
-        sizeBytes = await candidateSize(repositoryRoot, headSha, normalized, includeWorkingTree, overlayPaths);
+        sizeBytes = await candidateSize(repositoryRoot, normalized, includeWorkingTree, overlayPaths, committedEntries);
       } catch {
         fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "not_present_at_head_or_worktree" });
         continue;
@@ -196,28 +205,50 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
         fileRecords.push({ path: normalized, category: candidate.category, status: "oversized", reason: "max_source_file_bytes", sizeBytes });
         continue;
       }
-      let bytes: Buffer;
-      try {
-        bytes = await readCandidateBytes(repositoryRoot, headSha, normalized, includeWorkingTree, overlayPaths);
-      } catch {
+      const overlay = includeWorkingTree && overlayPaths.has(normalized);
+      const oid = overlay ? undefined : committedEntries.get(normalized)?.oid;
+      if (!overlay && oid === undefined) {
         fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "not_present_at_head_or_worktree" });
         continue;
       }
+      readableCandidates.push({
+        path: normalized,
+        category: candidate.category,
+        sizeBytes,
+        overlay,
+        ...(oid === undefined ? {} : { oid })
+      });
+    }
+
+    const committedBlobs = await readGitBlobs(repositoryRoot, readableCandidates
+      .filter(candidate => !candidate.overlay && candidate.oid !== undefined)
+      .map(candidate => ({ oid: candidate.oid!, sizeBytes: candidate.sizeBytes })));
+    for (const candidate of readableCandidates) {
+      let bytes: Buffer;
+      try {
+        bytes = candidate.overlay
+          ? await readWorkingTreeCandidate(repositoryRoot, candidate.path)
+          : committedBlobs.get(candidate.oid!)!;
+        if (bytes === undefined) throw new Error("Git blob was not returned by the batch reader.");
+      } catch {
+        fileRecords.push({ path: candidate.path, category: candidate.category, status: "excluded", reason: "not_present_at_head_or_worktree" });
+        continue;
+      }
       if (isBinary(bytes)) {
-        fileRecords.push({ path: normalized, category: candidate.category, status: "binary", sizeBytes: bytes.length, sha256: hash(bytes) });
+        fileRecords.push({ path: candidate.path, category: candidate.category, status: "binary", sizeBytes: bytes.length, sha256: hash(bytes) });
         continue;
       }
       const text = bytes.toString("utf8");
       const numbered = lineNumber(text);
       sourceSections.push({
-        title: `Source snapshot: ${displayGitPath(normalized)}`,
-        body: `Path: ${displayGitPath(normalized)}\nCategory: ${candidate.category}\nSHA-256: ${hash(bytes)}\n\n${fencedBlock("text", numbered)}`,
-        files: [normalized]
+        title: `Source snapshot: ${displayGitPath(candidate.path)}`,
+        body: `Path: ${displayGitPath(candidate.path)}\nCategory: ${candidate.category}\nSHA-256: ${hash(bytes)}\n\n${fencedBlock("text", numbered)}`,
+        files: [candidate.path]
       });
-      fileRecords.push({ path: normalized, category: candidate.category, status: "included", sizeBytes: bytes.length, sha256: hash(bytes) });
+      fileRecords.push({ path: candidate.path, category: candidate.category, status: "included", sizeBytes: bytes.length, sha256: hash(bytes) });
       for (const symbol of exportedSymbols(text)) {
         const paths = dependencies.get(symbol) ?? new Set<string>();
-        paths.add(normalized);
+        paths.add(candidate.path);
         dependencies.set(symbol, paths);
       }
     }
@@ -520,10 +551,10 @@ async function workingTreePaths(root: string, archivePathPrefix: string | undefi
 
 async function candidateSize(
   root: string,
-  headSha: string | undefined,
   path: string,
   includeWorkingTree: boolean,
-  overlayPaths: Set<string>
+  overlayPaths: Set<string>,
+  committedEntries: Map<string, GitTreeEntry>
 ): Promise<number> {
   if (includeWorkingTree && overlayPaths.has(path)) {
     const absolute = resolve(root, path);
@@ -534,30 +565,53 @@ async function candidateSize(
     }
     return info.size;
   }
-  if (headSha === undefined) throw new ReviewPreparationError(`No committed Git blob is available for ${path}.`, "git_head_unavailable");
-  return Number(await gitRequired(root, ["cat-file", "-s", `${headSha}:${path}`], "git_blob_unavailable"));
+  const sizeBytes = committedEntries.get(path)?.sizeBytes;
+  if (sizeBytes === undefined) throw new ReviewPreparationError(`No committed Git blob is available for ${path}.`, "git_blob_unavailable");
+  return sizeBytes;
 }
 
-async function readCandidateBytes(
-  root: string,
-  headSha: string | undefined,
-  path: string,
-  includeWorkingTree: boolean,
-  overlayPaths: Set<string>
-): Promise<Buffer> {
-  if (includeWorkingTree && overlayPaths.has(path)) {
-    const absolute = resolve(root, path);
-    assertInside(root, absolute);
-    const info = await lstat(absolute);
-    if (!info.isFile() || info.isSymbolicLink()) {
-      throw new ReviewPreparationError(`Review candidate is not a regular file: ${path}`, "candidate_not_regular_file");
+async function readWorkingTreeCandidate(root: string, path: string): Promise<Buffer> {
+  const absolute = resolve(root, path);
+  assertInside(root, absolute);
+  const info = await lstat(absolute);
+  if (!info.isFile() || info.isSymbolicLink()) {
+    throw new ReviewPreparationError(`Review candidate is not a regular file: ${path}`, "candidate_not_regular_file");
+  }
+  return await readFile(absolute);
+}
+
+async function readGitBlobs(root: string, requests: Array<{ oid: string; sizeBytes: number }>): Promise<Map<string, Buffer>> {
+  const unique = new Map(requests.map(request => [request.oid, request.sizeBytes]));
+  if (unique.size === 0) return new Map();
+  const ordered = [...unique.entries()];
+  const input = Buffer.from(`${ordered.map(([oid]) => oid).join("\n")}\n`, "utf8");
+  const result = await runGitBuffer(root, ["cat-file", "--batch"], input);
+  if (result.code !== 0) {
+    throw new ReviewPreparationError(result.stderr.toString("utf8").trim() || "Unable to read committed Git blobs in a batch.", "git_blob_unavailable");
+  }
+  const blobs = new Map<string, Buffer>();
+  let offset = 0;
+  for (const [expectedOid, expectedSize] of ordered) {
+    const lineEnd = result.stdout.indexOf(0x0a, offset);
+    if (lineEnd < 0) throw new ReviewPreparationError("Git batch output ended before its blob header.", "git_blob_unavailable");
+    const header = result.stdout.subarray(offset, lineEnd).toString("utf8");
+    const [oid, type, sizeText] = header.split(" ");
+    const size = Number(sizeText);
+    if (oid !== expectedOid || type !== "blob" || !Number.isSafeInteger(size) || size < 0 || size !== expectedSize) {
+      throw new ReviewPreparationError(`Unexpected Git batch blob header: ${header}`, "git_blob_unavailable");
     }
-    return await readFile(absolute);
+    const bodyStart = lineEnd + 1;
+    const bodyEnd = bodyStart + size;
+    if (bodyEnd >= result.stdout.length || result.stdout[bodyEnd] !== 0x0a) {
+      throw new ReviewPreparationError(`Git batch blob body was truncated for ${expectedOid}.`, "git_blob_unavailable");
+    }
+    blobs.set(expectedOid, Buffer.from(result.stdout.subarray(bodyStart, bodyEnd)));
+    offset = bodyEnd + 1;
   }
-  if (headSha === undefined) {
-    throw new ReviewPreparationError(`No committed Git blob is available for ${path}.`, "git_head_unavailable");
+  if (offset !== result.stdout.length) {
+    throw new ReviewPreparationError("Git batch output contained unexpected trailing bytes.", "git_blob_unavailable");
   }
-  return await gitBlob(root, headSha, path);
+  return blobs;
 }
 
 function relatedFileStem(path: string): string {
@@ -929,20 +983,26 @@ async function gitStatus(root: string): Promise<GitStatusEntry[]> {
   return entries;
 }
 
-async function treeEntryModes(root: string, headSha: string): Promise<Map<string, string>> {
-  const result = await runGitBuffer(root, ["ls-tree", "-r", "-z", "--full-tree", headSha]);
+async function treeEntries(root: string, headSha: string): Promise<Map<string, GitTreeEntry>> {
+  const result = await runGitBuffer(root, ["ls-tree", "-r", "-z", "-l", "--full-tree", headSha]);
   if (result.code !== 0) {
     throw new ReviewPreparationError(result.stderr.toString("utf8").trim() || "Unable to inspect repository tree modes.", "git_head_tree_failed");
   }
-  const modes = new Map<string, string>();
+  const entries = new Map<string, GitTreeEntry>();
   for (const record of splitNul(result.stdout)) {
     const tab = record.indexOf("\t");
     if (tab < 0) continue;
-    const header = record.slice(0, tab).split(" ");
+    const [mode, _type, oid, sizeText] = record.slice(0, tab).trim().split(/\s+/);
     const path = normalizeRepoPath(record.slice(tab + 1));
-    if (header[0] !== undefined && path.length > 0) modes.set(path, header[0]);
+    if (mode === undefined || oid === undefined || path.length === 0) continue;
+    const sizeBytes = Number(sizeText);
+    entries.set(path, {
+      mode,
+      oid,
+      ...(Number.isSafeInteger(sizeBytes) && sizeBytes >= 0 ? { sizeBytes } : {})
+    });
   }
-  return modes;
+  return entries;
 }
 
 function splitNul(value: Buffer): string[] {
@@ -991,14 +1051,6 @@ async function gitChecked(root: string, args: string[], code: string, allowedNon
   return result;
 }
 
-async function gitBlob(root: string, headSha: string, path: string): Promise<Buffer> {
-  const result = await runGitBuffer(root, ["show", `${headSha}:${path}`]);
-  if (result.code !== 0) {
-    throw new ReviewPreparationError(result.stderr.toString("utf8").trim() || `Git blob is unavailable at ${headSha}:${path}.`, "git_blob_unavailable");
-  }
-  return result.stdout;
-}
-
 async function runGit(root: string, args: string[]): Promise<GitResult> {
   return await new Promise((resolveResult, reject) => {
     const child = spawn("git", ["-c", "core.quotepath=false", ...args], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -1011,15 +1063,16 @@ async function runGit(root: string, args: string[]): Promise<GitResult> {
   });
 }
 
-async function runGitBuffer(root: string, args: string[]): Promise<{ stdout: Buffer; stderr: Buffer; code: number }> {
+async function runGitBuffer(root: string, args: string[], input?: Buffer): Promise<{ stdout: Buffer; stderr: Buffer; code: number }> {
   return await new Promise((resolveResult, reject) => {
-    const child = spawn("git", ["-c", "core.quotepath=false", ...args], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("git", ["-c", "core.quotepath=false", ...args], { cwd: root, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     child.stdout.on("data", chunk => stdout.push(Buffer.from(chunk)));
     child.stderr.on("data", chunk => stderr.push(Buffer.from(chunk)));
     child.on("error", reject);
     child.on("close", code => resolveResult({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), code: code ?? -1 }));
+    child.stdin.end(input);
   });
 }
 

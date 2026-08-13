@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.4
+
+- Aligns the parity package version with the shared backend's faster committed
+  full-repository packet construction.
+
 ## 0.7.3
 
 - Aligns the parity package version with the shared backend fix that maps

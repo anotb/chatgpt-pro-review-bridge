@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.4 - 2026-08-12
+
+- Replaces per-file committed-source Git subprocesses with a NUL-safe tree
+  inventory and one object-ID batch read after privacy and size preflight.
+- Cuts the measured 432-entry full-repository packet build from roughly 78
+  seconds to 34 seconds on the release workstation without weakening evidence
+  exclusions or commit-only provenance.
+
 ## 0.7.3 - 2026-08-12
 
 - Treats bounded partial assistant text captured while Pro is still generating

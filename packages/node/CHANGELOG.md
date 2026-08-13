@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.4
+
+- Batches committed Git blob reads for full-repository packets after the same
+  secret, generated-file, file-mode, and size preflight checks.
+- Avoids two Git process launches per committed source while retaining NUL-safe
+  filename handling and exact requested-head evidence.
+
 ## 0.7.3
 
 - Normalizes bounded partial polling snapshots from an actively generating Pro
