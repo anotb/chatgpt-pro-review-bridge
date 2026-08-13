@@ -77,12 +77,11 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: npm --prefix packages/node ci
-      - run: python -m pip install --upgrade build
-      - run: npm run node:build
-      - run: npm run node:bundle
-      - run: npm run release:check-node-pack
-      - run: npm run release:smoke-source
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-assets-${{ github.ref_name }}
+          path: dist
+      - run: npm run release:smoke-artifacts
 
   publish-npm:
     name: publish npm
@@ -95,18 +94,17 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-assets-${{ github.ref_name }}
+          path: dist
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
-      - run: npm --prefix packages/node ci
       - run: npm run release:check-version
-      - run: npm run node:build
-      - run: npm run node:bundle
-      - run: npm run release:check-node-pack
       - name: Publish Node package to npm
-        working-directory: packages/node
-        run: npm publish --provenance --access public --tag latest
+        run: npm publish dist/node/*.tgz --provenance --access public --tag latest
 
   verify-published:
     name: verify published npm install
@@ -121,12 +119,40 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: npm run release:verify-published
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-assets-${{ github.ref_name }}
+          path: dist
+      - run: npm run release:verify-published -- --artifacts dist
+
+  release-gate:
+    name: verify complete release path
+    if: always() && github.repository == 'anotb/chatgpt-pro-review-bridge'
+    needs: [preflight, package-smoke-macos, publish-npm, verify-published]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every enabled release stage
+        env:
+          PUBLISH_NPM: ${{ vars.PUBLISH_NPM }}
+          PREFLIGHT: ${{ needs.preflight.result }}
+          PACKAGE_SMOKE: ${{ needs.package-smoke-macos.result }}
+          PUBLISH_RESULT: ${{ needs.publish-npm.result }}
+          VERIFY_RESULT: ${{ needs.verify-published.result }}
+        run: |
+          test "$PREFLIGHT" = success
+          test "$PACKAGE_SMOKE" = success
+          if [ "$PUBLISH_NPM" = true ]; then
+            test "$PUBLISH_RESULT" = success
+            test "$VERIFY_RESULT" = success
+          else
+            test "$PUBLISH_RESULT" = skipped
+            test "$VERIFY_RESULT" = skipped
+          fi
 
   github-release:
     name: publish stable GitHub release
     if: github.repository == 'anotb/chatgpt-pro-review-bridge'
-    needs: [preflight, package-smoke-macos]
+    needs: release-gate
     runs-on: ubuntu-latest
     permissions:
       contents: write

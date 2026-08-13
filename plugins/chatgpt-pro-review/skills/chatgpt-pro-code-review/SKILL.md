@@ -80,7 +80,6 @@ const review = await chatgpt.reviews.askPro({
   context: {
     mode: "review-packets",
     scope: "repository",
-    includeWorkingTree: true,
     onBudgetExceeded: "partition"
   },
   // Use the same target, output, safeguards, and polling options as above.
@@ -88,6 +87,13 @@ const review = await chatgpt.reviews.askPro({
 ```
 
 `repositoryRoot` without `baseRef` also defaults to repository scope. Set `scope: "repository"` explicitly in skill-driven calls so the archived intent is obvious. Committed repository scope defaults to a commit-only snapshot; set `includeWorkingTree: true` only when the caller wants local changes included. An unborn repository defaults to its index and working tree because no committed snapshot exists.
+
+When the caller explicitly asks to include current local edits, add this field to
+the repository context:
+
+```js
+includeWorkingTree: true
+```
 
 Do not branch on the selected Codex host model. Do not replace this call with a model-written repository summary.
 

@@ -15,9 +15,10 @@ import type {
 const DEFAULT_PACKET_BYTES = 1_500_000;
 const DEFAULT_TOTAL_BYTES = 12_000_000;
 const DEFAULT_SOURCE_BYTES = 750_000;
+const PUBLIC_ENV_TEMPLATE_PATTERN = /(^|\/)\.env\.(?:example|sample|template)$/i;
 const SECRET_PATH_PATTERNS = [
   /(^|\/)\.env(?:\.|$)/i,
-  /(^|\/)(?:credentials?|secrets?|tokens?)\//i,
+  /(^|\/)(?:credentials?|secrets?)\//i,
   /(^|\/)\.?(?:credentials?|secrets?|tokens?)(?:[._-](?:local|private|production|prod|development|dev|test))?(?:\.(?:json|ya?ml|toml|ini|txt))?$/i,
   /(^|\/)(?:service-account[^/]*|application_default_credentials|auth)\.json$/i,
   /(^|\/)(?:\.npmrc|\.pypirc|\.netrc|\.git-credentials)$/i,
@@ -166,7 +167,7 @@ export async function prepareReviewContext(args: ProCodeReviewArgs, now = new Da
     const candidates = collectCandidateFiles(availableFiles, changed, args, reviewScope);
     for (const candidate of candidates) {
       const normalized = normalizeRepoPath(candidate.path);
-      if (SECRET_PATH_PATTERNS.some(pattern => pattern.test(normalized))) {
+      if (isSecretPath(normalized)) {
         fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "secret_path_policy" });
         continue;
       }
@@ -544,9 +545,18 @@ function filterPacketStatus(value: GitStatusEntry[], archivePathPrefix: string |
 
 async function workingTreePaths(root: string, archivePathPrefix: string | undefined): Promise<Set<string>> {
   const status = await gitStatus(root);
-  return new Set(status
+  const candidates = status
     .flatMap(entry => entry.paths)
-    .filter(path => !isPacketExcludedPath(path, archivePathPrefix)));
+    .filter(path => !isPacketExcludedPath(path, archivePathPrefix));
+  const present = await Promise.all(candidates.map(async path => {
+    const absolute = resolve(root, path);
+    assertInside(root, absolute);
+    return await lstat(absolute).then(() => path, () => undefined);
+  }));
+  // Deletion paths and the old side of a rename are intentionally absent from
+  // the worktree. Leave them backed by the committed tree so their old source,
+  // deletion patch, and rename relationship remain available as evidence.
+  return new Set(present.filter((path): path is string => path !== undefined));
 }
 
 async function candidateSize(
@@ -1092,6 +1102,12 @@ function normalizeRepoPath(value: string): string {
   return value.replace(/^\.\//, "");
 }
 
+function isSecretPath(value: string): boolean {
+  const normalized = normalizeRepoPath(value);
+  if (PUBLIC_ENV_TEMPLATE_PATTERN.test(normalized)) return false;
+  return SECRET_PATH_PATTERNS.some(pattern => pattern.test(normalized));
+}
+
 function repositoryRelativeArchivePrefix(root: string, archiveRoot: string): string | undefined {
   const absolute = isAbsolute(archiveRoot) ? resolve(archiveRoot) : resolve(root, archiveRoot);
   const rel = relative(resolve(root), absolute);
@@ -1101,7 +1117,7 @@ function repositoryRelativeArchivePrefix(root: string, archiveRoot: string): str
 
 function isPacketExcludedPath(path: string, archivePathPrefix: string | undefined): boolean {
   const normalized = normalizeRepoPath(path);
-  return SECRET_PATH_PATTERNS.some(pattern => pattern.test(normalized))
+  return isSecretPath(normalized)
     || (archivePathPrefix !== undefined && (normalized === archivePathPrefix || normalized.startsWith(`${archivePathPrefix}/`)));
 }
 

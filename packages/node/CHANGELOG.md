@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.5
+
+- Retains deletion and rename evidence in working-tree review packets, carries
+  successful command warnings through the workflow, and tolerates known
+  visible prompt presentation wrappers during duplicate-safe resume.
+- Narrows over-broad environment/template and source-token exclusions without
+  weakening credential-file and credential-directory protection.
+- Verifies exact checksummed release assets rather than rebuilding them during
+  downstream package smoke and publication jobs.
+
 ## 0.7.4
 
 - Batches committed Git blob reads for full-repository packets after the same

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.5 - 2026-08-12
+
+- Keeps deleted files and both sides of renames in working-tree review packets
+  instead of losing their committed source or relationship evidence.
+- Preserves successful backend warnings in workflow results, step evidence, and
+  durable receipts, and resumes safely across visible attachment/“Show more”
+  presentation changes.
+- Refines conservative path exclusions so public environment templates and
+  ordinary source token directories remain reviewable while credential paths
+  stay excluded.
+- Makes commit-only full-repository review the canonical skill example and
+  keeps current local edits an explicit opt-in.
+- Smokes the exact npm tarball, Python wheel, and Python sdist assembled by the
+  release preflight, verifies their checksums, and gates the GitHub release on
+  every enabled publish and post-publish verification stage.
+
 ## 0.7.4 - 2026-08-12
 
 - Replaces per-file committed-source Git subprocesses with a NUL-safe tree

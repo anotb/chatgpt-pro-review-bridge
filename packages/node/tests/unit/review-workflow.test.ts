@@ -246,6 +246,30 @@ describe("Pro review state machine", () => {
     expect(result.nextAction).toBeUndefined();
   });
 
+  it("preserves successful command warnings in step evidence, the result, and the receipt", async () => {
+    const repo = await fixtureRepository();
+    const fidelityWarning = "Markdown was reconstructed from visible semantic content.";
+    const result = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD"
+    }, makePort([], {
+      readFullMarkdown: async () => ({
+        ...success({ role: "assistant" as const, text: "# Review", markdown: "# Review", format: "markdown" as const }),
+        warnings: [fidelityWarning]
+      })
+    }));
+
+    expect(result.status).toBe("completed_with_warnings");
+    expect(result.warnings).toContain(fidelityWarning);
+    expect(result.rawSteps).toContainEqual(expect.objectContaining({
+      state: "READ_FULL_MARKDOWN_ONCE",
+      warnings: [fidelityWarning]
+    }));
+    expect(JSON.parse(await readFile(join(result.archiveDirectory!, "receipt.json"), "utf8"))).toMatchObject({
+      warnings: expect.arrayContaining([fidelityWarning])
+    });
+  });
+
   it("checkpoints each artifact and resumes partial or completed downloads without duplicates", async () => {
     const repo = await fixtureRepository();
     const delta = {
@@ -680,6 +704,45 @@ describe("Pro review state machine", () => {
     });
   });
 
+  it("resumes across attachment-envelope and Show more presentation changes", async () => {
+    const repo = await fixtureRepository();
+    let submittedPrompt = "";
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      submit: async (prompt: string) => {
+        submittedPrompt = prompt;
+        return success({ submitted: true, userTurnText: prompt, turnCount: 2, submissionState: "submitted_generating" });
+      },
+      readLatestUser: async () => success({
+        role: "user",
+        text: `manifest.upload.json\nFile\npacket-001.md\nFile\n${submittedPrompt}\nShow more`,
+        format: "normalized_text"
+      }),
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    expect(first.status).toBe("in_progress");
+
+    const calls: string[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls, {
+      readLatestUser: async () => success({
+        role: "user",
+        text: `manifest.upload.json File packet-001.md File   ${submittedPrompt.replace(/\s+/g, " ")}`,
+        format: "normalized_text"
+      })
+    }));
+
+    expect(resumed.status).toBe("completed");
+    expect(calls).not.toContain("attach");
+    expect(calls).not.toContain("submit");
+  });
+
   it("claims the visible prompt-identical thread for a provisional ambiguous receipt", async () => {
     const repo = await fixtureRepository();
     let submittedPrompt = "";
@@ -720,7 +783,8 @@ describe("Pro review state machine", () => {
       })
     }));
 
-    expect(resumed.status).toBe("completed");
+    expect(resumed.status).toBe("completed_with_warnings");
+    expect(resumed.warnings).toContain("Recovered the archived review from the already-visible prompt-identical Chat conversation.");
     expect(calls).toContain("pageState");
     expect(calls).not.toContain("recoverThread");
     expect(calls).not.toContain("openThread");

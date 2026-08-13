@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import process from "node:process";
 
@@ -21,23 +22,41 @@ const RESPONSE_SCHEMA = "chatgpt.browser_control.backend_response.v1";
 const DEFAULT_TIMEOUT_MS = 180_000;
 
 function parseArgs(argv) {
-  const options = { mode: undefined, timeoutMs: DEFAULT_TIMEOUT_MS };
+  const options = { mode: undefined, artifactsDir: undefined, timeoutMs: DEFAULT_TIMEOUT_MS };
+  const selectMode = mode => {
+    if (options.mode !== undefined && options.mode !== mode) {
+      throw new Error("Choose exactly one mode: --source, --npm-registry, or --artifacts <dir>");
+    }
+    options.mode = mode;
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === "--source") options.mode = "source";
-    else if (arg === "--npm-registry") options.mode = "npm-registry";
+    if (arg === "--source") selectMode("source");
+    else if (arg === "--npm-registry") selectMode("npm-registry");
+    else if (arg === "--artifacts") {
+      const value = argv[++index];
+      if (value === undefined || value.startsWith("--")) throw new Error("--artifacts requires a directory");
+      options.artifactsDir = resolve(value);
+    }
     else if (arg === "--timeout-ms") {
       const value = Number.parseInt(argv[++index] ?? "", 10);
       if (!Number.isFinite(value) || value <= 0) throw new Error("--timeout-ms must be a positive integer");
       options.timeoutMs = value;
     } else if (arg === "--help" || arg === "-h") {
-      console.log("Usage: node scripts/verify-release-install.mjs (--source|--npm-registry) [--timeout-ms <ms>]");
+      console.log("Usage: node scripts/verify-release-install.mjs (--source|--npm-registry|--artifacts <dir>) [--artifacts <dir>] [--timeout-ms <ms>]");
       process.exit(0);
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
-  if (options.mode === undefined) throw new Error("Choose exactly one mode: --source or --npm-registry");
+  if (options.mode === undefined && options.artifactsDir !== undefined) selectMode("artifacts");
+  if (options.mode === undefined) throw new Error("Choose a mode: --source, --npm-registry, or --artifacts <dir>");
+  if (options.mode === "source" && options.artifactsDir !== undefined) {
+    throw new Error("--source cannot be combined with --artifacts");
+  }
+  if ((options.mode === "artifacts" || options.mode === "npm-registry") && options.artifactsDir === undefined) {
+    throw new Error(`${options.mode} mode requires --artifacts <dir> so the exact Python release assets are installed`);
+  }
   return options;
 }
 
@@ -93,14 +112,16 @@ async function waitForNpmVersion(version, timeoutMs) {
   throw new Error(`Timed out waiting for npm ${NPM_PACKAGE}@${version}: ${last}`);
 }
 
-async function buildPythonWheel(root) {
+async function buildPythonDistributions(root) {
   const pythonDist = join(root, "python-dist");
   await mkdir(pythonDist, { recursive: true });
   const python = process.env.PYTHON ?? (process.platform === "win32" ? "python.exe" : "python3");
   run(python, ["-m", "build", "--sdist", "--wheel", "--outdir", pythonDist, PYTHON_ROOT]);
-  const wheel = (await readdir(pythonDist)).find(file => file.endsWith(".whl"));
-  if (wheel === undefined) throw new Error("Python build did not produce a wheel");
-  return join(pythonDist, wheel);
+  const files = await readdir(pythonDist);
+  const wheel = files.find(file => file.endsWith(".whl"));
+  const sdist = files.find(file => file.endsWith(".tar.gz"));
+  if (wheel === undefined || sdist === undefined) throw new Error("Python build did not produce both a wheel and sdist");
+  return [join(pythonDist, wheel), join(pythonDist, sdist)];
 }
 
 async function sourceSpecs(root) {
@@ -113,21 +134,64 @@ async function sourceSpecs(root) {
   }));
   const filename = packed[0]?.filename;
   if (typeof filename !== "string") throw new Error("npm pack did not return a tarball filename");
-  return { nodeSpec: join(nodeDist, basename(filename)), pythonSpec: await buildPythonWheel(root), nodeRegistry: false };
+  return { nodeSpec: join(nodeDist, basename(filename)), pythonSpecs: await buildPythonDistributions(root), nodeRegistry: false };
 }
 
-async function npmRegistrySpecs(root, versions, timeoutMs) {
-  await waitForNpmVersion(versions.nodeVersion, timeoutMs);
+async function artifactSpecs(artifactsDir, versions, nodeRegistry = false) {
+  const expectedNames = [
+    `node/${NPM_PACKAGE}-${versions.nodeVersion}.tgz`,
+    `python/chatgpt_pro_review_bridge-${versions.pythonVersion}-py3-none-any.whl`,
+    `python/chatgpt_pro_review_bridge-${versions.pythonVersion}.tar.gz`
+  ];
+  await verifyArtifactChecksums(artifactsDir, versions.nodeVersion, expectedNames);
+  const nodeFiles = await readdir(join(artifactsDir, "node"));
+  const pythonFiles = await readdir(join(artifactsDir, "python"));
+  const nodeName = nodeFiles.find(file => file === `${NPM_PACKAGE}-${versions.nodeVersion}.tgz`);
+  const wheel = pythonFiles.find(file => file === `chatgpt_pro_review_bridge-${versions.pythonVersion}-py3-none-any.whl`);
+  const sdist = pythonFiles.find(file => file === `chatgpt_pro_review_bridge-${versions.pythonVersion}.tar.gz`);
+  if (nodeName === undefined || wheel === undefined || sdist === undefined) {
+    throw new Error(`Release artifacts do not contain the exact npm tarball, Python wheel, and Python sdist for ${versions.nodeVersion}`);
+  }
   return {
-    nodeSpec: `${NPM_PACKAGE}@${versions.nodeVersion}`,
-    pythonSpec: await buildPythonWheel(root),
-    nodeRegistry: true
+    nodeSpec: nodeRegistry ? `${NPM_PACKAGE}@${versions.nodeVersion}` : join(artifactsDir, "node", nodeName),
+    pythonSpecs: [join(artifactsDir, "python", wheel), join(artifactsDir, "python", sdist)],
+    nodeRegistry
   };
+}
+
+async function verifyArtifactChecksums(artifactsDir, version, expectedNames) {
+  const checksumName = `SHA256SUMS-${version}.txt`;
+  const lines = (await readFile(join(artifactsDir, checksumName), "utf8")).split(/\r?\n/).filter(Boolean);
+  if (lines.length === 0) throw new Error("Release checksum file is empty");
+  const verified = new Set();
+  for (const line of lines) {
+    const match = /^([a-f0-9]{64})\s+(.+)$/.exec(line);
+    if (match === null) throw new Error(`Malformed release checksum line: ${line}`);
+    const normalizedName = match[2].replaceAll("\\", "/");
+    if (normalizedName.startsWith("/") || /^[a-z]:\//i.test(normalizedName)) {
+      throw new Error(`Release checksum path must be relative: ${normalizedName}`);
+    }
+    const path = resolve(artifactsDir, ...normalizedName.split("/").filter(Boolean));
+    const rel = relative(artifactsDir, path);
+    if (rel === "" || rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(rel)) {
+      throw new Error(`Release checksum path escapes the artifact directory: ${normalizedName}`);
+    }
+    const actual = createHash("sha256").update(await readFile(path)).digest("hex");
+    if (actual !== match[1]) throw new Error(`Release checksum mismatch for ${normalizedName}`);
+    verified.add(normalizedName);
+  }
+  for (const expectedName of expectedNames) {
+    if (!verified.has(expectedName)) throw new Error(`${checksumName} does not cover ${expectedName}`);
+  }
+}
+
+async function npmRegistrySpecs(versions, timeoutMs, artifactsDir) {
+  await waitForNpmVersion(versions.nodeVersion, timeoutMs);
+  return artifactSpecs(artifactsDir, versions, true);
 }
 
 async function installAndVerify(root, specs, versions) {
   const nodeEnv = join(root, "node-env");
-  const pythonEnv = join(root, "python-env");
   await mkdir(nodeEnv, { recursive: true });
   await writeFile(join(nodeEnv, "package.json"), '{"private":true,"type":"module"}\n', "utf8");
   const npmInstallArgs = ["install", "--ignore-scripts", "--no-audit", "--no-fund"];
@@ -154,34 +218,35 @@ async function installAndVerify(root, specs, versions) {
     throw new Error("Installed backend capabilities returned an unexpected protocol version");
   }
 
-  const python = process.env.PYTHON ?? (process.platform === "win32" ? "python.exe" : "python3");
-  run(python, ["-m", "venv", pythonEnv]);
-  const venvPython = process.platform === "win32"
-    ? join(pythonEnv, "Scripts", "python.exe")
-    : join(pythonEnv, "bin", "python");
-  const venvCli = process.platform === "win32"
-    ? join(pythonEnv, "Scripts", "chatgpt-thread.exe")
-    : join(pythonEnv, "bin", "chatgpt-thread");
-  const pipInstallArgs = ["-m", "pip", "install", "--disable-pip-version-check"];
-  pipInstallArgs.push(specs.pythonSpec);
-  run(venvPython, pipInstallArgs);
   const backendLiteral = backendPath.replaceAll("\\", "\\\\").replaceAll("'", "\\'");
-  const pythonCheck = [
-    "from importlib.metadata import version",
-    `import ${PYTHON_IMPORT}`,
-    `assert version('${PYTHON_PACKAGE}') == '${versions.pythonVersion}'`,
-    `from ${PYTHON_IMPORT} import BackendClient, ChatGPT, StdioBackendTransport`,
-    `transport = StdioBackendTransport(command=['node', r'${backendLiteral}'], timeout_seconds=30)`,
-    "client = BackendClient(transport)",
-    "health = client.health()",
-    "assert health['ok'] is True and health['status'] == 'ok'",
-    "capabilities = client.capabilities()",
-    `assert capabilities['protocolVersion'] == '${REQUEST_SCHEMA}'`,
-    "assert isinstance(client.request('commands'), list)",
-    "client.close()"
-  ].join("; ");
-  run(venvPython, ["-c", pythonCheck]);
-  run(venvCli, ["--help"]);
+  for (const [index, pythonSpec] of specs.pythonSpecs.entries()) {
+    const pythonEnv = join(root, `python-env-${index}`);
+    const python = process.env.PYTHON ?? (process.platform === "win32" ? "python.exe" : "python3");
+    run(python, ["-m", "venv", pythonEnv]);
+    const venvPython = process.platform === "win32"
+      ? join(pythonEnv, "Scripts", "python.exe")
+      : join(pythonEnv, "bin", "python");
+    const venvCli = process.platform === "win32"
+      ? join(pythonEnv, "Scripts", "chatgpt-thread.exe")
+      : join(pythonEnv, "bin", "chatgpt-thread");
+    run(venvPython, ["-m", "pip", "install", "--disable-pip-version-check", pythonSpec]);
+    const pythonCheck = [
+      "from importlib.metadata import version",
+      `import ${PYTHON_IMPORT}`,
+      `assert version('${PYTHON_PACKAGE}') == '${versions.pythonVersion}'`,
+      `from ${PYTHON_IMPORT} import BackendClient, ChatGPT, StdioBackendTransport`,
+      `transport = StdioBackendTransport(command=['node', r'${backendLiteral}'], timeout_seconds=30)`,
+      "client = BackendClient(transport)",
+      "health = client.health()",
+      "assert health['ok'] is True and health['status'] == 'ok'",
+      "capabilities = client.capabilities()",
+      `assert capabilities['protocolVersion'] == '${REQUEST_SCHEMA}'`,
+      "assert isinstance(client.request('commands'), list)",
+      "client.close()"
+    ].join("; ");
+    run(venvPython, ["-c", pythonCheck]);
+    run(venvCli, ["--help"]);
+  }
   return {
     nodeVersion: installedNode.version,
     pythonVersion: versions.pythonVersion,
@@ -245,7 +310,9 @@ async function main() {
   try {
     const specs = options.mode === "source"
       ? await sourceSpecs(root)
-      : await npmRegistrySpecs(root, versions, options.timeoutMs);
+      : options.mode === "artifacts"
+        ? await artifactSpecs(options.artifactsDir, versions)
+        : await npmRegistrySpecs(versions, options.timeoutMs, options.artifactsDir);
     const verified = await installAndVerify(root, specs, versions);
     console.log(JSON.stringify({ ok: true, mode: options.mode, ...verified }, null, 2));
   } finally {

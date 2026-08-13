@@ -117,6 +117,7 @@ export type ReviewStepEvidence = {
   status?: string;
   data?: unknown;
   blocker?: CommandResult["blocker"];
+  warnings?: string[];
 };
 
 export type ReviewArtifact = {

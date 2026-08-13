@@ -13722,9 +13722,10 @@ import { basename as basename4, dirname as dirname3, isAbsolute as isAbsolute2, 
 var DEFAULT_PACKET_BYTES = 15e5;
 var DEFAULT_TOTAL_BYTES = 12e6;
 var DEFAULT_SOURCE_BYTES = 75e4;
+var PUBLIC_ENV_TEMPLATE_PATTERN = /(^|\/)\.env\.(?:example|sample|template)$/i;
 var SECRET_PATH_PATTERNS = [
   /(^|\/)\.env(?:\.|$)/i,
-  /(^|\/)(?:credentials?|secrets?|tokens?)\//i,
+  /(^|\/)(?:credentials?|secrets?)\//i,
   /(^|\/)\.?(?:credentials?|secrets?|tokens?)(?:[._-](?:local|private|production|prod|development|dev|test))?(?:\.(?:json|ya?ml|toml|ini|txt))?$/i,
   /(^|\/)(?:service-account[^/]*|application_default_credentials|auth)\.json$/i,
   /(^|\/)(?:\.npmrc|\.pypirc|\.netrc|\.git-credentials)$/i,
@@ -13845,7 +13846,7 @@ async function prepareReviewContext(args, now = /* @__PURE__ */ new Date()) {
     const candidates = collectCandidateFiles(availableFiles, changed, args, reviewScope);
     for (const candidate of candidates) {
       const normalized = normalizeRepoPath(candidate.path);
-      if (SECRET_PATH_PATTERNS.some((pattern) => pattern.test(normalized))) {
+      if (isSecretPath(normalized)) {
         fileRecords.push({ path: normalized, category: candidate.category, status: "excluded", reason: "secret_path_policy" });
         continue;
       }
@@ -14183,7 +14184,13 @@ function filterPacketStatus(value, archivePathPrefix) {
 }
 async function workingTreePaths(root, archivePathPrefix) {
   const status = await gitStatus(root);
-  return new Set(status.flatMap((entry) => entry.paths).filter((path3) => !isPacketExcludedPath(path3, archivePathPrefix)));
+  const candidates = status.flatMap((entry) => entry.paths).filter((path3) => !isPacketExcludedPath(path3, archivePathPrefix));
+  const present = await Promise.all(candidates.map(async (path3) => {
+    const absolute = resolve4(root, path3);
+    assertInside(root, absolute);
+    return await lstat(absolute).then(() => path3, () => void 0);
+  }));
+  return new Set(present.filter((path3) => path3 !== void 0));
 }
 async function candidateSize(root, path3, includeWorkingTree, overlayPaths, committedEntries) {
   if (includeWorkingTree && overlayPaths.has(path3)) {
@@ -14641,6 +14648,11 @@ function hash(value) {
 function normalizeRepoPath(value) {
   return value.replace(/^\.\//, "");
 }
+function isSecretPath(value) {
+  const normalized = normalizeRepoPath(value);
+  if (PUBLIC_ENV_TEMPLATE_PATTERN.test(normalized)) return false;
+  return SECRET_PATH_PATTERNS.some((pattern) => pattern.test(normalized));
+}
 function repositoryRelativeArchivePrefix(root, archiveRoot) {
   const absolute = isAbsolute2(archiveRoot) ? resolve4(archiveRoot) : resolve4(root, archiveRoot);
   const rel = relative2(resolve4(root), absolute);
@@ -14649,7 +14661,7 @@ function repositoryRelativeArchivePrefix(root, archiveRoot) {
 }
 function isPacketExcludedPath(path3, archivePathPrefix) {
   const normalized = normalizeRepoPath(path3);
-  return SECRET_PATH_PATTERNS.some((pattern) => pattern.test(normalized)) || archivePathPrefix !== void 0 && (normalized === archivePathPrefix || normalized.startsWith(`${archivePathPrefix}/`));
+  return isSecretPath(normalized) || archivePathPrefix !== void 0 && (normalized === archivePathPrefix || normalized.startsWith(`${archivePathPrefix}/`));
 }
 function excludedPathReason(path3, archivePathPrefix) {
   const normalized = normalizeRepoPath(path3);
@@ -14746,6 +14758,12 @@ async function runCodeReviewWithPort(args, port) {
         const evidence = { state, startedAt, endedAt, ok: value.ok, status: value.status };
         if (value.data !== void 0) evidence.data = state === "READ_FULL_MARKDOWN_ONCE" ? responseMetadata(value.data) : value.data;
         if (value.blocker !== void 0) evidence.blocker = value.blocker;
+        if (value.warnings.length > 0) {
+          evidence.warnings = [...value.warnings];
+          for (const warning of value.warnings) {
+            if (!warnings.includes(warning)) warnings.push(warning);
+          }
+        }
         steps.push(evidence);
       } else {
         steps.push({ state, startedAt, endedAt, ok: true, data: value });
@@ -14851,8 +14869,8 @@ async function runCodeReviewWithPort(args, port) {
       threadId = opened.data.conversationId ?? opened.context.conversationId;
       await persistThreadCheckpoint(archiveDirectory, prepared, threadUrl, threadId, port.now());
       const latestUser = requireData(await port.readLatestUser(), "POLL_METADATA");
-      const observedUserSha256 = sha256Text2(normalizePrompt(latestUser.data.text));
-      const visiblePromptProven = archivedSubmission?.userTurnSha256 !== void 0 ? observedUserSha256 === archivedSubmission.userTurnSha256 : visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared.prompt);
+      const observedUserSha256 = sha256Text2(normalizeVisiblePrompt(latestUser.data.text));
+      const visiblePromptProven = archivedSubmission?.userTurnSha256 !== void 0 ? observedUserSha256 === archivedSubmission.userTurnSha256 || visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared.prompt) : visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared.prompt);
       if (!visiblePromptProven) {
         throw new ReviewPreparationError(
           "The latest visible user turn is not the archived submitted review prompt. Resume refused to capture a later or ambiguous response.",
@@ -14867,7 +14885,7 @@ async function runCodeReviewWithPort(args, port) {
           resubmitAllowed: false,
           submittedAt: port.now().toISOString(),
           promptSha256: sha256Text2(normalizePrompt(prepared.prompt)),
-          userTurnSha256: observedUserSha256,
+          userTurnSha256: sha256Text2(normalizeVisiblePrompt(prepared.prompt)),
           thread: { url: threadUrl, id: threadId },
           baselineTurnCount: archivedSubmission.baselineTurnCount,
           baselineAssistantCount: archivedSubmission.baselineAssistantCount,
@@ -14995,7 +15013,7 @@ async function runCodeReviewWithPort(args, port) {
           resubmitAllowed: false,
           submittedAt: port.now().toISOString(),
           promptSha256: sha256Text2(normalizePrompt(prepared.prompt)),
-          ...exactUserTurn ? { userTurnSha256: sha256Text2(normalizePrompt(latestUserText)) } : {},
+          ...exactUserTurn ? { userTurnSha256: sha256Text2(normalizeVisiblePrompt(prepared.prompt)) } : {},
           thread: { url: threadUrl, id: threadId },
           baselineTurnCount: beforeMessage.data.turnCount,
           baselineAssistantCount,

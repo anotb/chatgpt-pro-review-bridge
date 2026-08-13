@@ -136,6 +136,12 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         const evidence: ReviewStepEvidence = { state, startedAt, endedAt, ok: value.ok, status: value.status };
         if (value.data !== undefined) evidence.data = state === "READ_FULL_MARKDOWN_ONCE" ? responseMetadata(value.data) : value.data;
         if (value.blocker !== undefined) evidence.blocker = value.blocker;
+        if (value.warnings.length > 0) {
+          evidence.warnings = [...value.warnings];
+          for (const warning of value.warnings) {
+            if (!warnings.includes(warning)) warnings.push(warning);
+          }
+        }
         steps.push(evidence);
       } else {
         steps.push({ state, startedAt, endedAt, ok: true, data: value });
@@ -264,9 +270,10 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       threadId = opened.data.conversationId ?? opened.context.conversationId;
       await persistThreadCheckpoint(archiveDirectory!, prepared!, threadUrl, threadId, port.now());
       const latestUser = requireData(await port.readLatestUser(), "POLL_METADATA");
-      const observedUserSha256 = sha256Text(normalizePrompt(latestUser.data.text));
+      const observedUserSha256 = sha256Text(normalizeVisiblePrompt(latestUser.data.text));
       const visiblePromptProven = archivedSubmission?.userTurnSha256 !== undefined
         ? observedUserSha256 === archivedSubmission.userTurnSha256
+          || visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared!.prompt)
         : visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared!.prompt);
       if (!visiblePromptProven) {
         throw new ReviewPreparationError(
@@ -282,7 +289,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           resubmitAllowed: false,
           submittedAt: port.now().toISOString(),
           promptSha256: sha256Text(normalizePrompt(prepared!.prompt)),
-          userTurnSha256: observedUserSha256,
+          userTurnSha256: sha256Text(normalizeVisiblePrompt(prepared!.prompt)),
           thread: { url: threadUrl, id: threadId },
           baselineTurnCount: archivedSubmission.baselineTurnCount,
           baselineAssistantCount: archivedSubmission.baselineAssistantCount,
@@ -424,7 +431,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           resubmitAllowed: false,
           submittedAt: port.now().toISOString(),
           promptSha256: sha256Text(normalizePrompt(prepared!.prompt)),
-          ...(exactUserTurn ? { userTurnSha256: sha256Text(normalizePrompt(latestUserText!)) } : {}),
+          ...(exactUserTurn ? { userTurnSha256: sha256Text(normalizeVisiblePrompt(prepared!.prompt)) } : {}),
           thread: { url: threadUrl, id: threadId },
           baselineTurnCount: beforeMessage.data.turnCount,
           baselineAssistantCount,

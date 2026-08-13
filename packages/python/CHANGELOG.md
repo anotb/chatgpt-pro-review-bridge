@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.5
+
+- Aligns the parity package version with the shared backend fixes and verifies
+  both the exact wheel and sdist assembled for the release.
+
 ## 0.7.4
 
 - Aligns the parity package version with the shared backend's faster committed

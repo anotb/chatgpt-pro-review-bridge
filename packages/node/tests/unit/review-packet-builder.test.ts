@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFile, writeFile, mkdir, mkdtemp, symlink } from "node:fs/promises";
+import { readFile, writeFile, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -323,6 +323,77 @@ describe("deterministic review packet builder", () => {
       path: "src/tokens.ts",
       status: "included"
     }));
+  });
+
+  it("keeps public environment templates and source token directories in repository evidence", async () => {
+    const repo = await fixtureRepository();
+    await mkdir(join(repo, "src", "tokens"), { recursive: true });
+    await writeFile(join(repo, ".env.example"), "PUBLIC_API_URL=https://example.invalid\n");
+    await writeFile(join(repo, "src", "tokens", "lexer.ts"), "export const scanToken = () => 'identifier';\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "add public configuration contract and lexer");
+
+    const prepared = await prepareReviewContext({ repositoryRoot: repo });
+    const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
+
+    expect(prepared.manifest.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: ".env.example", status: "included" }),
+      expect.objectContaining({ path: "src/tokens/lexer.ts", status: "included" })
+    ]));
+    expect(packets).toContain("PUBLIC_API_URL=https://example.invalid");
+    expect(packets).toContain("scanToken");
+  });
+
+  it("retains an unstaged deletion in full-repository working-tree evidence", async () => {
+    const repo = await fixtureRepository();
+    await rm(join(repo, "src", "example.ts"));
+
+    const prepared = await prepareReviewContext({
+      repositoryRoot: repo,
+      context: { scope: "repository", includeWorkingTree: true }
+    });
+    const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
+
+    expect(prepared.manifest.files).toContainEqual(expect.objectContaining({ path: "src/example.ts", status: "included" }));
+    expect(packets).toContain("deleted file mode");
+    expect(packets).toContain("D\tsrc/example.ts");
+  });
+
+  it("retains a staged deletion in change-scope working-tree evidence", async () => {
+    const repo = await fixtureRepository();
+    await rm(join(repo, "src", "example.ts"));
+    git(repo, "add", "-u");
+
+    const prepared = await prepareReviewContext({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      context: { includeWorkingTree: true }
+    });
+    const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
+
+    expect(prepared.manifest.files).toContainEqual(expect.objectContaining({ path: "src/example.ts", status: "included" }));
+    expect(packets).toContain("deleted file mode");
+    expect(packets).toContain("D\tsrc/example.ts");
+  });
+
+  it("retains both sides and the relationship of a staged rename", async () => {
+    const repo = await fixtureRepository();
+    git(repo, "mv", "src/example.ts", "src/renamed.ts");
+
+    const prepared = await prepareReviewContext({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      context: { includeWorkingTree: true }
+    });
+    const packets = (await Promise.all(prepared.packetPaths.map(path => readFile(path, "utf8")))).join("\n");
+
+    expect(prepared.manifest.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "src/example.ts", status: "included" }),
+      expect.objectContaining({ path: "src/renamed.ts", status: "included" })
+    ]));
+    expect(packets).toContain("rename from src/example.ts");
+    expect(packets).toContain("rename to src/renamed.ts");
+    expect(packets).toMatch(/R\d+\tsrc\/example\.ts\tsrc\/renamed\.ts/);
   });
 
   it("creates distinct archives for reviews started in the same millisecond at the same head", async () => {
