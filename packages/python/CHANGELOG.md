@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.6
+
+- Aligns the parity package version with the corrected gated release path.
+
 ## 0.7.5
 
 - Aligns the parity package version with the shared backend fixes and verifies

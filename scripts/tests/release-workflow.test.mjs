@@ -13,5 +13,5 @@ test("smokes and publishes the exact preflight release artifacts", () => {
 test("blocks the GitHub release on every enabled publication and verification stage", () => {
   assert.match(workflow, /release-gate:[\s\S]*needs: \[preflight, package-smoke-macos, publish-npm, verify-published\]/);
   assert.match(workflow, /if \[ "\$PUBLISH_NPM" = true \]; then[\s\S]*PUBLISH_RESULT[\s\S]*VERIFY_RESULT/);
-  assert.match(workflow, /github-release:[\s\S]*needs: release-gate/);
+  assert.match(workflow, /github-release:[\s\S]*if: always\(\)[^\n]*needs\.release-gate\.result == 'success'[\s\S]*needs: release-gate/);
 });

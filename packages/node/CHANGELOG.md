@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.6
+
+- Ensures a successful exact-artifact release gate schedules the stable GitHub
+  release when optional npm publication is disabled.
+
 ## 0.7.5
 
 - Retains deletion and rename evidence in working-tree review packets, carries

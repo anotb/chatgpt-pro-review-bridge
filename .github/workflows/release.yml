@@ -151,7 +151,7 @@ jobs:
 
   github-release:
     name: publish stable GitHub release
-    if: github.repository == 'anotb/chatgpt-pro-review-bridge'
+    if: always() && github.repository == 'anotb/chatgpt-pro-review-bridge' && needs.release-gate.result == 'success'
     needs: release-gate
     runs-on: ubuntu-latest
     permissions:

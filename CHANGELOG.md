@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.6 - 2026-08-12
+
+- Makes the stable GitHub release job explicitly run after a successful release
+  gate even when optional npm publication jobs are intentionally skipped.
+- Retains all full-repository, resumability, privacy, and exact-artifact fixes
+  introduced in 0.7.5.
+
 ## 0.7.5 - 2026-08-12
 
 - Keeps deleted files and both sides of renames in working-tree review packets
