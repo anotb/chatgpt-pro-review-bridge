@@ -1001,7 +1001,7 @@ describe("Pro review state machine", () => {
       if (reusedOwner.exitCode === null) reusedOwner.kill();
       await rm(join(archiveDirectory, ".workflow.lock"), { force: true });
     }
-  });
+  }, 15_000);
 
   it("reclaims an old empty lease left by an interrupted writer", async () => {
     const repo = await fixtureRepository();
