@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.10
+
+- Aligns with the shared backend's restricted-host-safe Windows PID probe.
+- Aligns the parity package with the shared backend's bounded no-heartbeat
+  fallback for already-submitted reviews with unknown process liveness and
+  generation-safe lease cleanup.
+
 ## 0.7.9
 
 - Aligns the parity package with the shared backend's conservative Windows

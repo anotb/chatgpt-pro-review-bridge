@@ -17,6 +17,18 @@ function signalError(code: string): (pid: number) => void {
 }
 
 describe("process liveness probing", () => {
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])("rejects invalid PID %s without probing", async pid => {
+    let signalled = false;
+    let queried = false;
+    await expect(probeProcessLiveness(pid, {
+      platform: "win32",
+      signal: () => { signalled = true; },
+      queryWindowsPid: async () => { queried = true; return "live"; }
+    })).resolves.toBe("unknown");
+    expect(signalled).toBe(false);
+    expect(queried).toBe(false);
+  });
+
   it("reports a process as live when signal zero succeeds", async () => {
     await expect(probeProcessLiveness(42, {
       signal: () => undefined
@@ -93,9 +105,10 @@ describe("process liveness probing", () => {
     expect(tasklistPidResult('"node.exe","42","Console","1","12,000 K"\r\n', 42)).toBe("live");
   });
 
-  it("resolves tasklist only from the absolute Windows system directory", async () => {
+  it("resolves tasklist only from an absolute Windows system directory", async () => {
     expect(windowsTasklistPath({ SystemRoot: "C:\\Windows" })).toBe("C:\\Windows\\System32\\tasklist.exe");
-    expect(windowsTasklistPath({ SystemRoot: "relative\\windows" })).toBeUndefined();
+    expect(windowsTasklistPath({ windir: "D:\\Windows" })).toBe("D:\\Windows\\System32\\tasklist.exe");
+    expect(windowsTasklistPath({ SystemRoot: "relative\\windows" })).toBe("\\\\.\\GLOBALROOT\\SystemRoot\\System32\\tasklist.exe");
     let invocation: { executable: string; args: string[] } | undefined;
     await expect(queryWindowsPid(42, {
       environment: { SystemRoot: "D:\\TrustedWindows" },
@@ -110,13 +123,37 @@ describe("process liveness probing", () => {
     });
   });
 
-  it("fails closed when the trusted Windows system directory is unavailable", async () => {
+  it("uses the kernel SystemRoot device path when a restricted host exposes no environment", async () => {
+    let executableSeen: string | undefined;
+    await expect(queryWindowsPid(42, {
+      environment: {},
+      execute: async executable => {
+        executableSeen = executable;
+        return '"node.exe","42","Console"\r\n';
+      }
+    })).resolves.toBe("live");
+    expect(executableSeen).toBe("\\\\.\\GLOBALROOT\\SystemRoot\\System32\\tasklist.exe");
+  });
+
+  it("fails closed when every trusted absolute system candidate is unavailable", async () => {
     await expect(queryWindowsPid(42, {
       environment: {},
       execute: async () => {
-        throw new Error("must not execute");
+        throw new Error("not found");
       }
     })).resolves.toBe("unknown");
+  });
+
+  it("does not execute tasklist for an invalid PID", async () => {
+    let executed = false;
+    await expect(queryWindowsPid(-1, {
+      environment: {},
+      execute: async () => {
+        executed = true;
+        return "";
+      }
+    })).resolves.toBe("unknown");
+    expect(executed).toBe(false);
   });
 
   it("recognizes tasklist's explicit no-match result independent of locale", () => {

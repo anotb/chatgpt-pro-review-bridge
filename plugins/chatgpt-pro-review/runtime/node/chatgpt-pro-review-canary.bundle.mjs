@@ -14826,15 +14826,28 @@ import { setTimeout as delay } from "node:timers/promises";
 
 // src/reviews/process-liveness.ts
 import { execFile as execFile2 } from "node:child_process";
-import process2 from "node:process";
+import { platform as operatingSystemPlatform } from "node:os";
 import { win32 } from "node:path";
 import { promisify as promisify2 } from "node:util";
 var execFileAsync2 = promisify2(execFile2);
+var WINDOWS_GLOBALROOT_TASKLIST = "\\\\.\\GLOBALROOT\\SystemRoot\\System32\\tasklist.exe";
+function runtimeEnvironment() {
+  try {
+    return typeof process === "undefined" || process.env === void 0 ? void 0 : process.env;
+  } catch {
+    return void 0;
+  }
+}
+function signalProcess(targetPid) {
+  if (typeof process === "undefined" || typeof process.kill !== "function") {
+    throw new TypeError("process.kill is unavailable");
+  }
+  process.kill(targetPid, 0);
+}
 async function probeProcessLiveness(pid, options = {}) {
-  const platform = options.platform ?? process2.platform;
-  const signal = options.signal ?? ((targetPid) => {
-    process2.kill(targetPid, 0);
-  });
+  if (!Number.isSafeInteger(pid) || pid <= 0) return "unknown";
+  const platform = options.platform ?? operatingSystemPlatform();
+  const signal = options.signal ?? signalProcess;
   try {
     signal(pid);
     return "live";
@@ -14847,8 +14860,7 @@ async function probeProcessLiveness(pid, options = {}) {
   }
   return (options.queryWindowsPid ?? queryWindowsPid)(pid);
 }
-function windowsTasklistPath(environment = process2.env) {
-  const systemRoot = environment.SystemRoot;
+function tasklistPathWithin(systemRoot) {
   if (systemRoot === void 0 || systemRoot.includes("\0") || !win32.isAbsolute(systemRoot)) return void 0;
   const normalizedRoot = win32.resolve(systemRoot);
   const executable = win32.join(normalizedRoot, "System32", "tasklist.exe");
@@ -14856,21 +14868,31 @@ function windowsTasklistPath(environment = process2.env) {
   if (relative3.startsWith("..") || win32.isAbsolute(relative3)) return void 0;
   return executable;
 }
+function windowsTasklistCandidates(environment) {
+  const candidates = [
+    ...[environment?.SystemRoot, environment?.windir, environment?.WINDIR].map(tasklistPathWithin).filter((candidate) => candidate !== void 0),
+    WINDOWS_GLOBALROOT_TASKLIST
+  ].filter((candidate) => candidate !== void 0);
+  return candidates.filter(
+    (candidate, index) => candidates.findIndex((other) => other.toLocaleLowerCase("en-US") === candidate.toLocaleLowerCase("en-US")) === index
+  );
+}
 async function queryWindowsPid(pid, options = {}) {
-  const executable = windowsTasklistPath(options.environment);
-  if (executable === void 0) return "unknown";
+  if (!Number.isSafeInteger(pid) || pid <= 0) return "unknown";
   const args = ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"];
-  try {
-    const stdout = options.execute === void 0 ? (await execFileAsync2(executable, args, {
-      encoding: "utf8",
-      maxBuffer: 64 * 1024,
-      timeout: 2e3,
-      windowsHide: true
-    })).stdout : await options.execute(executable, args);
-    return tasklistPidResult(stdout, pid);
-  } catch {
-    return "unknown";
+  for (const executable of windowsTasklistCandidates(options.environment ?? runtimeEnvironment())) {
+    try {
+      const stdout = options.execute === void 0 ? (await execFileAsync2(executable, args, {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024,
+        timeout: 2e3,
+        windowsHide: true
+      })).stdout : await options.execute(executable, args);
+      return tasklistPidResult(stdout, pid);
+    } catch {
+    }
   }
+  return "unknown";
 }
 function tasklistPidResult(output, pid) {
   let sawPlainTextResult = false;
@@ -14892,7 +14914,7 @@ var REVIEW_LEASE_RENEW_MS = Math.floor(REVIEW_LEASE_MAX_AGE_MS / 3);
 function isRecord6(value) {
   return typeof value === "object" && value !== null;
 }
-async function acquireReviewLease(archiveDirectory) {
+async function acquireReviewLease(archiveDirectory, hooks = {}) {
   const leasePath = join6(archiveDirectory, ".workflow.lock");
   const leaseId = randomUUID2();
   const acquiredAt = /* @__PURE__ */ new Date();
@@ -14928,9 +14950,19 @@ async function acquireReviewLease(archiveDirectory) {
   }
   if (ownerPath === void 0) throw new Error("Unable to acquire the review archive lease.");
   try {
+    await hooks.afterDirectoryCreated?.(leasePath);
     handle = await open(ownerPath, "wx", 384);
     await handle.writeFile(leaseRecord);
     await handle.sync();
+    const entries = await readdir(leasePath);
+    if (entries.length !== 1 || entries[0] !== `${leaseId}.json`) {
+      throw new ReviewPreparationError(
+        "Another process or task replaced the review archive lease while it was being initialized.",
+        "review_archive_locked",
+        void 0,
+        archiveDirectory
+      );
+    }
   } catch (error) {
     await handle?.close().catch(() => void 0);
     await unlink2(ownerPath).catch(() => void 0);
@@ -14954,8 +14986,12 @@ async function acquireReviewLease(archiveDirectory) {
     await removeDirectoryLeaseOwner(leasePath, ownerPath);
   };
 }
-async function removeDirectoryLeaseOwner(leasePath, ownerPath) {
+async function removeDirectoryLeaseOwner(leasePath, ownerPath, expectedMtimeMs) {
   try {
+    if (expectedMtimeMs !== void 0) {
+      const ownerStat = await lstat2(ownerPath);
+      if (!ownerStat.isFile() || ownerStat.mtimeMs !== expectedMtimeMs) return false;
+    }
     await unlink2(ownerPath);
   } catch {
     return false;
@@ -14967,14 +15003,47 @@ async function removeDirectoryLeaseOwner(leasePath, ownerPath) {
     return false;
   }
 }
-async function removeLegacyLeaseTextIfUnchanged(leasePath, expected) {
+async function removeLegacyLeaseTextIfUnchanged(leasePath, expected, expectedMtimeMs) {
   try {
     if (await readFile5(leasePath, "utf8") !== expected) return false;
+    if (expectedMtimeMs !== void 0) {
+      const leaseStat = await lstat2(leasePath);
+      if (!leaseStat.isFile() || leaseStat.mtimeMs !== expectedMtimeMs) return false;
+    }
     await unlink2(leasePath);
     return true;
   } catch (error) {
     return error.code === "ENOENT";
   }
+}
+async function leaseGenerationHeartbeatIsStale(leasePath, snapshot) {
+  try {
+    const heartbeatPath = snapshot.format === "directory" ? snapshot.ownerPath : leasePath;
+    const heartbeatStat = await lstat2(heartbeatPath);
+    if (!heartbeatStat.isFile()) return void 0;
+    if (await readFile5(heartbeatPath, "utf8") !== snapshot.leaseText) return void 0;
+    return Date.now() - heartbeatStat.mtimeMs >= REVIEW_LEASE_MAX_AGE_MS ? heartbeatStat.mtimeMs : void 0;
+  } catch {
+    return void 0;
+  }
+}
+async function archiveProvesSubmissionAlreadyOccurred(leasePath) {
+  const archiveDirectory = dirname4(leasePath);
+  for (const filename of ["submission-confirmation.json", "submission.json"]) {
+    let value;
+    try {
+      value = JSON.parse(await readFile5(join6(archiveDirectory, filename), "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      return false;
+    }
+    if (!isRecord6(value)) return false;
+    const validSchema = value.schemaVersion === 1 || value.schemaVersion === 2 || value.schemaVersion === 3;
+    const validThread = isRecord6(value.thread) && (typeof value.thread.url === "string" && value.thread.url.length > 0 || typeof value.thread.id === "string" && value.thread.id.length > 0);
+    const validArtifactBaseline = isRecord6(value.artifactBaseline) && Array.isArray(value.artifactBaseline.items);
+    return validSchema && (value.state === "confirmed" || value.state === "ambiguous") && value.submitted === true && value.resubmitAllowed === false && typeof value.promptSha256 === "string" && /^[a-f0-9]{64}$/u.test(value.promptSha256) && validThread && validArtifactBaseline;
+  }
+  return false;
 }
 async function readReviewLeaseSnapshot(leasePath) {
   let leaseStat;
@@ -15057,12 +15126,16 @@ async function removeLeaseIfOwnerExitedOrExpired(leasePath, probeLiveness = prob
   if (snapshot.format === "directory") {
     if (typeof value.leaseId !== "string" || snapshot.ownerPath !== join6(leasePath, `${value.leaseId}.json`)) return false;
   }
-  if (await probeLiveness(value.pid) !== "dead") return false;
+  const liveness = await probeLiveness(value.pid);
+  if (liveness === "live") return false;
+  if (liveness === "unknown" && !await archiveProvesSubmissionAlreadyOccurred(leasePath)) return false;
+  const staleHeartbeatMtime = liveness === "unknown" ? await leaseGenerationHeartbeatIsStale(leasePath, snapshot) : void 0;
+  if (liveness === "unknown" && staleHeartbeatMtime === void 0) return false;
   if (snapshot.format === "directory") {
     if (await readFile5(snapshot.ownerPath, "utf8").catch(() => void 0) !== snapshot.leaseText) return false;
-    return removeDirectoryLeaseOwner(leasePath, snapshot.ownerPath);
+    return removeDirectoryLeaseOwner(leasePath, snapshot.ownerPath, staleHeartbeatMtime);
   }
-  return removeLegacyLeaseTextIfUnchanged(leasePath, snapshot.leaseText);
+  return removeLegacyLeaseTextIfUnchanged(leasePath, snapshot.leaseText, staleHeartbeatMtime);
 }
 async function waitForLeaseTurnover(leasePath, timeoutMs = 3e3) {
   if (await removeLeaseIfOwnerExitedOrExpired(leasePath)) return true;

@@ -14,6 +14,7 @@ Do not transfer profiles, cookies, localStorage, sessionStorage, auth headers, t
 - `configuration_restore_failed`: leave the browser visible, report candidates/evidence, and restore manually if needed.
 - upload permission: enable Codex Chrome uploads and Chrome extension file-URL access, then resume before submission.
 - `in_progress`: use the archived thread URL and archive directory; never create a replacement prompt. Back off 30s, 60s, 2m, 4m, then to at most one resume every 5m for the same archive.
+- `review_archive_locked`: do not delete the lease manually or create a replacement review. A demonstrably live owner remains locked. For an archive with a durable submitted/non-resubmittable receipt, if a restricted browser host cannot determine PID liveness, the runtime may reclaim the lease only after five minutes without a heartbeat; pre-submit archives remain fail-closed. Its generation-specific marker prevents delayed cleanup from deleting a successor's lease.
 - artifact download failure: preserve the response and thread, report the missing delta item, and do not claim the artifact contract passed.
 
 This plugin controls only visible UI. Do not add hidden endpoints, credential extraction, login/CAPTCHA bypass, background history scraping, or account rotation.

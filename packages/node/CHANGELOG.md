@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.10
+
+- Uses Node's OS platform signal and the kernel `SystemRoot` device path for
+  exact Windows PID checks when a restricted host omits the process shim's
+  signal or environment fields; no shell or `PATH` lookup is used.
+- Uses a five-minute no-heartbeat timeout as an availability fallback only for
+  an already-submitted, non-resubmittable review when process liveness is
+  unavailable or ambiguous in a restricted browser host; demonstrably live
+  owners remain locked regardless of lease age and pre-submit archives remain
+  fail-closed.
+- Revalidates the generation-specific ownership marker during cleanup so a
+  delayed release cannot remove a successor's lease.
+
 ## 0.7.9
 
 - Falls back to an exact Windows PID query when the runtime cannot determine

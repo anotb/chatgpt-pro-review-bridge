@@ -26,7 +26,7 @@ The easiest option is to give this repository to Codex or another assistant that
 
 > Install the latest tagged release of https://github.com/anotb/chatgpt-pro-review-bridge as a Codex plugin, then verify that the ChatGPT Pro Review skills are available in a new task.
 
-For a manual install, add this repository as a marketplace pinned to `v0.7.9` with `codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.9`, then install it with `codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge`.
+For a manual install, add this repository as a marketplace pinned to `v0.7.10` with `codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.10`, then install it with `codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge`.
 
 Start a new Codex task after installation.
 

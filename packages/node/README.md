@@ -7,7 +7,7 @@ Unofficial project: not affiliated with, endorsed by, or sponsored by OpenAI. Th
 ## Install
 
 ```bash
-npm install chatgpt-pro-review-bridge@0.7.9
+npm install chatgpt-pro-review-bridge@0.7.10
 ```
 
 ## Usage

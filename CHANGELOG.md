@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.10 - 2026-08-13
+
+- Resolves Windows PID checks through the kernel `SystemRoot` device path when
+  a restricted browser host omits the ordinary process environment, without
+  consulting a repository-controlled working directory or `PATH`.
+- Reclaims an abandoned, already-submitted review archive lease after five
+  minutes without a heartbeat when a restricted browser host cannot determine
+  whether the recorded PID is live; direct proof of a live owner remains
+  authoritative and keeps it locked. Pre-submit archives remain fail-closed.
+- Rechecks the lease's generation-specific marker before cleanup so a delayed
+  invocation cannot delete a successor's lease.
+
 ## 0.7.9 - 2026-08-13
 
 - Reclaims an abandoned AskPro archive lease on Windows when an exact PID query

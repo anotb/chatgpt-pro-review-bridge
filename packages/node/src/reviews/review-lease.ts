@@ -20,7 +20,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-export async function acquireReviewLease(archiveDirectory: string): Promise<() => Promise<void>> {
+export async function acquireReviewLease(
+  archiveDirectory: string,
+  hooks: { afterDirectoryCreated?: (leasePath: string) => Promise<void> } = {}
+): Promise<() => Promise<void>> {
   const leasePath = join(archiveDirectory, ".workflow.lock");
   const leaseId = randomUUID();
   const acquiredAt = new Date();
@@ -55,9 +58,19 @@ export async function acquireReviewLease(archiveDirectory: string): Promise<() =
   }
   if (ownerPath === undefined) throw new Error("Unable to acquire the review archive lease.");
   try {
+    await hooks.afterDirectoryCreated?.(leasePath);
     handle = await open(ownerPath, "wx", 0o600);
     await handle.writeFile(leaseRecord);
     await handle.sync();
+    const entries = await readdir(leasePath);
+    if (entries.length !== 1 || entries[0] !== `${leaseId}.json`) {
+      throw new ReviewPreparationError(
+        "Another process or task replaced the review archive lease while it was being initialized.",
+        "review_archive_locked",
+        undefined,
+        archiveDirectory
+      );
+    }
   } catch (error) {
     await handle?.close().catch(() => undefined);
     await unlink(ownerPath).catch(() => undefined);
@@ -84,8 +97,16 @@ export async function acquireReviewLease(archiveDirectory: string): Promise<() =
   };
 }
 
-async function removeDirectoryLeaseOwner(leasePath: string, ownerPath: string): Promise<boolean> {
+async function removeDirectoryLeaseOwner(
+  leasePath: string,
+  ownerPath: string,
+  expectedMtimeMs?: number
+): Promise<boolean> {
   try {
+    if (expectedMtimeMs !== undefined) {
+      const ownerStat = await lstat(ownerPath);
+      if (!ownerStat.isFile() || ownerStat.mtimeMs !== expectedMtimeMs) return false;
+    }
     await unlink(ownerPath);
   } catch {
     return false;
@@ -100,9 +121,17 @@ async function removeDirectoryLeaseOwner(leasePath: string, ownerPath: string): 
   }
 }
 
-async function removeLegacyLeaseTextIfUnchanged(leasePath: string, expected: string): Promise<boolean> {
+async function removeLegacyLeaseTextIfUnchanged(
+  leasePath: string,
+  expected: string,
+  expectedMtimeMs?: number
+): Promise<boolean> {
   try {
     if (await readFile(leasePath, "utf8") !== expected) return false;
+    if (expectedMtimeMs !== undefined) {
+      const leaseStat = await lstat(leasePath);
+      if (!leaseStat.isFile() || leaseStat.mtimeMs !== expectedMtimeMs) return false;
+    }
     // unlink cannot remove the directory used by v0.7.9+ successors, so a
     // delayed legacy-file reclaimer cannot delete a newly acquired lease.
     await unlink(leasePath);
@@ -110,6 +139,51 @@ async function removeLegacyLeaseTextIfUnchanged(leasePath: string, expected: str
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT";
   }
+}
+
+async function leaseGenerationHeartbeatIsStale(
+  leasePath: string,
+  snapshot: ReviewLeaseSnapshot
+): Promise<number | undefined> {
+  try {
+    const heartbeatPath = snapshot.format === "directory" ? snapshot.ownerPath! : leasePath;
+    const heartbeatStat = await lstat(heartbeatPath);
+    if (!heartbeatStat.isFile()) return undefined;
+    if (await readFile(heartbeatPath, "utf8") !== snapshot.leaseText) return undefined;
+    return Date.now() - heartbeatStat.mtimeMs >= REVIEW_LEASE_MAX_AGE_MS
+      ? heartbeatStat.mtimeMs
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function archiveProvesSubmissionAlreadyOccurred(leasePath: string): Promise<boolean> {
+  const archiveDirectory = dirname(leasePath);
+  for (const filename of ["submission-confirmation.json", "submission.json"]) {
+    let value: unknown;
+    try {
+      value = JSON.parse(await readFile(join(archiveDirectory, filename), "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return false;
+    }
+    if (!isRecord(value)) return false;
+    const validSchema = value.schemaVersion === 1 || value.schemaVersion === 2 || value.schemaVersion === 3;
+    const validThread = isRecord(value.thread)
+      && ((typeof value.thread.url === "string" && value.thread.url.length > 0)
+        || (typeof value.thread.id === "string" && value.thread.id.length > 0));
+    const validArtifactBaseline = isRecord(value.artifactBaseline) && Array.isArray(value.artifactBaseline.items);
+    return validSchema
+      && (value.state === "confirmed" || value.state === "ambiguous")
+      && value.submitted === true
+      && value.resubmitAllowed === false
+      && typeof value.promptSha256 === "string"
+      && /^[a-f0-9]{64}$/u.test(value.promptSha256)
+      && validThread
+      && validArtifactBaseline;
+  }
+  return false;
 }
 
 async function readReviewLeaseSnapshot(leasePath: string): Promise<ReviewLeaseSnapshot | undefined> {
@@ -190,16 +264,22 @@ export async function removeLeaseIfOwnerExitedOrExpired(
     if (typeof value.leaseId !== "string" || snapshot.ownerPath !== join(leasePath, `${value.leaseId}.json`)) return false;
   }
   // Expiry is not authority to evict a demonstrably live owner. On Windows,
-  // a sandbox can make signal probing indeterminate for a dead PID, so the
-  // liveness probe uses an exact filtered process query as a conservative fallback.
-  // Unknown results remain fail-closed. Directory leases use a unique owner
-  // entry, so cleanup of one generation can never delete a successor's entry.
-  if (await probeLiveness(value.pid as number) !== "dead") return false;
+  // a sandbox can make every available process probe indeterminate, so a lease
+  // with an unknown owner is reclaimable only after this exact generation's
+  // heartbeat has gone stale. Directory leases use a unique owner entry, so
+  // cleanup of one generation can never delete a successor's entry.
+  const liveness = await probeLiveness(value.pid as number);
+  if (liveness === "live") return false;
+  if (liveness === "unknown" && !await archiveProvesSubmissionAlreadyOccurred(leasePath)) return false;
+  const staleHeartbeatMtime = liveness === "unknown"
+    ? await leaseGenerationHeartbeatIsStale(leasePath, snapshot)
+    : undefined;
+  if (liveness === "unknown" && staleHeartbeatMtime === undefined) return false;
   if (snapshot.format === "directory") {
     if (await readFile(snapshot.ownerPath!, "utf8").catch(() => undefined) !== snapshot.leaseText) return false;
-    return removeDirectoryLeaseOwner(leasePath, snapshot.ownerPath!);
+    return removeDirectoryLeaseOwner(leasePath, snapshot.ownerPath!, staleHeartbeatMtime);
   }
-  return removeLegacyLeaseTextIfUnchanged(leasePath, snapshot.leaseText);
+  return removeLegacyLeaseTextIfUnchanged(leasePath, snapshot.leaseText, staleHeartbeatMtime);
 }
 
 async function waitForLeaseTurnover(leasePath: string, timeoutMs = 3_000): Promise<boolean> {
