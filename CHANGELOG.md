@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.14 - 2026-08-13
+
+- Older archives with a legacy claim-handle tab identity now reclaim
+  provider-first with a safe legacy fallback, avoiding another handoff loop.
+
 ## 0.7.13 - 2026-08-13
 
 - A fresh host claims an exact provider-matched open tab before repeating stale

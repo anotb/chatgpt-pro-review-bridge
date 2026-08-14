@@ -661,18 +661,95 @@ describe("existing Chrome tab bootstrap", () => {
     expect(claimed).toEqual([openTab]);
   });
 
-  it("does not treat an opaque handle or wrong-origin metadata as the requested stable tab", async () => {
+  it("falls back to an archived tab handle and upgrades context to its provider ID", async () => {
+    const claimed: unknown[] = [];
+    const openTab = {
+      id: "archived-opaque-handle",
+      providerTabId: "current-provider-id",
+      url: "https://chatgpt.com/c/abc-123",
+      title: "Review"
+    };
+    const browser: BrowserLike = {
+      name: "chrome",
+      user: {
+        openTabs: async () => [openTab],
+        claimTab: async tab => {
+          claimed.push(tab);
+          return fakeChatGPTPage("fresh-control-handle", openTab.url, openTab.title);
+        }
+      },
+      tabs: {
+        list: async () => { throw new Error("Legacy fallback must claim before controlled-tab listing."); },
+        finalize: async () => { throw new Error("Legacy fallback must not hand off the tab again."); },
+        create: async () => { throw new Error("Legacy fallback must not create a duplicate tab."); }
+      }
+    };
+
+    const result = await bootstrap({ browser }, {
+      existingTab: { target: { type: "tabId", tabId: "archived-opaque-handle" }, ifMissing: "open" }
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.context.tabId).toBe("current-provider-id");
+    expect(claimed).toEqual([openTab]);
+  });
+
+  it("prefers a provider-ID match over an opaque-handle collision", async () => {
+    const claimed: unknown[] = [];
+    const collision = {
+      id: "target-provider",
+      providerTabId: "different-provider",
+      url: "https://chatgpt.com/c/wrong"
+    };
+    const providerMatch = {
+      id: "fresh-opaque-handle",
+      providerTabId: "target-provider",
+      url: "https://chatgpt.com/c/abc-123"
+    };
+    const browser: BrowserLike = {
+      name: "chrome",
+      user: {
+        openTabs: async () => [collision, providerMatch],
+        claimTab: async tab => {
+          claimed.push(tab);
+          return fakeChatGPTPage("fresh-control-handle", providerMatch.url, "Review");
+        }
+      },
+      tabs: {
+        list: async () => { throw new Error("Provider match must claim before controlled-tab listing."); },
+        finalize: async () => { throw new Error("Provider match must not be handed off."); },
+        create: async () => { throw new Error("Provider match must not create a duplicate tab."); }
+      }
+    };
+
+    const result = await bootstrap({ browser }, {
+      existingTab: { target: { type: "tabId", tabId: "target-provider" }, ifMissing: "open" }
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.context.tabId).toBe("target-provider");
+    expect(claimed).toEqual([providerMatch]);
+  });
+
+  it("does not fall back to a ChatGPT handle collision when the provider match is wrong-origin", async () => {
     const claimed: unknown[] = [];
     const created: string[] = [];
     const browser = {
       name: "chrome",
       user: {
-        openTabs: async () => [{
-          id: "target-provider",
-          providerTabId: "different-provider",
-          url: "https://chatgpt.com/c/wrong"
-        }],
-        claimTab: async (tab: unknown) => { claimed.push(tab); return fakeChatGPTPage("wrong", "https://chatgpt.com/c/wrong", "Wrong"); }
+        openTabs: async () => [
+          {
+            id: "wrong-origin-handle",
+            providerTabId: "target-provider",
+            url: "https://example.com/c/wrong"
+          },
+          {
+            id: "target-provider",
+            providerTabId: "different-provider",
+            url: "https://chatgpt.com/c/collision"
+          }
+        ],
+        claimTab: async (tab: unknown) => { claimed.push(tab); return fakeChatGPTPage("wrong", "https://example.com/c/wrong", "Wrong"); }
       },
       tabs: {
         list: async () => [{ id: "target-provider", url: "https://example.com/" }],

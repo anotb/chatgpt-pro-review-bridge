@@ -586,7 +586,7 @@ async function selectExistingUserTab(
       ? { diagnostics: diagnosticsForUnavailableUserTabs(policy, "user_open_tabs_unavailable") }
       : {};
   }
-  const matches = tabs.filter(tab => userTabMatchesTarget(tab, policy));
+  const matches = matchingUserTabs(tabs, policy);
   const diagnostics = collectDiagnostics ? diagnosticsForUserTabs(policy, tabs, matches) : undefined;
 
   if (matches.length === 0) {
@@ -625,6 +625,21 @@ async function selectExistingUserTab(
   const stableId = stableUserTabId(selected);
   if (stableId !== undefined) page = pageWithStableTabId(page, stableId);
   return diagnostics === undefined ? { page } : { page, diagnostics };
+}
+
+function matchingUserTabs(
+  tabs: BrowserUserTabInfo[],
+  policy: ExistingTabPolicy
+): BrowserUserTabInfo[] {
+  const target = policy.target ?? { type: "selected", host: "chatgpt" };
+  if (target.type !== "tabId") return tabs.filter(tab => userTabMatchesTarget(tab, policy));
+
+  const requireChatGPT = policy.requireChatGPT ?? targetRequiresChatGPT(target);
+  const eligible = requireChatGPT ? tabs.filter(tab => isChatGPTUrl(tab.url)) : tabs;
+  const providerMatches = tabs.filter(tab => tab.providerTabId === target.tabId);
+  return providerMatches.length > 0
+    ? providerMatches.filter(tab => !requireChatGPT || isChatGPTUrl(tab.url))
+    : eligible.filter(tab => tab.id === target.tabId);
 }
 
 function isExistingTabClaimConflict(error: unknown): boolean {
