@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.12 - 2026-08-13
+
+- Reclaims an exact controlled tab and conversation through an explicit
+  final-action handoff and a later same-archive, fresh-host resume.
+- Separates a pre-submit checkpoint, which may continue to the first submit,
+  from intent or receipt recovery, which never resubmits.
+- Documents a 5–10 minute outer host envelope and prose-only polling backoff
+  without weakening duplicate-tab or submit-once protections.
+
 ## 0.7.11 - 2026-08-13
 
 - Binds every AskPro invocation to one visible browser tab and canonical Chat

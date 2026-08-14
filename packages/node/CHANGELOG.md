@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.12
+
+- Hands a stale controlled tab back to Chrome so a later same-archive,
+  fresh-host resume can reclaim the exact tab and conversation.
+- Distinguishes a pre-submit checkpoint, which may continue to the first
+  submit, from intent or receipt recovery, which never resubmits.
+- Documents a 5–10 minute outer host envelope and prose-only polling backoff
+  while preserving duplicate-tab and submit-once protections.
+
 ## 0.7.11
 
 - Enforces canonical conversation and visible-tab affinity across AskPro

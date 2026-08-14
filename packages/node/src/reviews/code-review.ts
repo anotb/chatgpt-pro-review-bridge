@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
-import { tabIdFromPage } from "../browser/attach.js";
+import { isChatGPTUrl, tabIdFromPage } from "../browser/attach.js";
 import { parseConversationId, readPageState, type PageState } from "../browser/page-state.js";
 import { captureArtifactBaseline, captureArtifactDelta } from "../commands/artifact-inventory.js";
 import { downloadLatestArtifact } from "../commands/artifacts.js";
@@ -11,6 +11,7 @@ import { applyConfiguration, configurationMatchesSelection, inspectConfiguration
 import { openExperience } from "../commands/experience.js";
 import { attachFiles, downloadLatestFile } from "../commands/files.js";
 import { composeMessage, messageStatus, readLatest, submitMessage, waitForMessage } from "../commands/messages.js";
+import { readLatestMessageText } from "../dom/messages.js";
 import { bootstrap } from "../commands/session.js";
 import { listVisibleThreads, newThread, openThread, searchThreads } from "../commands/threads.js";
 import { redactReportValue } from "../safety/report-redaction.js";
@@ -77,6 +78,7 @@ export type ReviewWorkflowPort = {
   waitMetadata(afterAssistantTurnCount: number, timeoutMs: number, stableMs: number, pollMs: number): Promise<CommandResult<WaitData>>;
   readFullMarkdown(): Promise<CommandResult<ReadLatestData>>;
   readLatestUser(): Promise<CommandResult<ReadLatestData>>;
+  readExactLatestUserText?(): Promise<string | undefined>;
   downloadFile(destDir: string, filename: string, assistantIndex: number, occurrenceIndex: number): Promise<CommandResult<DownloadedFile>>;
   downloadImage(destDir: string, index: number, turnId?: string): Promise<CommandResult<DownloadedFile>>;
 };
@@ -89,6 +91,7 @@ type ConversationAffinity = {
 
 const MAX_RECOVERY_CANDIDATES = 6;
 const RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS = 6_000;
+const EXACT_PROMPT_PROOF_TIMEOUT_MS = 12_000;
 
 class ReviewWorkflowError extends Error {
   constructor(readonly result: CommandResult<unknown>, readonly state: ReviewState) {
@@ -101,6 +104,13 @@ class ReviewInProgress extends Error {
   constructor() {
     super("The submitted review is still generating.");
     this.name = "ReviewInProgress";
+  }
+}
+
+class ReviewBrowserUnresponsiveError extends Error {
+  constructor(operation: string) {
+    super(`The browser stopped responding while ${operation}. Preserve the review archive and resume after the browser host is responsive.`);
+    this.name = "ReviewBrowserUnresponsiveError";
   }
 }
 
@@ -140,6 +150,9 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
   let recoveryQuery: string | undefined;
   let releaseLease: (() => Promise<void>) | undefined;
   let archivedSubmission: ArchivedSubmission | undefined;
+  let preSubmitResume = false;
+  let preSubmitCheckpointActive = false;
+  let requestedThreadTarget = args.thread;
   let resumedMessageStatus: MessageStatusData | undefined;
   let terminalOutcomeAlreadyFinal = false;
   const affinity: ConversationAffinity = { canonicalId: undefined, routeId: undefined, invocationTabId: undefined };
@@ -220,82 +233,109 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
           await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, undefined);
           throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
         }
+        const preSubmitCheckpoint = await readArchivedPreSubmitCheckpoint(args.resume.archiveDirectory, prepared);
+        if (preSubmitCheckpoint !== undefined) {
+          validatePreSubmitResumeCrossCheck(args, preSubmitCheckpoint);
+          preSubmitResume = true;
+          preSubmitCheckpointActive = true;
+          requestedThreadTarget = preSubmitCheckpoint.target.mode === "existing"
+            ? {
+                ...(preSubmitCheckpoint.target.url === undefined ? {} : { url: preSubmitCheckpoint.target.url }),
+                ...(preSubmitCheckpoint.target.id === undefined ? {} : { id: preSubmitCheckpoint.target.id })
+              }
+            : undefined;
+          threadUrl = requestedThreadTarget?.url;
+          threadId = requestedThreadTarget?.id ?? conversationIdFromUrl(requestedThreadTarget?.url);
+          if (threadId !== undefined) {
+            affinity.canonicalId = threadId;
+            affinity.routeId = threadId;
+          }
+        }
       }
-      try {
-        configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
-      } catch (error) {
-        throw new ReviewPreparationError(
-          `The original configuration snapshot is missing or invalid; automatic restoration cannot be proven. ${error instanceof Error ? error.message : String(error)}`,
-          "resume_configuration_snapshot_invalid"
-        );
-      }
-      try {
-        archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
-      } catch (error) {
-        const missingSubmission = error instanceof ReviewPreparationError
-          && error.code === "resume_submission_unverified";
-        if (!missingSubmission || submissionRecordExists) throw error;
+      if (!preSubmitResume) {
+        try {
+          configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
+        } catch (error) {
+          throw new ReviewPreparationError(
+            `The original configuration snapshot is missing or invalid; automatic restoration cannot be proven. ${error instanceof Error ? error.message : String(error)}`,
+            "resume_configuration_snapshot_invalid"
+          );
+        }
+        try {
+          archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
+        } catch (error) {
+          const missingSubmission = error instanceof ReviewPreparationError
+            && error.code === "resume_submission_unverified";
+          if (!missingSubmission || submissionRecordExists) throw error;
+          if (terminalMarkerError !== undefined) throw terminalMarkerError;
+          if (archivedFinalOutcome !== undefined
+            && archivedFinalOutcome.submitted === false
+            && missingSubmission) {
+            await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, undefined);
+            throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
+          }
+          throw error;
+        }
         if (terminalMarkerError !== undefined) throw terminalMarkerError;
-        if (archivedFinalOutcome !== undefined
-          && archivedFinalOutcome.submitted === false
-          && missingSubmission) {
-          await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, undefined);
+        submitted = archivedSubmission.submitted;
+        if (archivedFinalOutcome !== undefined) {
+          await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, archivedSubmission);
           throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
         }
-        throw error;
+        const checkpoint = await readOptionalThreadCheckpoint(args.resume.archiveDirectory);
+        validateThreadCheckpoint(checkpoint, archivedSubmission, prepared);
+        const receiptThreadId = archivedSubmission.thread.id ?? conversationIdFromUrl(archivedSubmission.thread.url);
+        const receiptIsProvisional = isProvisionalConversationId(receiptThreadId);
+        const checkpointUrlId = conversationIdFromUrl(checkpoint?.current.url);
+        const checkpointId = checkpoint?.current.id ?? checkpointUrlId;
+        const suppliedUrlId = conversationIdFromUrl(threadUrl);
+        if (threadId !== undefined && suppliedUrlId !== undefined && threadId !== suppliedUrlId) {
+          throw new ReviewPreparationError("resume.conversationId and resume.threadUrl refer to different Chat conversations.", "resume_thread_mismatch");
+        }
+        const suppliedThreadId = threadId ?? suppliedUrlId;
+        if (!receiptIsProvisional && suppliedThreadId !== undefined && receiptThreadId !== undefined && suppliedThreadId !== receiptThreadId) {
+          throw new ReviewPreparationError("The caller-supplied resume thread does not match the immutable archived submission receipt.", "resume_thread_mismatch");
+        }
+        if (receiptIsProvisional) {
+          const candidateId = suppliedThreadId !== undefined && !isProvisionalConversationId(suppliedThreadId)
+            ? suppliedThreadId
+            : checkpointId !== undefined && !isProvisionalConversationId(checkpointId)
+              ? checkpointId
+              : undefined;
+          const recoveryTabId = checkpoint?.current.tabId ?? archivedSubmission.thread.tabId;
+          recoveryHint = {
+            ...(candidateId === undefined ? {} : { conversationId: candidateId }),
+            ...(candidateId !== undefined && suppliedUrlId === candidateId && threadUrl !== undefined
+              ? { url: threadUrl }
+              : candidateId !== undefined && checkpointUrlId === candidateId && checkpoint?.current.url !== undefined
+                ? { url: checkpoint.current.url }
+                : {}),
+            ...(recoveryTabId === undefined ? {} : { tabId: recoveryTabId })
+          };
+          threadId = receiptThreadId;
+          threadUrl = archivedSubmission.thread.url;
+          affinity.routeId = receiptThreadId;
+        } else {
+          const checkpointMatchesReceipt = checkpointUrlId !== undefined && checkpointUrlId === receiptThreadId;
+          threadId = receiptThreadId ?? suppliedThreadId;
+          threadUrl = checkpointMatchesReceipt && checkpoint?.current.url !== undefined
+            ? checkpoint.current.url
+            : archivedSubmission.thread.url ?? threadUrl;
+          affinity.canonicalId = receiptThreadId;
+          affinity.routeId = receiptThreadId;
+          const recoveryTabId = checkpoint?.current.tabId ?? archivedSubmission.thread.tabId;
+          recoveryHint = recoveryTabId === undefined ? undefined : { tabId: recoveryTabId };
+        }
+        if (args.resume.artifactBaseline !== undefined
+          && sha256Text(JSON.stringify(args.resume.artifactBaseline)) !== sha256Text(JSON.stringify(archivedSubmission.artifactBaseline))) {
+          throw new ReviewPreparationError("resume.artifactBaseline does not match the immutable archived submission baseline.", "resume_artifact_baseline_mismatch");
+        }
+        artifactBaseline = archivedSubmission.artifactBaseline;
+        recoveryQuery = checkpoint?.recoveryQuery ?? recoveryQueryFromPrepared(prepared);
       }
-      if (terminalMarkerError !== undefined) throw terminalMarkerError;
-      submitted = archivedSubmission.submitted;
-      if (archivedFinalOutcome !== undefined) {
-        await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, archivedSubmission);
-        throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
-      }
-      const checkpoint = await readOptionalThreadCheckpoint(args.resume.archiveDirectory);
-      validateThreadCheckpoint(checkpoint, archivedSubmission, prepared);
-      const receiptThreadId = archivedSubmission.thread.id ?? conversationIdFromUrl(archivedSubmission.thread.url);
-      const receiptIsProvisional = isProvisionalConversationId(receiptThreadId);
-      const suppliedUrlId = conversationIdFromUrl(threadUrl);
-      if (threadId !== undefined && suppliedUrlId !== undefined && threadId !== suppliedUrlId) {
-        throw new ReviewPreparationError("resume.conversationId and resume.threadUrl refer to different Chat conversations.", "resume_thread_mismatch");
-      }
-      const suppliedThreadId = threadId ?? suppliedUrlId;
-      if (!receiptIsProvisional && suppliedThreadId !== undefined && receiptThreadId !== undefined && suppliedThreadId !== receiptThreadId) {
-        throw new ReviewPreparationError("The caller-supplied resume thread does not match the immutable archived submission receipt.", "resume_thread_mismatch");
-      }
-      if (receiptIsProvisional) {
-        const checkpointId = checkpoint?.current.id ?? conversationIdFromUrl(checkpoint?.current.url);
-        const candidateId = suppliedThreadId !== undefined && !isProvisionalConversationId(suppliedThreadId)
-          ? suppliedThreadId
-          : checkpointId !== undefined && !isProvisionalConversationId(checkpointId)
-            ? checkpointId
-            : undefined;
-        const recoveryTabId = checkpoint?.current.tabId ?? archivedSubmission.thread.tabId;
-        recoveryHint = {
-          ...(candidateId === undefined ? {} : { conversationId: candidateId }),
-          ...(candidateId !== undefined && suppliedUrlId === candidateId && threadUrl !== undefined
-            ? { url: threadUrl }
-            : candidateId !== undefined && checkpointId === candidateId && checkpoint?.current.url !== undefined
-              ? { url: checkpoint.current.url }
-              : {}),
-          ...(recoveryTabId === undefined ? {} : { tabId: recoveryTabId })
-        };
-        threadId = receiptThreadId;
-        threadUrl = archivedSubmission.thread.url;
-        affinity.routeId = receiptThreadId;
-      } else {
-        threadId = receiptThreadId ?? suppliedThreadId;
-        threadUrl = archivedSubmission.thread.url ?? threadUrl;
-        affinity.canonicalId = receiptThreadId;
-        affinity.routeId = receiptThreadId;
-        recoveryHint = archivedSubmission.thread.tabId === undefined ? undefined : { tabId: archivedSubmission.thread.tabId };
-      }
-      if (args.resume.artifactBaseline !== undefined
-        && sha256Text(JSON.stringify(args.resume.artifactBaseline)) !== sha256Text(JSON.stringify(archivedSubmission.artifactBaseline))) {
-        throw new ReviewPreparationError("resume.artifactBaseline does not match the immutable archived submission baseline.", "resume_artifact_baseline_mismatch");
-      }
-      artifactBaseline = archivedSubmission.artifactBaseline;
-      recoveryQuery = checkpoint?.recoveryQuery ?? recoveryQueryFromPrepared(prepared);
     }
+
+    const isPreSubmitAttempt = args.resume === undefined || preSubmitResume;
 
     const needsProvisionalRecovery = args.resume !== undefined
       && (isProvisionalConversationId(threadId)
@@ -303,13 +343,28 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     const archivedTabTarget = args.resume === undefined ? undefined : recoveryHint?.tabId;
     const ordinaryBootstrapTarget = needsProvisionalRecovery
       ? undefined
-      : (args.resume === undefined && args.thread === undefined)
-        ? undefined
+      : isPreSubmitAttempt
+        ? requestedThreadTarget === undefined
+          ? undefined
+          : {
+              ...(requestedThreadTarget.url === undefined ? {} : { url: requestedThreadTarget.url }),
+              ...(requestedThreadTarget.id === undefined ? {} : { conversationId: requestedThreadTarget.id })
+            }
         : {
-          ...(threadUrl === undefined ? {} : { url: threadUrl }),
-          ...(threadId === undefined ? {} : { conversationId: threadId })
-        };
+            ...(threadUrl === undefined ? {} : { url: threadUrl }),
+            ...(threadId === undefined ? {} : { conversationId: threadId })
+          };
     const boot = requireOk(await runStep("PREFLIGHT_BROWSER", async () => {
+      if (isPreSubmitAttempt
+        && requestedThreadTarget !== undefined
+        && archiveDirectory !== undefined
+        && !preSubmitCheckpointActive) {
+        await writeImmutableJson(
+          join(archiveDirectory, "pre-submit-checkpoint.json"),
+          await createPreSubmitCheckpoint(prepared!, requestedThreadTarget, port.now())
+        );
+        preSubmitCheckpointActive = true;
+      }
       const useRecoveryBootstrap = args.resume !== undefined
         && (needsProvisionalRecovery || archivedTabTarget !== undefined)
         && port.bootstrapRecovery !== undefined;
@@ -320,23 +375,29 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         args.resume !== undefined
       );
       if (first.ok && archivedTabTarget !== undefined && !needsProvisionalRecovery && affinity.canonicalId !== undefined) {
-        const claimed = await port.pageState().catch(() => undefined);
-        const claimedId = claimed?.conversationId ?? conversationIdFromUrl(claimed?.url);
+        const claimedId = first.context.conversationId ?? conversationIdFromUrl(first.context.url);
         if (claimedId !== affinity.canonicalId) {
           return makeExistingTabRetryResumable(await port.bootstrap(ordinaryBootstrapTarget), true);
         }
       }
       if (first.ok || archivedTabTarget === undefined || first.blocker?.code !== "existing_tab_not_found") return first;
-      return makeExistingTabRetryResumable(await port.bootstrap(ordinaryBootstrapTarget), true);
+      const retry = needsProvisionalRecovery && port.bootstrapRecovery !== undefined
+        ? await port.bootstrapRecovery()
+        : await port.bootstrap(ordinaryBootstrapTarget);
+      return makeExistingTabRetryResumable(retry, true);
     }), "PREFLIGHT_BROWSER");
+    if (archiveDirectory !== undefined && (args.resume === undefined || preSubmitResume)) {
+      await rm(join(archiveDirectory, "pre-submit-checkpoint.json"), { force: true });
+      preSubmitCheckpointActive = false;
+    }
     affinity.invocationTabId = boot.context.tabId;
     requireOk(await runStep("OPEN_CHAT", () => port.openChat()), "OPEN_CHAT");
-    if (args.resume === undefined) {
-      const opened = requireData(await runStep("OPEN_CHAT", () => args.thread === undefined
+    if (isPreSubmitAttempt) {
+      const opened = requireData(await runStep("OPEN_CHAT", () => requestedThreadTarget === undefined
         ? port.newThread()
         : port.openThread({
-            ...(threadUrl === undefined ? {} : { url: threadUrl }),
-            ...(threadId === undefined ? {} : { conversationId: threadId })
+            ...(requestedThreadTarget.url === undefined ? {} : { url: requestedThreadTarget.url }),
+            ...(requestedThreadTarget.id === undefined ? {} : { conversationId: requestedThreadTarget.id })
           })), "OPEN_CHAT");
       threadUrl = opened.data.url || opened.context.url;
       threadId = opened.data.conversationId ?? opened.context.conversationId;
@@ -350,7 +411,12 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     } else {
       const needsThreadRecovery = needsProvisionalRecovery;
       const openResult = needsThreadRecovery
-        ? await runStep("RECOVER_THREAD", () => port.recoverThread(recoveryQuery!, prepared!.prompt, recoveryHint))
+        ? await runStep("RECOVER_THREAD", async () => (await recoverCurrentVisibleThread(
+          port,
+          prepared!.prompt,
+          affinity.invocationTabId,
+          boot.context
+        )) ?? port.recoverThread(recoveryQuery!, prepared!.prompt, recoveryHint))
         : await runStep("OPEN_CHAT", () => port.openThread({
             ...(threadId === undefined ? {} : { conversationId: threadId }),
             ...(threadUrl === undefined ? {} : { url: threadUrl })
@@ -382,19 +448,22 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         affinity.routeId = openedThreadId;
         threadUrl = openedThreadUrl;
         threadId = openedThreadId;
-        await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
+        assertCommandContextAffinity(opened.context, affinity, "RECOVER_THREAD", true);
       } else {
         threadUrl = openedThreadUrl;
         threadId = openedThreadId;
         await assertConversationAffinity(port, affinity, "OPEN_CHAT", true);
       }
-      const latestUser = requireData(await port.readLatestUser(), "POLL_METADATA");
-      assertCommandContextAffinity(latestUser.context, affinity, "RECOVER_THREAD", true);
-      const observedUserSha256 = sha256Text(normalizeVisiblePrompt(latestUser.data.text));
+      const latestUser = needsThreadRecovery && port.readExactLatestUserText !== undefined
+        ? undefined
+        : requireData(await port.readLatestUser(), "POLL_METADATA");
+      if (latestUser !== undefined) assertCommandContextAffinity(latestUser.context, affinity, "RECOVER_THREAD", true);
+      const latestUserText = latestUser?.data.text ?? await port.readExactLatestUserText!();
+      const observedUserSha256 = sha256Text(normalizeVisiblePrompt(latestUserText ?? ""));
       const visiblePromptProven = archivedSubmission?.userTurnSha256 !== undefined
         ? observedUserSha256 === archivedSubmission.userTurnSha256
-          || visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared!.prompt)
-        : visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared!.prompt);
+          || visibleUserTurnContainsExactPrompt(latestUserText ?? "", prepared!.prompt)
+        : visibleUserTurnContainsExactPrompt(latestUserText ?? "", prepared!.prompt);
       if (!visiblePromptProven) {
         const message = "The latest visible user turn is not the archived submitted review prompt. Resume refused to capture a later or ambiguous response.";
         if (isProvisionalConversationId(expectedThreadId)) {
@@ -413,12 +482,12 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         }
         throw new ReviewPreparationError(message, "resume_user_turn_mismatch");
       }
-      await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
+      if (!needsThreadRecovery) await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
       const recoveryStatus = requireData(await port.messageStatus(), "POLL_METADATA");
       assertCommandContextAffinity(recoveryStatus.context, affinity, "POLL_METADATA", true);
       resumedMessageStatus = recoveryStatus.data;
       assertSubmittedTurnOwnership(archivedSubmission, resumedMessageStatus, threadUrl);
-      await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
+      if (!needsThreadRecovery) await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
       await persistThreadCheckpoint(archiveDirectory!, prepared!, threadUrl, threadId, affinity.invocationTabId, port.now());
       const receiptNeedsConfirmation = archivedSubmission !== undefined
         && (archivedSubmission.state !== "confirmed" || isProvisionalConversationId(expectedThreadId));
@@ -451,9 +520,11 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         };
       }
     }
-    await assertConversationAffinity(port, affinity, "PREFLIGHT_BROWSER", args.resume !== undefined);
+    if (!needsProvisionalRecovery) {
+      await assertConversationAffinity(port, affinity, "PREFLIGHT_BROWSER", !isPreSubmitAttempt);
+    }
 
-    if (args.resume !== undefined && archiveDirectory !== undefined && configurationBefore === undefined) {
+    if (args.resume !== undefined && !preSubmitResume && archiveDirectory !== undefined && configurationBefore === undefined) {
       try {
         configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
       } catch (error) {
@@ -475,7 +546,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         data: { capturedAt: configurationBefore.capturedAt, selection: configurationBefore.selection }
       });
     }
-    if (archiveDirectory !== undefined && args.resume === undefined) {
+    if (archiveDirectory !== undefined && isPreSubmitAttempt) {
       await writeImmutableJson(join(archiveDirectory, "configuration.before.json"), configurationBefore);
     }
 
@@ -498,12 +569,12 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     verifiedBeforeSubmit = appliedData.verified && configurationMatchesSelection(appliedData.after, { intelligence: "Pro" });
     if (!verifiedBeforeSubmit) throw workflowBlocker("model_fallback", "pro_precondition_unverified", "The visible Chat setting did not strictly verify Pro before submission.", "VERIFY_PRO_BEFORE_SUBMIT");
     await runStep("VERIFY_PRO_BEFORE_SUBMIT", async () => {
-      await assertConversationAffinity(port, affinity, "VERIFY_PRO_BEFORE_SUBMIT", args.resume !== undefined);
+      await assertConversationAffinity(port, affinity, "VERIFY_PRO_BEFORE_SUBMIT", !isPreSubmitAttempt);
       return { verified: true, active: appliedData.after.active };
     });
 
     if (artifactBaseline === undefined) {
-      if (args.resume !== undefined && archiveDirectory !== undefined) {
+      if (!isPreSubmitAttempt && archiveDirectory !== undefined) {
         artifactBaseline = await readArchivedArtifactBaseline(archiveDirectory).catch(() => undefined);
       }
     }
@@ -512,7 +583,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
     }
 
     let baselineAssistantCount = 0;
-    if (args.resume === undefined) {
+    if (isPreSubmitAttempt) {
       if (prepared!.mode === "review-packets") {
         const attachments = [prepared!.uploadManifestPath, ...prepared!.packetPaths];
         await assertConversationAffinity(port, affinity, "ATTACH_PACKETS", false);
@@ -858,9 +929,22 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         resumable: isCorrectableResumePreparationError(error.code)
       };
     } else if (error instanceof ReviewWorkflowError) {
-      terminalStatus = error.result.status === "blocked" || error.result.status === "needs_confirmation" ? "blocked" : "failed";
       blocker = error.result.blocker;
+      const completedBrowserHandoff = blocker?.code === "existing_tab_handoff_completed";
+      terminalStatus = completedBrowserHandoff
+        ? "in_progress"
+        : error.result.status === "blocked" || error.result.status === "needs_confirmation"
+          ? "blocked"
+          : "failed";
       if (error.result.error !== undefined) warnings.push(error.result.error.message);
+    } else if (error instanceof ReviewBrowserUnresponsiveError) {
+      terminalStatus = "blocked";
+      blocker = {
+        kind: "selector_drift",
+        code: "existing_tab_unresponsive",
+        message: error.message,
+        resumable: true
+      };
     } else {
       terminalStatus = "failed";
       warnings.push(error instanceof Error ? error.message : String(error));
@@ -868,6 +952,8 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
   } finally {
     if (!terminalOutcomeAlreadyFinal
       && terminalStatus !== "in_progress"
+      && blocker?.code !== "existing_tab_unresponsive"
+      && blocker?.code !== "existing_tab_temporarily_claimed"
       && configurationBefore !== undefined
       && args.safeguards?.restorePreviousConfiguration === true) {
       try {
@@ -894,6 +980,13 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
         if (terminalStatus === "completed") terminalStatus = "completed_with_warnings";
       }
     }
+  }
+
+  if (preSubmitCheckpointActive
+    && archiveDirectory !== undefined
+    && blocker?.code !== "existing_tab_handoff_completed") {
+    await rm(join(archiveDirectory, "pre-submit-checkpoint.json"), { force: true }).catch(() => undefined);
+    preSubmitCheckpointActive = false;
   }
 
   const contextMode = prepared?.mode
@@ -1052,7 +1145,15 @@ export function defaultReviewWorkflowPort(env: RuntimeEnv): ReviewWorkflowPort {
           }
         }),
     bootstrapRecovery: target => bootstrap(env, target?.tabId === undefined
-      ? { preferExistingTab: false }
+      ? {
+          existingTab: {
+            target: { type: "selected", host: "chatgpt" },
+            ifMissing: "block",
+            ifMultiple: "first",
+            requireChatGPT: true
+          },
+          preferExistingTab: false
+        }
       : {
           existingTab: {
             target: { type: "tabId", tabId: target.tabId },
@@ -1091,6 +1192,7 @@ export function defaultReviewWorkflowPort(env: RuntimeEnv): ReviewWorkflowPort {
     }),
     readFullMarkdown: () => readLatest(env, { role: "assistant", format: "markdown" }),
     readLatestUser: () => readLatest(env, { role: "user", format: "text" }),
+    readExactLatestUserText: () => readExactLatestUserText(env),
     downloadFile: (destDir, filename, assistantIndex, occurrenceIndex) => downloadLatestFile(env, {
       destDir,
       filenamePattern: `^${escapeRegExp(filename)}$`,
@@ -1434,6 +1536,108 @@ type ThreadCheckpoint = {
   updatedAt: string;
 };
 
+type PreSubmitCheckpoint = {
+  schemaVersion: 1;
+  phase: "preflight_browser_handoff";
+  createdAt: string;
+  promptSha256: string;
+  manifestSha256: string;
+  uploadManifestSha256: string;
+  target: { mode: "new" } | { mode: "existing"; url?: string; id?: string };
+};
+
+async function createPreSubmitCheckpoint(
+  prepared: PreparedReviewContext,
+  target: ProCodeReviewArgs["thread"],
+  now: Date
+): Promise<PreSubmitCheckpoint> {
+  return {
+    schemaVersion: 1,
+    phase: "preflight_browser_handoff",
+    createdAt: now.toISOString(),
+    promptSha256: sha256Text(normalizePrompt(prepared.prompt)),
+    manifestSha256: await sha256File(prepared.manifestPath),
+    uploadManifestSha256: await sha256File(prepared.uploadManifestPath),
+    target: target === undefined
+      ? { mode: "new" }
+      : {
+          mode: "existing",
+          ...(target.url === undefined ? {} : { url: target.url }),
+          ...(target.id === undefined ? {} : { id: target.id })
+        }
+  };
+}
+
+async function readArchivedPreSubmitCheckpoint(
+  archiveDirectory: string,
+  prepared: PreparedReviewContext
+): Promise<PreSubmitCheckpoint | undefined> {
+  let value: Record<string, unknown> | undefined;
+  try {
+    value = await readOptionalJson(join(archiveDirectory, "pre-submit-checkpoint.json"));
+  } catch (error) {
+    throw new ReviewPreparationError(
+      `The pre-submit handoff checkpoint is unreadable or invalid JSON. ${error instanceof Error ? error.message : String(error)}`,
+      "resume_pre_submit_checkpoint_invalid"
+    );
+  }
+  if (value === undefined) return undefined;
+  const target = value.target;
+  if (value.schemaVersion !== 1
+    || value.phase !== "preflight_browser_handoff"
+    || typeof value.createdAt !== "string"
+    || typeof value.promptSha256 !== "string"
+    || typeof value.manifestSha256 !== "string"
+    || typeof value.uploadManifestSha256 !== "string"
+    || !isRecord(target)
+    || (target.mode !== "new" && target.mode !== "existing")
+    || (target.mode === "new" && (target.url !== undefined || target.id !== undefined))
+    || (target.url !== undefined && typeof target.url !== "string")
+    || (target.id !== undefined && typeof target.id !== "string")
+    || (target.mode === "existing" && target.url === undefined && target.id === undefined)) {
+    throw new ReviewPreparationError("The pre-submit handoff checkpoint is invalid.", "resume_pre_submit_checkpoint_invalid");
+  }
+  const checkpoint = value as unknown as PreSubmitCheckpoint;
+  if (checkpoint.promptSha256 !== sha256Text(normalizePrompt(prepared.prompt))
+    || checkpoint.manifestSha256 !== await sha256File(prepared.manifestPath)
+    || checkpoint.uploadManifestSha256 !== await sha256File(prepared.uploadManifestPath)) {
+    throw new ReviewPreparationError(
+      "The pre-submit handoff checkpoint no longer matches the archived prompt or prepared context.",
+      "resume_pre_submit_checkpoint_mismatch"
+    );
+  }
+  if (checkpoint.target.mode === "existing") {
+    if (checkpoint.target.url !== undefined && !isChatGPTUrl(checkpoint.target.url)) {
+      throw new ReviewPreparationError("The pre-submit handoff checkpoint has an invalid existing-thread target.", "resume_pre_submit_checkpoint_invalid");
+    }
+    const urlId = conversationIdFromUrl(checkpoint.target.url);
+    if ((checkpoint.target.id !== undefined && urlId !== undefined && checkpoint.target.id !== urlId)
+      || (checkpoint.target.id ?? urlId) === undefined
+      || isProvisionalConversationId(checkpoint.target.id ?? urlId)) {
+      throw new ReviewPreparationError("The pre-submit handoff checkpoint has an invalid existing-thread target.", "resume_pre_submit_checkpoint_invalid");
+    }
+  }
+  return checkpoint;
+}
+
+function validatePreSubmitResumeCrossCheck(args: ProCodeReviewArgs, checkpoint: PreSubmitCheckpoint): void {
+  if (args.resume === undefined) return;
+  const suppliedUrlId = conversationIdFromUrl(args.resume.threadUrl);
+  if (args.resume.conversationId !== undefined
+    && suppliedUrlId !== undefined
+    && args.resume.conversationId !== suppliedUrlId) {
+    throw new ReviewPreparationError("resume.conversationId and resume.threadUrl refer to different Chat conversations.", "resume_thread_mismatch");
+  }
+  const suppliedId = args.resume.conversationId ?? suppliedUrlId;
+  if (suppliedId === undefined) return;
+  const checkpointId = checkpoint.target.mode === "existing"
+    ? checkpoint.target.id ?? conversationIdFromUrl(checkpoint.target.url)
+    : undefined;
+  if (checkpointId === undefined || suppliedId !== checkpointId) {
+    throw new ReviewPreparationError("The caller-supplied resume thread does not match the pre-submit handoff checkpoint.", "resume_thread_mismatch");
+  }
+}
+
 async function readArchivedSubmission(archiveDirectory: string, prepared: PreparedReviewContext): Promise<ArchivedSubmission> {
   const confirmation = await readOptionalJson(join(archiveDirectory, "submission-confirmation.json"));
   const submittedRecord = confirmation ?? await readOptionalJson(join(archiveDirectory, "submission.json"));
@@ -1448,7 +1652,8 @@ async function readArchivedSubmission(archiveDirectory: string, prepared: Prepar
     || ((state === "intent" || state === "failed") && value.submitted === true)
     || (state !== "confirmed" && state !== "intent" && state !== "ambiguous" && state !== "failed")
     || !isRecord(value.thread)
-    || (value.thread.url !== undefined && typeof value.thread.url !== "string")
+    || (value.thread.url !== undefined
+      && (typeof value.thread.url !== "string" || !isChatGPTUrl(value.thread.url)))
     || (value.thread.id !== undefined && typeof value.thread.id !== "string")
     || (value.thread.tabId !== undefined && typeof value.thread.tabId !== "string")) {
     throw new ReviewPreparationError("The archived submission receipt does not prove a submit-once, non-resubmittable review.", "resume_submission_unverified");
@@ -1665,35 +1870,58 @@ function isProvisionalConversationId(value: string | undefined): boolean {
   return value?.startsWith("WEB:") === true;
 }
 
+async function readExactLatestUserText(env: RuntimeEnv): Promise<string | undefined> {
+  if (env.page === undefined) return undefined;
+  if (typeof env.page.evaluate !== "function") {
+    const result = await readLatest(env, { role: "user", format: "text" });
+    return result.ok ? result.data?.text : undefined;
+  }
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      readLatestMessageText(env.page, "user"),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new ReviewBrowserUnresponsiveError("verifying the exact archived user prompt")),
+          EXACT_PROMPT_PROOF_TIMEOUT_MS
+        );
+      })
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 async function recoverCurrentVisibleThread(
   port: ReviewWorkflowPort,
   expectedPrompt: string,
-  requiredTabId: string | undefined
+  requiredTabId: string | undefined,
+  claimedContext: CommandResult<unknown>["context"]
 ): Promise<CommandResult<OpenThreadData> | undefined> {
   if (requiredTabId === undefined) return undefined;
-  const page = await port.pageState().catch(() => undefined);
-  const conversationId = page?.conversationId ?? conversationIdFromUrl(page?.url);
-  if (page === undefined
-    || page.tabId !== requiredTabId
+  const conversationId = claimedContext.conversationId ?? conversationIdFromUrl(claimedContext.url);
+  if (claimedContext.tabId !== requiredTabId
     || conversationId === undefined
     || isProvisionalConversationId(conversationId)) return undefined;
-  const latestUser = await port.readLatestUser().catch(() => undefined);
-  if (latestUser?.ok !== true || !visibleUserTurnContainsExactPrompt(latestUser.data?.text ?? "", expectedPrompt)) return undefined;
+  const recoveredUrl = claimedContext.url || new URL(`/c/${conversationId}`, "https://chatgpt.com/").toString();
+  const latestUserText = port.readExactLatestUserText === undefined
+    ? (await port.readLatestUser().catch(() => undefined))?.data?.text
+    : await port.readExactLatestUserText();
+  if (!visibleUserTurnContainsExactPrompt(latestUserText ?? "", expectedPrompt)) return undefined;
   return {
     ok: true,
     status: "ok",
     data: {
-      url: page.url,
-      conversationId,
-      ...(page.title === undefined ? {} : { title: page.title })
+      url: recoveredUrl,
+      conversationId
     },
     warnings: ["Recovered the archived review from the already-visible prompt-identical Chat conversation."],
     context: {
       timestamp: port.now().toISOString(),
-      url: page.url,
+      url: recoveredUrl,
       conversationId,
-      tabId: page.tabId,
-      ...(page.title === undefined ? {} : { title: page.title })
+      tabId: claimedContext.tabId
     }
   };
 }
@@ -1762,9 +1990,10 @@ async function readArchivedThreadCheckpoint(archiveDirectory: string): Promise<T
   const value = JSON.parse(await readFile(join(archiveDirectory, "thread-checkpoint.json"), "utf8")) as Partial<ThreadCheckpoint>;
   if (value.schemaVersion !== 1
     || !isRecord(value.current)
-    || (value.current.url !== undefined && typeof value.current.url !== "string")
-    || (value.current.id !== undefined && typeof value.current.id !== "string")
-    || (value.current.tabId !== undefined && typeof value.current.tabId !== "string")
+    || (value.current.url !== undefined
+      && (typeof value.current.url !== "string" || value.current.url.trim().length === 0 || !isChatGPTUrl(value.current.url)))
+    || (value.current.id !== undefined && (typeof value.current.id !== "string" || value.current.id.trim().length === 0))
+    || (value.current.tabId !== undefined && (typeof value.current.tabId !== "string" || value.current.tabId.trim().length === 0))
     || typeof value.recoveryQuery !== "string"
     || typeof value.promptSha256 !== "string") {
     throw new Error("Archived thread checkpoint is invalid.");
@@ -1794,7 +2023,13 @@ function validateThreadCheckpoint(
     throw new ReviewPreparationError("The mutable thread checkpoint prompt hash does not match the immutable archived prompt.", "resume_checkpoint_prompt_mismatch");
   }
   const submittedId = submission.thread.id ?? conversationIdFromUrl(submission.thread.url);
-  const checkpointId = checkpoint.current.id ?? conversationIdFromUrl(checkpoint.current.url);
+  const checkpointUrlId = conversationIdFromUrl(checkpoint.current.url);
+  const checkpointId = checkpoint.current.id ?? checkpointUrlId;
+  if (checkpoint.current.id !== undefined
+    && checkpointUrlId !== undefined
+    && checkpoint.current.id !== checkpointUrlId) {
+    throw new ReviewPreparationError("The mutable thread checkpoint URL and declared conversation ID disagree.", "resume_checkpoint_thread_mismatch");
+  }
   if (submittedId !== undefined
     && checkpointId !== undefined
     && !isProvisionalConversationId(submittedId)
@@ -1861,11 +2096,12 @@ async function recoverReviewThread(
   for (const candidate of candidates.values()) {
     const opened = await exactClaimOrOpenRecoveryCandidate(env, candidate, probe, preferred?.tabId);
     if (!opened.ok) {
+      if (mustStopBrowserRecovery(opened)) return opened;
       const restored = await restoreRecoveryProbe(env, probe);
       return restored ?? opened;
     }
-    const user = await readLatest(env, { role: "user", format: "text" });
-    if (user.ok && visibleUserTurnContainsExactPrompt(user.data?.text ?? "", expectedPrompt)) {
+    const userText = await readExactLatestUserText(env);
+    if (visibleUserTurnContainsExactPrompt(userText ?? "", expectedPrompt)) {
       exactMatches.push({ candidate, ...(opened.context.tabId === undefined ? {} : { tabId: opened.context.tabId }) });
     }
     const restored = await restoreRecoveryProbe(env, probe);
@@ -1911,8 +2147,8 @@ async function recoverReviewThread(
 
   const finalOpened = await exactClaimOrOpenRecoveryCandidate(env, selected.candidate, probe, selected.tabId ?? preferred?.tabId);
   if (!finalOpened.ok) return finalOpened;
-  const finalUser = await readLatest(env, { role: "user", format: "text" });
-  if (!finalUser.ok || !visibleUserTurnContainsExactPrompt(finalUser.data?.text ?? "", expectedPrompt)) {
+  const finalUserText = await readExactLatestUserText(env);
+  if (!visibleUserTurnContainsExactPrompt(finalUserText ?? "", expectedPrompt)) {
     return {
       ok: false,
       status: "blocked",
@@ -1953,10 +2189,9 @@ async function exactClaimOrOpenRecoveryCandidate(
       preferExistingTab: false
     });
     if (preferredClaim.ok) {
-      const preferredState = env.page === undefined ? undefined : await readPageState(env.page).catch(() => undefined);
-      const preferredObservedId = preferredState?.conversationId ?? conversationIdFromUrl(preferredState?.url);
+      const preferredObservedId = preferredClaim.context.conversationId ?? conversationIdFromUrl(preferredClaim.context.url);
       if (preferredObservedId === candidate.conversationId) {
-        return recoveryCandidateSuccess(candidate, preferredClaim, preferredState);
+        return recoveryCandidateSuccess(candidate, preferredClaim, undefined);
       }
       const restored = await restoreRecoveryProbe(env, probe);
       if (restored !== undefined) return restored;
@@ -1974,14 +2209,12 @@ async function exactClaimOrOpenRecoveryCandidate(
     preferExistingTab: false
   });
   if (claim.ok) {
-    const state = env.page === undefined ? undefined : await readPageState(env.page).catch(() => undefined);
-    const observedId = state?.conversationId ?? conversationIdFromUrl(state?.url)
-      ?? claim.context.conversationId ?? conversationIdFromUrl(claim.context.url);
+    const observedId = claim.context.conversationId ?? conversationIdFromUrl(claim.context.url);
     if (observedId !== candidate.conversationId) {
       const restored = await restoreRecoveryProbe(env, probe);
       return restored ?? recoveryCandidateDrift(candidate, observedId, claim.context);
     }
-    return recoveryCandidateSuccess(candidate, claim, state);
+    return recoveryCandidateSuccess(candidate, claim, undefined);
   }
   if (claim.blocker?.code !== "existing_tab_not_found") {
     return commandFailureAsOpenThread(makeExistingTabRetryResumable(claim, true));
@@ -1991,6 +2224,7 @@ async function exactClaimOrOpenRecoveryCandidate(
   const opened = await openThread(env, { url: candidate.url, timeoutMs: RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS });
   if (opened.context.tabId === undefined && probe.tabId !== undefined) opened.context.tabId = probe.tabId;
   if (!opened.ok) {
+    if (mustStopBrowserRecovery(opened)) return opened;
     const repaired = await restoreRecoveryProbe(env, probe);
     return repaired ?? opened;
   }
@@ -2051,18 +2285,19 @@ function recoveryCandidateSuccess(
   state: PageState | undefined
 ): CommandResult<OpenThreadData> {
   const title = state?.title ?? candidate.title;
+  const url = (state?.url ?? claim.context.url) || candidate.url;
   return {
     ok: true,
     status: "ok",
     data: {
-      url: state?.url ?? candidate.url,
+      url,
       conversationId: candidate.conversationId,
       ...(title === undefined ? {} : { title })
     },
     warnings: claim.warnings,
     context: {
       ...claim.context,
-      url: state?.url ?? candidate.url,
+      url,
       conversationId: candidate.conversationId
     }
   };
@@ -2118,11 +2353,20 @@ function commandFailureAsOpenThread(result: CommandResult<unknown>): CommandResu
   };
 }
 
+function mustStopBrowserRecovery(result: CommandResult<unknown>): boolean {
+  return result.blocker?.code === "existing_tab_unresponsive"
+    || result.blocker?.code === "existing_tab_handoff_completed"
+    || result.blocker?.code === "existing_tab_temporarily_claimed";
+}
+
 function makeExistingTabRetryResumable<T>(result: CommandResult<T>, onResume: boolean): CommandResult<T> {
   if (!onResume
     || result.ok
-    || (result.blocker?.code !== "existing_tab_ambiguous"
-      && result.blocker?.code !== "existing_tab_temporarily_claimed")) return result;
+    || (result.blocker?.code !== "existing_tab_not_found"
+      && result.blocker?.code !== "existing_tab_ambiguous"
+      && result.blocker?.code !== "existing_tab_temporarily_claimed"
+      && result.blocker?.code !== "existing_tab_unresponsive"
+      && result.blocker?.code !== "existing_tab_handoff_completed")) return result;
   return {
     ...result,
     blocker: { ...result.blocker, resumable: true }
@@ -2267,7 +2511,13 @@ function validateRequestedThread(args: ProCodeReviewArgs): void {
   if (args.resume !== undefined && args.thread !== undefined) {
     throw new ReviewPreparationError("thread and resume cannot be used together.", "thread_resume_conflict");
   }
+  if (args.resume?.threadUrl !== undefined && !isChatGPTUrl(args.resume.threadUrl)) {
+    throw new ReviewPreparationError("resume.threadUrl must point to ChatGPT.", "resume_thread_mismatch");
+  }
   if (args.thread === undefined) return;
+  if (args.thread.url !== undefined && !isChatGPTUrl(args.thread.url)) {
+    throw new ReviewPreparationError("thread.url must point to ChatGPT.", "thread_target_invalid");
+  }
   const urlId = conversationIdFromUrl(args.thread.url);
   if (args.thread.url === undefined && args.thread.id === undefined) {
     throw new ReviewPreparationError("thread requires a canonical Chat conversation URL or id.", "thread_target_missing");

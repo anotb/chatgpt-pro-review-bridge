@@ -1015,6 +1015,7 @@ export type BrowserLike = {
 export type BrowserUserTabInfo = {
   id: string;
   lastOpened?: string;
+  providerTabId?: string;
   tabGroup?: string;
   title?: string;
   url?: string;

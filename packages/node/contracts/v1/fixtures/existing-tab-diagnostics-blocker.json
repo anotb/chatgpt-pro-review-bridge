@@ -30,7 +30,7 @@
       "message": "No already-open ChatGPT tab matched the requested existing-tab target.",
       "remediation": [
         {
-          "instruction": "Use the selected tab, a ChatGPT conversation URL, conversation ID, or a tab id returned by openTabs().",
+          "instruction": "Use the selected tab, a ChatGPT conversation URL, conversation ID, or the stable tab ID shown in diagnostics or the current context.",
           "label": "Choose an exact tab",
           "userActionRequired": false
         },

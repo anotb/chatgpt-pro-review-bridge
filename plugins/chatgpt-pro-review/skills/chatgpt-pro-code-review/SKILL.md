@@ -59,7 +59,6 @@ const review = await chatgpt.reviews.askPro({
   },
   polling: {
     callTimeoutMs: 20000,
-    totalTimeoutMs: 1800000,
     maxPollCallsPerInvocation: 1
   }
 });
@@ -97,9 +96,13 @@ includeWorkingTree: true
 
 Do not branch on the selected Codex host model. Do not replace this call with a model-written repository summary.
 
+## Timeout budgets
+
+Give a fresh file-backed review a 5–10 minute outer browser-host envelope (`node_repl timeout_ms: 300000`, or up to `600000` for a large repository). `polling.callTimeoutMs` bounds only each post-submit metadata poll. If the outer call times out, preserve the archive and tabs and resume the same archive; never reattach, replace the chat, or resend the prompt.
+
 ## Resume without duplication
 
-If `status === "in_progress"`, require `submitted === true` and `resubmitAllowed === false`, keep the archive directory, and invoke the same workflow again with:
+If `status === "in_progress"` or the result is explicitly resumable, require `resubmitAllowed === false`, keep the archive directory, and invoke the same workflow again with:
 
 ```js
 const resumed = await chatgpt.reviews.codeReview({
@@ -111,13 +114,20 @@ const resumed = await chatgpt.reviews.codeReview({
   },
   polling: {
     callTimeoutMs: 20000,
-    totalTimeoutMs: 1800000,
     maxPollCallsPerInvocation: 1
   }
 });
 ```
 
-Never submit the original prompt again after an attempted submission. The immutable submission receipt is authoritative: it restores and validates the canonical Chat conversation ID/URL, stable browser tab when available, original packet manifest, artifact baseline, and configuration snapshot. Keep each browser-host call longer than `callTimeoutMs` (30 seconds is sufficient for the 20-second example). Pro can take minutes or more than an hour; `totalTimeoutMs` limits one invocation, not the repeated same-archive resume loop. Caller-supplied `conversationId` or `threadUrl` values are optional cross-checks and must match the receipt.
+Use durable phase, not `submitted === false` alone, to decide what a resume may do:
+
+- A validated `pre-submit-checkpoint.json` with no intent or receipt may continue to the first and only submit.
+- A submission intent means submission may already have been attempted; reconcile the visible thread but never submit again.
+- A receipt resumes only the existing response.
+
+Require `resubmitAllowed === false` in every phase. Never reattach packets, manually send the archived prompt, or start a replacement review. Caller-supplied conversation values are mismatch-only cross-checks.
+
+Treat `existing_tab_handoff_completed` as a task-turn boundary. Make no more browser calls, end the turn, then resume the same archive in a later turn with a fresh browser-host invocation. Never reuse the old client or submit in the handoff turn; the phase rules above still apply.
 
 Keep every invocation on its bound canonical conversation and browser tab. A
 provisional `WEB:` receipt may adopt a canonical conversation only after exact
@@ -127,7 +137,7 @@ one candidate uniquely selected by the archived tab ID; surface
 prompts. On any affinity blocker, preserve the archive and never create a
 replacement submission.
 
-Back off between separate resume invocations for the same archive. The calling agent—including any delegated subagent—owns this cadence: wait 30 seconds after the first `in_progress` result, then 60 seconds, 2 minutes, and 4 minutes; after that, poll no more often than every 5 minutes. Count only consecutive `in_progress` results for that archive and reset when it completes or reaches a blocker. Use the host's wait or wake-up mechanism between calls. Do not immediately recurse, busy-poll, or keep one browser-host call open during the delay. `pollMs` only samples visible DOM stability inside one bounded call; it is not the cross-invocation cadence.
+After a post-submit `in_progress` result, follow this prose-only cadence between invocations: 30 seconds, 60 seconds, 2 minutes, 4 minutes, then no more than once every 5 minutes. Wait outside the SDK; do not add a timer, recurse, or busy-poll. Do not count a tab handoff as a polling result.
 
 ## Return and verify
 

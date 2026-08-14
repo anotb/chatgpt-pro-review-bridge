@@ -43,7 +43,6 @@ const result = await chatgpt.reviews.askPro({
   },
   polling: {
     callTimeoutMs: 20000,
-    totalTimeoutMs: 1800000,
     maxPollCallsPerInvocation: 1
   }
 });
@@ -55,22 +54,33 @@ Submit-once behavior, pre/post Pro verification, and fallback rejection are inva
 
 When repository material is useful, use the sibling `chatgpt-pro-code-review` skill. Change reviews add `repositoryRoot`, `baseRef`, `headRef`, and `context: { mode: "review-packets", scope: "changes", ... }`. Full-repository reviews omit `baseRef` and use `scope: "repository"`; committed repositories default to commit-only evidence, while repositories before their first commit default to the index and working tree.
 
+## Timeout budgets
+
+Give a fresh file-backed AskPro call a 5–10 minute outer browser-host envelope (`node_repl timeout_ms: 300000`, or up to `600000` for a large repository). `polling.callTimeoutMs` bounds only each post-submit metadata poll. If the outer call times out, preserve the archive and tabs and resume the same archive; never reattach, replace the chat, or resend the prompt.
+
 ## Resume without duplication
 
-If the result is `in_progress`, or an attempted submission was durably recorded but completion was not captured, resume it with:
+If the result is `in_progress`, or an attempted submission was durably recorded but completion was not captured, require `resubmitAllowed === false` and resume it with:
 
 ```js
 const resumed = await chatgpt.reviews.askPro({
   resume: { archiveDirectory: result.archiveDirectory },
   polling: {
     callTimeoutMs: 20000,
-    totalTimeoutMs: 1800000,
     maxPollCallsPerInvocation: 1
   }
 });
 ```
 
-Never reattach files or resend the prompt. The archive's immutable receipt, original context, and thread checkpoint are authoritative. Keep each browser-host call longer than `callTimeoutMs` (30 seconds is sufficient for the 20-second example) and continue bounded resume calls until completion or a structured blocker. Pro can take minutes or more than an hour; `totalTimeoutMs` limits one invocation, not the repeated same-archive resume loop.
+Use durable phase, not `submitted === false` alone, to decide what a resume may do:
+
+- A validated `pre-submit-checkpoint.json` with no intent or receipt may continue to the first and only submit.
+- A submission intent means submission may already have been attempted; reconcile the visible thread but never submit again.
+- A receipt resumes only the existing response.
+
+Require `resubmitAllowed === false` in every phase. Never reattach files, manually send the archived prompt, or start a replacement review.
+
+Treat `existing_tab_handoff_completed` as a task-turn boundary. Make no more browser calls, end the turn, then resume the same archive in a later turn with a fresh browser-host invocation. Never reuse the old client or submit in the handoff turn; the phase rules above still apply.
 
 Keep each invocation on its bound canonical conversation and browser tab. Let a
 provisional `WEB:` receipt adopt a canonical conversation only after exact
@@ -79,7 +89,7 @@ one candidate uniquely selected by the archived tab ID; preserve and surface an
 ambiguity or affinity blocker instead of guessing, opening a replacement chat,
 or resubmitting.
 
-Back off between separate resume invocations for the same archive. The calling agent—including any delegated subagent—owns this cadence: wait 30 seconds after the first `in_progress` result, then 60 seconds, 2 minutes, and 4 minutes; after that, poll no more often than every 5 minutes. Count only consecutive `in_progress` results for that archive and reset when it completes or reaches a blocker. Use the host's wait or wake-up mechanism between calls. Do not immediately recurse, busy-poll, or keep one browser-host call open during the delay. `pollMs` only samples visible DOM stability inside one bounded call; it is not the cross-invocation cadence.
+After a post-submit `in_progress` result, follow this prose-only cadence between invocations: 30 seconds, 60 seconds, 2 minutes, 4 minutes, then no more than once every 5 minutes. Wait outside the SDK; do not add a timer, recurse, or busy-poll. Do not count a tab handoff as a polling result.
 
 ## Ask a follow-up in the same thread
 
@@ -104,7 +114,6 @@ const followUp = await chatgpt.reviews.askPro({
   },
   polling: {
     callTimeoutMs: 20000,
-    totalTimeoutMs: 1800000,
     maxPollCallsPerInvocation: 1
   }
 });

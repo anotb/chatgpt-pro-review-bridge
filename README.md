@@ -2,6 +2,8 @@
 
 Send a question from Codex to ChatGPT Pro and get the complete answer back in the same task.
 
+This is an unofficial public-alpha project and is not affiliated with or endorsed by OpenAI.
+
 [![Release](https://img.shields.io/github/v/release/anotb/chatgpt-pro-review-bridge?label=release)](https://github.com/anotb/chatgpt-pro-review-bridge/releases)
 [![Release checks](https://img.shields.io/github/actions/workflow/status/anotb/chatgpt-pro-review-bridge/release.yml?label=release%20checks&logo=github)](https://github.com/anotb/chatgpt-pro-review-bridge/actions/workflows/release.yml)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
@@ -26,7 +28,7 @@ The easiest option is to give this repository to Codex or another assistant that
 
 > Install the latest tagged release of https://github.com/anotb/chatgpt-pro-review-bridge as a Codex plugin, then verify that the ChatGPT Pro Review skills are available in a new task.
 
-For a manual install, add this repository as a marketplace pinned to `v0.7.11` with `codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.11`, then install it with `codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge`.
+For a manual install, add this repository as a marketplace pinned to `v0.7.12` with `codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.12`, then install it with `codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge`.
 
 Start a new Codex task after installation.
 

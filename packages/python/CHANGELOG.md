@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.12
+
+- Aligns the bundled Node runtime with exact-tab handoff and the distinction
+  between pre-submit continuation and intent/receipt no-resubmit recovery.
+- Documents a 5–10 minute outer host envelope and prose-only polling backoff.
+
 ## 0.7.11
 
 - Aligns the bundled Node runtime with canonical AskPro conversation/tab

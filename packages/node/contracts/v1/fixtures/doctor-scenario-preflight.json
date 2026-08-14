@@ -38,7 +38,7 @@
           "message": "No already-open ChatGPT tab matched the requested existing-tab target.",
           "nextCommand": "session.bootstrap",
           "remediation": [
-            "Choose an exact tab: Use the selected tab, a ChatGPT conversation URL, conversation ID, or a tab id returned by openTabs().",
+            "Choose an exact tab: Use the selected tab, a ChatGPT conversation URL, conversation ID, or the stable tab ID shown in diagnostics or the current context.",
             "Allow opening: Rerun with open-if-missing only if it is acceptable to open or create a ChatGPT tab instead of reusing an already-open one."
           ],
           "status": "blocked"

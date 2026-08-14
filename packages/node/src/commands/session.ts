@@ -1,7 +1,7 @@
 import { attachChatGPTBrowser, isChatGPTUrl, tabIdFromPage } from "../browser/attach.js";
-import { readPageState } from "../browser/page-state.js";
+import type { PageState } from "../browser/page-state.js";
 import { resultError, resultOk } from "../errors.js";
-import type { BootstrapArgs, BootstrapData, CommandResult, RuntimeEnv } from "../types.js";
+import type { BootstrapArgs, BootstrapData, CommandContext, CommandResult, RuntimeEnv } from "../types.js";
 import { contextFromPage } from "./context.js";
 
 export async function bootstrap(
@@ -9,14 +9,16 @@ export async function bootstrap(
   args: BootstrapArgs = {}
 ): Promise<CommandResult<BootstrapData>> {
   try {
-    const attached = await attachChatGPTBrowser(env, args);
+    const attached = await attachChatGPTBrowser(env, args) as Awaited<ReturnType<typeof attachChatGPTBrowser>> & {
+      state: PageState;
+    };
     env.browser = attached.browser;
     env.page = attached.page;
     if (attached.tabId !== undefined) {
       env.expectedTabId = attached.tabId;
     }
 
-    const state = await readPageState(attached.page);
+    const state = attached.state;
     const data: BootstrapData = {
       browserName: attached.browserName,
       tabId: attached.tabId ?? "unknown",
@@ -24,11 +26,16 @@ export async function bootstrap(
       loggedIn: state.signedIn
     };
 
-    const context = attached.tabId === undefined
-      ? { browserName: attached.browserName }
-      : { browserName: attached.browserName, tabId: attached.tabId };
+    const context: CommandContext = {
+      timestamp: new Date().toISOString(),
+      browserName: attached.browserName,
+      url: state.url,
+      ...(state.conversationId === undefined ? {} : { conversationId: state.conversationId }),
+      ...(state.title === undefined ? {} : { title: state.title }),
+      ...(attached.tabId === undefined ? {} : { tabId: attached.tabId })
+    };
 
-    return resultOk(data, await contextFromPage(attached.page, context));
+    return resultOk(data, context);
   } catch (error) {
     return resultError(error instanceof Error ? error : new Error(String(error)));
   }

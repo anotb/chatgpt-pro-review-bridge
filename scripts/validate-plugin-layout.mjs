@@ -213,13 +213,13 @@ async function main() {
   assert(reviewSkill.includes("../../runtime/import-chatgpt-control.mjs"), "Review skill must use its plugin runtime loader");
   assert(reviewSkill.includes("chatgpt.reviews.codeReview"), "Review skill must invoke the first-class workflow");
   assert(reviewSkill.includes("resubmitAllowed"), "Review skill must document exactly-once resumption");
-  assert(reviewSkill.includes("wait 30 seconds") && reviewSkill.includes("every 5 minutes"), "Review skill must document bounded cross-invocation polling backoff");
   const askSkill = await readFile(path.join(reviewSkillRoot, "chatgpt-pro-ask/SKILL.md"), "utf8");
   validateSkillFrontmatter(askSkill, "chatgpt-pro-ask");
-  assert(askSkill.includes("wait 30 seconds") && askSkill.includes("every 5 minutes"), "AskPro skill must document bounded cross-invocation polling backoff");
+  assert(askSkill.includes("../../runtime/import-chatgpt-control.mjs"), "Ask skill must use its plugin runtime loader");
+  assert(askSkill.includes("chatgpt.reviews.askPro"), "Ask skill must invoke the first-class multipurpose workflow");
   assert(!reviewSkill.includes("~/.codex/skills/"), "Review skill must not depend on a developer checkout");
   const reviewAgentMetadata = await readFile(path.join(reviewPluginRoot, "agents/openai.yaml"), "utf8");
-  assert(reviewAgentMetadata.includes('$chatgpt-pro-code-review'), "Review agents/openai.yaml must explicitly invoke $chatgpt-pro-code-review");
+  assert(reviewAgentMetadata.includes('$chatgpt-pro-ask'), "Review plugin agents/openai.yaml must default to the multipurpose $chatgpt-pro-ask workflow");
 
   const agentMetadata = await readFile(path.join(pluginRoot, "agents/openai.yaml"), "utf8");
   assert(agentMetadata.includes('$codex-chatgpt-control'), "agents/openai.yaml default_prompt must explicitly invoke $codex-chatgpt-control");

@@ -99,6 +99,52 @@ describe("Pro review state machine", () => {
     expect(result).toMatchObject({ ok: false, blocker: { code: "review_thread_recovery_candidate_drift", resumable: true } });
   });
 
+  it("does not restore or inspect after a recovery candidate hands off browser ownership", async () => {
+    let handedOff = false;
+    const operations: string[] = [];
+    const probe: PageLike = {
+      id: "probe",
+      url: () => {
+        operations.push(handedOff ? "url-after-handoff" : "url");
+        return "https://chatgpt.com/";
+      },
+      content: async () => {
+        operations.push(handedOff ? "content-after-handoff" : "content");
+        return '<main>New chat Search chats Chat with ChatGPT<a href="/c/candidate"><div>Candidate</div></a></main>';
+      },
+      locator: () => ({ count: async () => 0 }),
+      waitForTimeout: async () => undefined,
+      waitForEvent: async () => ({})
+    };
+    const controlled = { id: "candidate-provider", url: "https://chatgpt.com/c/candidate", title: "Candidate" };
+    const browser = {
+      name: "chrome",
+      tabs: {
+        list: async () => {
+          operations.push(handedOff ? "list-after-handoff" : "list");
+          return [controlled];
+        },
+        finalize: async () => {
+          operations.push("finalize");
+          handedOff = true;
+        }
+      }
+    } as unknown as BrowserLike;
+
+    const result = await defaultReviewWorkflowPort({ browser, page: probe, expectedTabId: "probe" }).recoverThread(
+      "Candidate",
+      "Exact candidate prompt",
+      { url: "https://chatgpt.com/c/candidate", conversationId: "candidate", tabId: "candidate-provider" }
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      blocker: { code: "existing_tab_handoff_completed", resumable: true }
+    });
+    expect(operations).toContain("finalize");
+    expect(operations.filter(operation => operation.endsWith("after-handoff"))).toEqual([]);
+  });
+
   it("blocks duplicate canonical recovery tabs resumably when no archived tab discriminates them", async () => {
     const created: string[] = [];
     const probe = mutableChatPage("probe", "https://chatgpt.com/", {
@@ -296,6 +342,315 @@ describe("Pro review state machine", () => {
     expect(targets).toEqual([{ tabId: "stored-tab" }]);
   });
 
+  it("prefers a validated canonical checkpoint URL and tab over the older submission route", async () => {
+    const repo = await fixtureRepository();
+    const receiptUrl = "https://chatgpt.com/c/review-thread";
+    const checkpointUrl = "https://chatgpt.com/c/review-thread?model=pro";
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      newThread: async () => ({
+        ...success({ url: receiptUrl, conversationId: "review-thread" }),
+        context: { ...context(receiptUrl), conversationId: "review-thread", tabId: "receipt-tab" }
+      }),
+      pageState: async () => ({
+        url: receiptUrl,
+        conversationId: "review-thread",
+        tabId: "receipt-tab",
+        visibleText: "Chat history",
+        signedIn: true
+      }),
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    const checkpointPath = join(first.archiveDirectory!, "thread-checkpoint.json");
+    const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+    checkpoint.current = { url: checkpointUrl, id: "review-thread", tabId: "checkpoint-tab" };
+    await writeFile(checkpointPath, `${JSON.stringify(checkpoint, null, 2)}\n`);
+    const prompt = await readFile(join(first.archiveDirectory!, "prompt.md"), "utf8");
+    const bootstrapTargets: unknown[] = [];
+    const openTargets: unknown[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort([], {
+      bootstrapRecovery: async target => {
+        bootstrapTargets.push(target);
+        return {
+          ...success({}),
+          context: { ...context(checkpointUrl), conversationId: "review-thread", tabId: "checkpoint-tab" }
+        };
+      },
+      openThread: async target => {
+        openTargets.push(target);
+        return {
+          ...success({ url: target.url!, conversationId: "review-thread" }),
+          context: { ...context(target.url), conversationId: "review-thread", tabId: "checkpoint-tab" }
+        };
+      },
+      pageState: async () => ({
+        url: checkpointUrl,
+        conversationId: "review-thread",
+        tabId: "checkpoint-tab",
+        visibleText: "Chat history",
+        signedIn: true
+      }),
+      readLatestUser: async () => success({ role: "user", text: prompt, format: "normalized_text" })
+    }));
+
+    expect(resumed.status).toBe("completed");
+    expect(bootstrapTargets).toEqual([{ tabId: "checkpoint-tab" }]);
+    expect(openTargets).toEqual([{ url: checkpointUrl, conversationId: "review-thread" }]);
+  });
+
+  it.each(["existing_tab_unresponsive"] as const)(
+    "keeps %s resumable without opening, falling back, or resubmitting",
+    async code => {
+      const repo = await fixtureRepository();
+      const url = "https://chatgpt.com/c/review-thread";
+      const first = await runCodeReviewWithPort({
+        repositoryRoot: repo,
+        baseRef: "HEAD",
+        polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+      }, makePort([], {
+        newThread: async () => ({
+          ...success({ url, conversationId: "review-thread" }),
+          context: { ...context(url), conversationId: "review-thread", tabId: "archived-tab" }
+        }),
+        pageState: async () => ({
+          url,
+          conversationId: "review-thread",
+          tabId: "archived-tab",
+          visibleText: "Chat history",
+          signedIn: true
+        }),
+        waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+      }));
+      const calls: string[] = [];
+      const resumed = await runCodeReviewWithPort({
+        repositoryRoot: repo,
+        baseRef: "HEAD",
+        resume: { archiveDirectory: first.archiveDirectory! },
+        safeguards: { restorePreviousConfiguration: true }
+      }, makePort(calls, {
+        bootstrapRecovery: async () => ({
+          ok: false,
+          status: "blocked",
+          warnings: [],
+          blocker: { kind: "selector_drift", code, message: "Exact tab ownership must be recovered.", resumable: false },
+          context: context(url)
+        })
+      }));
+
+      expect(resumed).toMatchObject({ status: "blocked", submitted: true, blocker: { code, resumable: true } });
+      expect(calls).toEqual(["bootstrapRecovery"]);
+      expect(calls).not.toContain("restoreConfiguration");
+    }
+  );
+
+  it("resumes a fresh explicit-thread handoff from its pre-submit checkpoint and submits once", async () => {
+    const repo = await fixtureRepository();
+    const url = "https://chatgpt.com/c/review-thread";
+    const firstCalls: string[] = [];
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      thread: { url, id: "review-thread" }
+    }, makePort(firstCalls, {
+      bootstrap: async () => ({
+        ok: false,
+        status: "blocked",
+        warnings: [],
+        blocker: { kind: "not_found", code: "existing_tab_handoff_completed", message: "Continue from a fresh browser host.", resumable: true },
+        context: context(url)
+      })
+    }));
+
+    expect(first).toMatchObject({ status: "in_progress", submitted: false, resubmitAllowed: false, nextAction: "poll_same_thread" });
+    expect(firstCalls).toEqual(["bootstrap"]);
+    expect(JSON.parse(await readFile(join(first.archiveDirectory!, "pre-submit-checkpoint.json"), "utf8"))).toMatchObject({
+      phase: "preflight_browser_handoff",
+      target: { mode: "existing", url, id: "review-thread" }
+    });
+    await expect(readdir(join(first.archiveDirectory!, ".workflow.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+
+    const resumeCalls: string[] = [];
+    const bootstrapTargets: unknown[] = [];
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(resumeCalls, {
+      bootstrap: async target => {
+        bootstrapTargets.push(target);
+        return success({});
+      }
+    }));
+
+    expect(resumed.status).toBe("completed");
+    expect(bootstrapTargets).toEqual([{ url, conversationId: "review-thread" }]);
+    expect(resumeCalls.filter(call => call === "submit")).toHaveLength(1);
+    await expect(readFile(join(first.archiveDirectory!, "pre-submit-checkpoint.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(JSON.parse(await readFile(join(first.archiveDirectory!, "submission.json"), "utf8"))).toMatchObject({ submitted: true, resubmitAllowed: false });
+    await expect(readdir(join(first.archiveDirectory!, ".workflow.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("deletes a pre-submit checkpoint after a non-handoff bootstrap failure", async () => {
+    const repo = await fixtureRepository();
+    const result = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      thread: { url: "https://chatgpt.com/c/review-thread", id: "review-thread" }
+    }, makePort([], {
+      bootstrap: async () => ({
+        ok: false,
+        status: "blocked",
+        warnings: [],
+        blocker: { kind: "login_required", code: "login_required", message: "Sign in to continue." },
+        context: context()
+      })
+    }));
+
+    expect(result).toMatchObject({ status: "blocked", blocker: { code: "login_required" } });
+    await expect(readFile(join(result.archiveDirectory!, "pre-submit-checkpoint.json"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects an external initial thread URL before preparing context or opening a browser", async () => {
+    const calls: string[] = [];
+    const result = await runCodeReviewWithPort({
+      request: { additionalInstructions: "Review this existing thread." },
+      thread: { url: "https://example.invalid/c/review-thread", id: "review-thread" }
+    }, makePort(calls));
+
+    expect(result).toMatchObject({ status: "blocked", blocker: { code: "thread_target_invalid" } });
+    expect(result.archiveDirectory).toBeUndefined();
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects an external existing-thread URL persisted in a pre-submit handoff", async () => {
+    const repo = await fixtureRepository();
+    const url = "https://chatgpt.com/c/review-thread";
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      thread: { url, id: "review-thread" }
+    }, makePort([], {
+      bootstrap: async () => ({
+        ok: false,
+        status: "blocked",
+        warnings: [],
+        blocker: { kind: "not_found", code: "existing_tab_handoff_completed", message: "Continue from a fresh browser host.", resumable: true },
+        context: context(url)
+      })
+    }));
+    const checkpointPath = join(first.archiveDirectory!, "pre-submit-checkpoint.json");
+    const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+    checkpoint.target.url = "https://example.invalid/c/review-thread";
+    await writeFile(checkpointPath, `${JSON.stringify(checkpoint, null, 2)}\n`);
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls));
+
+    expect(resumed).toMatchObject({ status: "blocked", blocker: { code: "resume_pre_submit_checkpoint_invalid" } });
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects an external caller resume URL before reading its archive", async () => {
+    const archiveDirectory = await mkdtemp(join(tmpdir(), "chatgpt-pro-external-resume-"));
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      resume: {
+        archiveDirectory,
+        threadUrl: "https://example.invalid/c/review-thread",
+        conversationId: "review-thread"
+      }
+    }, makePort(calls));
+
+    expect(resumed).toMatchObject({ status: "blocked", blocker: { code: "resume_thread_mismatch" } });
+    expect(calls).toEqual([]);
+    await rm(archiveDirectory, { recursive: true, force: true });
+  });
+
+  it("continues an intent-only WEB handoff on the canonical same tab without resubmitting", async () => {
+    const repo = await fixtureRepository();
+    const provisionalUrl = "https://chatgpt.com/c/WEB:handoff-live-sequence";
+    const canonicalUrl = "https://chatgpt.com/c/canonical-live-sequence";
+    let submittedPrompt = "";
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      bootstrap: async () => ({ ...success({}), context: { ...context(), tabId: "live-tab" } }),
+      newThread: async () => ({ ...success({ url: provisionalUrl, conversationId: "WEB:handoff-live-sequence" }), context: { ...context(provisionalUrl), conversationId: "WEB:handoff-live-sequence", tabId: "live-tab" } }),
+      submit: async prompt => {
+        submittedPrompt = prompt;
+        return { ...success({ submitted: true, userTurnText: prompt, turnCount: 1, submissionState: "submitted_generating" as const }), context: { ...context(provisionalUrl), conversationId: "WEB:handoff-live-sequence", tabId: "live-tab" } };
+      },
+      readLatestUser: async () => success({ role: "user", text: submittedPrompt, format: "normalized_text" }),
+      pageState: async () => ({ url: provisionalUrl, conversationId: "WEB:handoff-live-sequence", tabId: "live-tab", visibleText: "Stop generating", signedIn: true }),
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    await rm(join(first.archiveDirectory!, "submission.json"));
+    const intentPath = join(first.archiveDirectory!, "submission-intent.json");
+    const intentBefore = await readFile(intentPath, "utf8");
+
+    const handoffCalls: string[] = [];
+    const handedOff = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(handoffCalls, {
+      bootstrapRecovery: async () => ({
+        ok: false,
+        status: "blocked",
+        warnings: [],
+        blocker: { kind: "not_found", code: "existing_tab_handoff_completed", message: "Continue from a fresh browser host.", resumable: true },
+        context: { ...context(provisionalUrl), tabId: "live-tab" }
+      })
+    }));
+    expect(handedOff).toMatchObject({ status: "in_progress", submitted: false, nextAction: "poll_same_thread" });
+    expect(handoffCalls).toEqual(["bootstrapRecovery"]);
+    expect(await readFile(intentPath, "utf8")).toBe(intentBefore);
+    await expect(readdir(join(first.archiveDirectory!, ".workflow.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+
+    const prompt = await readFile(join(first.archiveDirectory!, "prompt.md"), "utf8");
+    const resumeCalls: string[] = [];
+    const completed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(resumeCalls, {
+      bootstrapRecovery: async target => {
+        expect(target).toEqual({ tabId: "live-tab" });
+        return { ...success({}), context: { ...context(canonicalUrl), conversationId: "canonical-live-sequence", tabId: "live-tab" } };
+      },
+      pageState: async () => ({ url: canonicalUrl, conversationId: "canonical-live-sequence", tabId: "live-tab", visibleText: "Chat history", signedIn: true }),
+      readLatestUser: async () => ({ ...success({ role: "user" as const, text: prompt, format: "normalized_text" as const }), context: { ...context(canonicalUrl), conversationId: "canonical-live-sequence", tabId: "live-tab" } }),
+      messageStatus: async () => ({ ...success({ turnCount: 1, assistantTurnCount: 1, completionState: "complete" as const, generationActive: false, generationSignals: [] }), context: { ...context(canonicalUrl), conversationId: "canonical-live-sequence", tabId: "live-tab" } }),
+      waitMetadata: async () => ({ ...success({ complete: true, assistantTurnCount: 1, elapsedMs: 1, responseContent: "metadata" as const }), context: { ...context(canonicalUrl), conversationId: "canonical-live-sequence", tabId: "live-tab" } }),
+      readFullMarkdown: async () => ({ ...success({ role: "assistant" as const, text: "# Complete live review", markdown: "# Complete live review", format: "markdown" as const }), context: { ...context(canonicalUrl), conversationId: "canonical-live-sequence", tabId: "live-tab" } })
+    }));
+
+    expect(completed).toMatchObject({ status: "completed_with_warnings", thread: { url: canonicalUrl, id: "canonical-live-sequence" } });
+    expect(resumeCalls).not.toContain("attach");
+    expect(resumeCalls).not.toContain("compose");
+    expect(resumeCalls).not.toContain("submit");
+    expect(await readFile(join(first.archiveDirectory!, "response.md"), "utf8")).toBe("# Complete live review");
+    expect(JSON.parse(await readFile(join(first.archiveDirectory!, "submission-confirmation.json"), "utf8"))).toMatchObject({ state: "confirmed", thread: { url: canonicalUrl, id: "canonical-live-sequence", tabId: "live-tab" } });
+    expect(JSON.parse(await readFile(join(first.archiveDirectory!, "thread-checkpoint.json"), "utf8"))).toMatchObject({ current: { url: canonicalUrl, id: "canonical-live-sequence", tabId: "live-tab" } });
+    await expect(readdir(join(first.archiveDirectory!, ".workflow.lock"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("does not repurpose a reused archived tab that now shows another conversation", async () => {
     const repo = await fixtureRepository();
     const url = "https://chatgpt.com/c/review-thread";
@@ -319,7 +674,6 @@ describe("Pro review state machine", () => {
     }));
     const prompt = await readFile(join(first.archiveDirectory!, "prompt.md"), "utf8");
     const targets: unknown[] = [];
-    let pageReads = 0;
     const resumed = await runCodeReviewWithPort({
       repositoryRoot: repo,
       baseRef: "HEAD",
@@ -343,17 +697,13 @@ describe("Pro review state machine", () => {
           context: { ...context(url), conversationId: "review-thread", tabId: "canonical-tab" }
         };
       },
-      pageState: async () => {
-        pageReads += 1;
-        const reused = pageReads === 1;
-        return {
-          url: reused ? "https://chatgpt.com/c/reused" : url,
-          conversationId: reused ? "reused" : "review-thread",
-          tabId: reused ? "stored-tab" : "canonical-tab",
-          visibleText: "Chat history",
-          signedIn: true
-        };
-      },
+      pageState: async () => ({
+        url,
+        conversationId: "review-thread",
+        tabId: "canonical-tab",
+        visibleText: "Chat history",
+        signedIn: true
+      }),
       readLatestUser: async () => success({ role: "user", text: prompt, format: "normalized_text" })
     }));
 
@@ -846,6 +1196,31 @@ describe("Pro review state machine", () => {
     expect(resumed.status).toBe("blocked");
     expect(resumed.blocker?.code).toBe("resume_submission_integrity_mismatch");
     expect(calls).not.toContain("bootstrap");
+  });
+
+  it("rejects an external archived submission thread URL before browser resume", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    const submissionPath = join(first.archiveDirectory!, "submission.json");
+    const submission = JSON.parse(await readFile(submissionPath, "utf8"));
+    submission.thread.url = "https://example.invalid/c/review-thread";
+    await writeFile(submissionPath, `${JSON.stringify(submission, null, 2)}\n`);
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls));
+
+    expect(resumed).toMatchObject({ status: "blocked", blocker: { code: "resume_submission_unverified" } });
+    expect(calls).toEqual([]);
   });
 
   it("rejects a caller-supplied conversation id that disagrees with the archived receipt", async () => {
@@ -1622,6 +1997,81 @@ describe("Pro review state machine", () => {
     });
   });
 
+  it("does not use ordinary bootstrap when an archived provisional tab is no longer open", async () => {
+    const repo = await fixtureRepository();
+    const provisionalUrl = "https://chatgpt.com/c/WEB:missing-archived-tab";
+    let submittedPrompt = "";
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      bootstrap: async () => ({ ...success({}), context: { ...context(), tabId: "missing-tab" } }),
+      newThread: async () => ({
+        ...success({ url: provisionalUrl, conversationId: "WEB:missing-archived-tab" }),
+        context: { ...context(provisionalUrl), conversationId: "WEB:missing-archived-tab", tabId: "missing-tab" }
+      }),
+      submit: async prompt => {
+        submittedPrompt = prompt;
+        return {
+          ...success({ submitted: true, userTurnText: prompt, turnCount: 1, submissionState: "submitted_generating" }),
+          context: { ...context(provisionalUrl), conversationId: "WEB:missing-archived-tab", tabId: "missing-tab" }
+        };
+      },
+      readLatestUser: async () => success({ role: "user", text: submittedPrompt, format: "normalized_text" }),
+      pageState: async () => ({
+        url: provisionalUrl,
+        conversationId: "WEB:missing-archived-tab",
+        tabId: "missing-tab",
+        visibleText: "Stop generating",
+        signedIn: true
+      }),
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    await rm(join(first.archiveDirectory!, "submission.json"));
+    const intentPath = join(first.archiveDirectory!, "submission-intent.json");
+    const intentBefore = await readFile(intentPath, "utf8");
+    const recoveryTargets: unknown[] = [];
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls, {
+      bootstrapRecovery: async target => {
+        recoveryTargets.push(target);
+        return {
+          ok: false,
+          status: "blocked",
+          warnings: [],
+          blocker: {
+            kind: "not_found",
+            code: "existing_tab_not_found",
+            message: "No already-open ChatGPT tab matched the recovery target.",
+            resumable: false
+          },
+          context: context()
+        };
+      }
+    }));
+
+    expect(resumed).toMatchObject({
+      status: "blocked",
+      submitted: false,
+      resubmitAllowed: false,
+      blocker: { code: "existing_tab_not_found", resumable: true }
+    });
+    expect(recoveryTargets).toEqual([{ tabId: "missing-tab" }, undefined]);
+    expect(calls).toEqual(["bootstrapRecovery", "bootstrapRecovery"]);
+    expect(calls).not.toContain("bootstrap");
+    expect(calls).not.toContain("openChat");
+    expect(calls).not.toContain("newThread");
+    expect(calls).not.toContain("recoverThread");
+    expect(calls).not.toContain("submit");
+    expect(await readFile(intentPath, "utf8")).toBe(intentBefore);
+  });
+
   it("rejects a mutated checkpoint before opening a browser", async () => {
     const repo = await fixtureRepository();
     const first = await runCodeReviewWithPort({
@@ -1646,6 +2096,32 @@ describe("Pro review state machine", () => {
     expect(resumed.status).toBe("blocked");
     expect(resumed.blocker?.code).toBe("resume_checkpoint_thread_mismatch");
     expect(calls).not.toContain("bootstrap");
+  });
+
+  it("rejects an external checkpoint URL even when its declared conversation ID matches", async () => {
+    const repo = await fixtureRepository();
+    const first = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      polling: { callTimeoutMs: 10, totalTimeoutMs: 10, stableMs: 1, pollMs: 1 }
+    }, makePort([], {
+      waitMetadata: async () => failure("timeout", { complete: false, assistantTurnCount: 0, elapsedMs: 10, responseContent: "metadata" })
+    }));
+    const checkpointPath = join(first.archiveDirectory!, "thread-checkpoint.json");
+    const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+    checkpoint.current = { url: "https://example.invalid/c/review-thread", id: "review-thread", tabId: "stored-tab" };
+    await writeFile(checkpointPath, `${JSON.stringify(checkpoint, null, 2)}\n`);
+    const calls: string[] = [];
+
+    const resumed = await runCodeReviewWithPort({
+      repositoryRoot: repo,
+      baseRef: "HEAD",
+      resume: { archiveDirectory: first.archiveDirectory! }
+    }, makePort(calls));
+
+    expect(resumed).toMatchObject({ status: "blocked", blocker: { code: "resume_checkpoint_invalid" } });
+    expect(calls).not.toContain("bootstrap");
+    expect(calls).not.toContain("bootstrapRecovery");
   });
 
   it("rejects a malformed archived recovery tab id before opening a browser", async () => {

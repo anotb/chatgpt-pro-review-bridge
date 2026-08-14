@@ -1,5 +1,5 @@
 interface:
   display_name: "ChatGPT Pro Review Bridge"
-  short_description: "Verified visible-Pro repository review workflow"
+  short_description: "Ask visible ChatGPT Pro with optional repository context"
   brand_color: "#0B5FFF"
-  default_prompt: "Use $chatgpt-pro-code-review to review this branch against main and return the complete verified Pro response."
+  default_prompt: "Use $chatgpt-pro-ask to ask visible ChatGPT Pro for help with this task, adding repository context only when it is useful, and return the complete verified response."

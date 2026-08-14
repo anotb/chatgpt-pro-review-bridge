@@ -226,48 +226,6 @@ describe("existing Chrome tab bootstrap", () => {
     expect(result.data?.loggedIn).toBe(false);
   });
 
-  it("does not hang when a claimed user tab exposes a stalled DOM evaluator", async () => {
-    const browser: BrowserLike = {
-      name: "chrome",
-      user: {
-        openTabs: async () => [
-          { id: "image-tab", url: "https://chatgpt.com/c/abc-123", title: "Image Request" }
-        ],
-        claimTab: async () => ({
-          id: "image-tab",
-          url: () => "https://chatgpt.com/c/abc-123",
-          title: async () => "Image Request",
-          playwright: {
-            evaluate: async () => new Promise(() => {})
-          }
-        })
-      }
-    };
-
-    const result = await Promise.race([
-      bootstrap({ browser }, {
-        existingTab: {
-          target: { type: "conversationId", conversationId: "abc-123" },
-          ifMissing: "block"
-        }
-      }),
-      new Promise<"hung">(resolve => setTimeout(() => resolve("hung"), 3500))
-    ]);
-
-    expect(result).not.toBe("hung");
-    expect(result).toMatchObject({
-      ok: true,
-      data: {
-        tabId: "image-tab",
-        url: "https://chatgpt.com/c/abc-123"
-      },
-      context: {
-        conversationId: "abc-123",
-        tabId: "image-tab"
-      }
-    });
-  });
-
   it("does not let a stale cached page bypass an explicit existing-tab claim", async () => {
     const claimed: unknown[] = [];
     const stalePage = {
@@ -311,7 +269,12 @@ describe("existing Chrome tab bootstrap", () => {
       name: "chrome",
       user: {
         openTabs: async () => [
-          { id: "other", url: "https://chatgpt.com/c/other", title: "Other Chat" }
+          {
+            id: "opaque-other",
+            providerTabId: "stable-other",
+            url: "https://chatgpt.com/c/other",
+            title: "Other Chat"
+          }
         ],
         claimTab: async tab => {
           claimed.push(tab);
@@ -343,13 +306,16 @@ describe("existing Chrome tab bootstrap", () => {
       mismatchReason: "conversation_id_mismatch",
       candidateTabs: [
         {
-          id: "other",
+          id: "stable-other",
           url: "https://chatgpt.com/c/other",
           title: "Other Chat",
           conversationId: "other"
         }
       ]
     });
+    expect(result.blocker?.candidates).toEqual([
+      { label: "tab stable-other - Other Chat - https://chatgpt.com/c/other" }
+    ]);
     expect(claimed).toEqual([]);
     expect(JSON.stringify(result.blocker?.diagnostics)).not.toContain("say hi");
   });
@@ -474,6 +440,239 @@ describe("existing Chrome tab bootstrap", () => {
         }
       ]
     });
+  });
+
+  it("hands off an exact controlled tab from list metadata and keeps every controlled tab open", async () => {
+    const operations: string[] = [];
+    const controlled = [
+      { id: "target-provider", url: "https://chatgpt.com/c/abc-123", title: "Review" },
+      { id: "other-provider", url: "https://chatgpt.com/c/other", title: "Other" }
+    ];
+    const browser = {
+      name: "chrome",
+      tabs: {
+        list: async () => {
+          operations.push("list");
+          return controlled;
+        },
+        get: async () => {
+          operations.push("get");
+          throw new Error("get must not run after list succeeds");
+        },
+        finalize: async (options: { keep?: unknown[] }) => {
+          operations.push("finalize");
+          expect(options.keep).toEqual(controlled.map(tab => ({ tab, status: "handoff" })));
+        }
+      }
+    } as unknown as BrowserLike;
+
+    const result = await bootstrap({ browser }, {
+      existingTab: { target: { type: "tabId", tabId: "target-provider" }, ifMissing: "open" },
+      timeoutMs: 100
+    });
+
+    expect(result.blocker).toMatchObject({ code: "existing_tab_handoff_completed", resumable: true });
+    expect(operations).toEqual(["list", "finalize"]);
+  });
+
+  it.each([
+    { type: "conversationId" as const, conversationId: "abc-123" },
+    { type: "url" as const, url: "https://chatgpt.com/c/abc-123" }
+  ])("hands off exact $type metadata without opening a duplicate", async target => {
+    const operations: string[] = [];
+    const browser = {
+      name: "chrome",
+      tabs: {
+        list: async () => [{ id: "provider", url: "https://chatgpt.com/c/abc-123" }],
+        finalize: async () => { operations.push("finalize"); },
+        create: async () => {
+          operations.push("create");
+          return fakeChatGPTPage("new", "https://chatgpt.com/", "ChatGPT");
+        }
+      }
+    } as unknown as BrowserLike;
+
+    const result = await bootstrap({ browser }, { existingTab: { target, ifMissing: "open" } });
+
+    expect(result.blocker).toMatchObject({ code: "existing_tab_handoff_completed", resumable: true });
+    expect(operations).toEqual(["finalize"]);
+  });
+
+  it("matches a released tab by provider ID and preserves that stable ID after claim", async () => {
+    const claimed: unknown[] = [];
+    const openTab = {
+      id: "fresh-opaque-handle",
+      providerTabId: "target-provider",
+      url: "https://chatgpt.com/c/abc-123",
+      title: "Review"
+    };
+    const browser: BrowserLike = {
+      name: "chrome",
+      user: {
+        openTabs: async () => [openTab],
+        claimTab: async tab => {
+          claimed.push(tab);
+          return fakeChatGPTPage("opaque-control-id", openTab.url, openTab.title);
+        }
+      },
+      tabs: { list: async () => [] }
+    };
+
+    const result = await bootstrap({ browser }, {
+      existingTab: { target: { type: "tabId", tabId: "target-provider" }, ifMissing: "block" }
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.context.tabId).toBe("target-provider");
+    expect(claimed).toEqual([openTab]);
+  });
+
+  it("does not treat an opaque handle or wrong-origin metadata as the requested stable tab", async () => {
+    const claimed: unknown[] = [];
+    const created: string[] = [];
+    const browser = {
+      name: "chrome",
+      user: {
+        openTabs: async () => [{
+          id: "target-provider",
+          providerTabId: "different-provider",
+          url: "https://chatgpt.com/c/wrong"
+        }],
+        claimTab: async (tab: unknown) => { claimed.push(tab); return fakeChatGPTPage("wrong", "https://chatgpt.com/c/wrong", "Wrong"); }
+      },
+      tabs: {
+        list: async () => [{ id: "target-provider", url: "https://example.com/" }],
+        finalize: async () => { throw new Error("wrong-origin metadata must not be handed off"); },
+        create: async (url: string) => { created.push(url); return fakeChatGPTPage("fresh", url, "ChatGPT"); }
+      }
+    } as unknown as BrowserLike;
+
+    const result = await bootstrap({ browser }, {
+      existingTab: { target: { type: "tabId", tabId: "target-provider" }, ifMissing: "open" }
+    });
+
+    expect(result.ok).toBe(true);
+    expect(claimed).toEqual([]);
+    expect(created).toEqual(["https://chatgpt.com/"]);
+  });
+
+  it("never hydrates generic list metadata through get", async () => {
+    const operations: string[] = [];
+    const browser = {
+      name: "chrome",
+      user: {
+        openTabs: async () => [{ id: "fresh", url: "https://chatgpt.com/c/fresh" }],
+        claimTab: async () => { operations.push("claim"); return fakeChatGPTPage("fresh", "https://chatgpt.com/c/fresh", "Fresh"); }
+      },
+      tabs: {
+        list: async () => [{ id: "stale", url: "https://chatgpt.com/c/stale" }],
+        get: async () => { operations.push("get"); return new Promise<PageLike>(() => {}); }
+      }
+    } as unknown as BrowserLike;
+
+    const result = await bootstrap({ browser }, { preferExistingTab: true });
+
+    expect(result.ok).toBe(true);
+    expect(operations).toEqual(["claim"]);
+  });
+
+  it("does not apply the exact-resume timeout to ordinary bootstrap", async () => {
+    const page = fakeChatGPTPage("ordinary", "https://chatgpt.com/c/ordinary", "Ordinary");
+    const browser: BrowserLike = {
+      name: "chrome",
+      tabs: {
+        list: async () => {
+          await new Promise(resolve => setTimeout(resolve, 20));
+          return [page];
+        }
+      }
+    };
+
+    const result = await bootstrap({ browser }, { preferExistingTab: true, timeoutMs: 1 });
+
+    expect(result.ok).toBe(true);
+    expect(result.context.tabId).toBe("ordinary");
+  });
+
+  it("does not start later state probes after an exact tab URL times out", async () => {
+    const calls: string[] = [];
+    const claimed = {
+      id: "claimed",
+      url: async () => {
+        calls.push("url");
+        await new Promise(resolve => setTimeout(resolve, 40));
+        return "https://chatgpt.com/c/exact";
+      },
+      title: async () => { calls.push("title"); return "Exact"; },
+      evaluate: async () => { calls.push("evaluate"); return ""; },
+      content: async () => { calls.push("content"); return ""; }
+    } as unknown as PageLike;
+    const browser: BrowserLike = {
+      name: "chrome",
+      user: {
+        openTabs: async () => [{ id: "exact", url: "https://chatgpt.com/c/exact" }],
+        claimTab: async () => claimed
+      }
+    };
+
+    const result = await bootstrap({ browser }, {
+      existingTab: { target: { type: "conversationId", conversationId: "exact" }, ifMissing: "block" },
+      timeoutMs: 10
+    });
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    expect(result.blocker).toMatchObject({ code: "existing_tab_unresponsive", resumable: true });
+    expect(calls).toEqual(["url"]);
+  });
+
+  it("does not fall through to content after an exact state evaluator stalls", async () => {
+    const calls: string[] = [];
+    const claimed: PageLike = {
+      id: "exact",
+      url: () => "https://chatgpt.com/c/exact",
+      title: async () => { calls.push("title"); return "Exact"; },
+      evaluate: async () => { calls.push("evaluate"); return new Promise(() => {}); },
+      content: async () => { calls.push("content"); return ""; }
+    };
+    const browser: BrowserLike = {
+      name: "chrome",
+      user: {
+        openTabs: async () => [{ id: "exact", url: "https://chatgpt.com/c/exact" }],
+        claimTab: async () => claimed
+      }
+    };
+
+    const result = await bootstrap({ browser }, {
+      existingTab: { target: { type: "conversationId", conversationId: "exact" }, ifMissing: "block" },
+      timeoutMs: 2_000
+    });
+
+    expect(result.blocker).toMatchObject({ code: "existing_tab_unresponsive", resumable: true });
+    expect(calls).toEqual(["evaluate"]);
+  });
+
+  it("stops an exact resume when controlled-tab listing does not respond", async () => {
+    const operations: string[] = [];
+    const browser: BrowserLike = {
+      name: "chrome",
+      user: {
+        openTabs: async () => { operations.push("openTabs"); return []; },
+        claimTab: async () => fakeChatGPTPage("unused", "https://chatgpt.com/", "ChatGPT")
+      },
+      tabs: {
+        list: async () => new Promise<PageLike[]>(() => {}),
+        get: async () => { operations.push("get"); return fakeChatGPTPage("unused", "https://chatgpt.com/", "ChatGPT"); },
+        create: async () => { operations.push("create"); return fakeChatGPTPage("unused", "https://chatgpt.com/", "ChatGPT"); }
+      }
+    };
+
+    const result = await bootstrap({ browser }, {
+      existingTab: { target: { type: "tabId", tabId: "target" }, ifMissing: "open" },
+      timeoutMs: 20
+    });
+
+    expect(result.blocker).toMatchObject({ code: "existing_tab_unresponsive", resumable: true });
+    expect(operations).toEqual([]);
   });
 });
 

@@ -12,7 +12,7 @@ The bridge lets any Codex host invoke the same installed workflow while a caller
 ## Install a pinned release
 
 ```bash
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.11
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.12
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -46,7 +46,7 @@ remove the installed plugin and marketplace snapshot, then add the new tag:
 ```bash
 codex plugin remove chatgpt-pro-review@chatgpt-pro-review-bridge
 codex plugin marketplace remove chatgpt-pro-review-bridge
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.11
+codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref v0.7.12
 codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
 ```
 
@@ -89,7 +89,6 @@ const result = await chatgpt.reviews.askPro({
   },
   polling: {
     callTimeoutMs: 20000,
-    totalTimeoutMs: 1800000,
     maxPollCallsPerInvocation: 1
   }
 });
@@ -102,7 +101,13 @@ That form sends the caller's question as the visible user turn, performs no Git 
 
 When `repositoryRoot` is present and `baseRef` is omitted, repository scope is inferred. It uses Git's empty tree internally as a diff baseline without requiring callers to invent an unattached commit. A committed repository defaults to a commit-only snapshot, so local edits and untracked filenames are not uploaded accidentally. Set `includeWorkingTree: true` when the caller wants that overlay. A repository with no commits is supported directly and defaults to including its index and working tree.
 
-One invocation performs one bounded poll by default. If it returns `in_progress`, call the workflow again with `resume: { archiveDirectory }`; never resend the prompt. The calling agent waits 30 seconds before the first resume, then 60 seconds, 2 minutes, and 4 minutes, and thereafter resumes no more often than every 5 minutes. The delay happens outside browser-host calls. Pro can run for minutes or more than an hour, and `totalTimeoutMs` limits one invocation rather than the repeated resume loop. The immutable submission receipt holds the canonical `/c/<conversation-id>` URL and conversation ID. Optional caller-supplied `threadUrl` or `conversationId` values are treated only as mismatch-detecting cross-checks.
+One invocation performs one bounded poll by default. If it returns `in_progress`, resume the same archive without manually sending its prompt. Give a fresh file-backed browser-host call a separate 5–10 minute outer envelope; `callTimeoutMs` controls only each post-submit metadata poll.
+
+The calling agent owns the post-submit cadence in prose: 30 seconds, 60 seconds, 2 minutes, 4 minutes, then no more than once every 5 minutes while generation continues. Wait outside browser-host calls; the SDK imposes no sleep. A tab handoff does not count as a polling result and needs no artificial delay.
+
+`existing_tab_handoff_completed` is a task-turn boundary: handoff must be the final browser action. End the turn, then resume the same archive from a later turn with a fresh browser-host invocation; never reuse the old client or submit in the handoff turn.
+
+Use durable archive phase—not `submitted: false` alone—to decide what a resume may do. A validated `pre-submit-checkpoint.json` with no intent or receipt may continue to the first and only submit. A `submission-intent.json` means submission may already have been attempted, so reconcile but never submit again; a receipt only polls and captures the existing response. Every phase keeps `resubmitAllowed: false`. The receipt holds the canonical conversation URL and ID; caller-supplied values are mismatch-only cross-checks.
 
 Within each invocation, the workflow remains bound to the same visible browser
 tab and canonical conversation before attachment and submission and during

@@ -4550,17 +4550,40 @@ var CHATGPT_HOME = "https://chatgpt.com/";
 var CHATGPT_HOSTS = /* @__PURE__ */ new Set(["chatgpt.com", "www.chatgpt.com", "chat.openai.com"]);
 var MAX_EXISTING_TAB_DIAGNOSTIC_CANDIDATES = 10;
 var MAX_EXISTING_TAB_DIAGNOSTIC_FIELD_LENGTH = 240;
+var EXACT_TARGET_TIMEOUT_MS = 12e3;
+var ExactTargetTimeoutError = class extends Error {
+  constructor(operation) {
+    super(`Timed out while ${operation}.`);
+    this.operation = operation;
+    this.name = "ExactTargetTimeoutError";
+  }
+  operation;
+};
 async function attachChatGPTBrowser(env, args = {}) {
   const browser = await getBrowser(env);
-  const page = await getOrCreateChatGPTPage(browser, env, args);
-  const state = await readPageState(page);
+  const exactTimeoutMs = exactTargetTimeoutMs(args);
+  const page = await getOrCreateChatGPTPage(browser, env, args, exactTimeoutMs);
+  let state;
+  try {
+    if (exactTimeoutMs === void 0) {
+      state = await readPageState(page);
+    } else {
+      const guarded = exactStatePage(page, exactTimeoutMs);
+      state = await readPageState(guarded.page);
+      if (guarded.stopped()) throw new ExactTargetTimeoutError("reading the requested ChatGPT tab");
+    }
+  } catch (error) {
+    if (error instanceof ExactTargetTimeoutError) throw existingTabUnresponsiveError(error.operation);
+    throw error;
+  }
   if (state.blocker?.kind === "login_required") {
     throw new LoginRequiredError(state.blocker.visibleText);
   }
   const attached = {
     browser,
     page,
-    browserName: browser.name ?? "chrome"
+    browserName: browser.name ?? "chrome",
+    state
   };
   const tabId = tabIdFromPage(page);
   if (tabId !== void 0) {
@@ -4614,17 +4637,17 @@ async function tryBrowserGetPreferredListed(browsers) {
     return void 0;
   }
 }
-async function getOrCreateChatGPTPage(browser, env, args) {
+async function getOrCreateChatGPTPage(browser, env, args, exactTimeoutMs) {
   const targetUrl = args.url ?? CHATGPT_HOME;
   const explicitExistingPolicy = normalizeExplicitExistingTabPolicy(args);
   if (env.page !== void 0) {
     const cached = normalizePage(env.page);
-    if (await cachedPageMatchesBootstrapArgs(cached, args, explicitExistingPolicy)) {
+    if (await cachedPageMatchesBootstrapArgs(cached, args, explicitExistingPolicy, exactTimeoutMs)) {
       return cached;
     }
   }
   if (explicitExistingPolicy !== void 0) {
-    const existing = await selectExistingTab(browser, explicitExistingPolicy);
+    const existing = await selectExistingTab(browser, explicitExistingPolicy, exactTimeoutMs);
     if (existing.page !== void 0) {
       return existing.page;
     }
@@ -4656,9 +4679,9 @@ async function getOrCreateChatGPTPage(browser, env, args) {
   }
   throw new BrowserBridgeUnavailableError("Codex can access a browser object, but no tab creation API was found.");
 }
-async function cachedPageMatchesBootstrapArgs(page, args, explicitExistingPolicy) {
+async function cachedPageMatchesBootstrapArgs(page, args, explicitExistingPolicy, exactTimeoutMs) {
   if (explicitExistingPolicy !== void 0) {
-    return pageMatchesExistingTarget(page, explicitExistingPolicy);
+    return pageMatchesExistingTarget(page, explicitExistingPolicy, exactTimeoutMs);
   }
   if (args.url !== void 0) {
     const currentUrl = await Promise.resolve(page.url?.()).catch(() => void 0);
@@ -4688,55 +4711,222 @@ function normalizeExplicitExistingTabPolicy(args) {
     ...args.existingTab
   };
 }
-async function selectExistingTab(browser, policy) {
-  if (policy.target?.type === "selected" && typeof browser.tabs?.selected === "function") {
-    const selected = await Promise.resolve(browser.tabs.selected.call(browser.tabs)).catch(() => void 0);
-    if (selected !== void 0) {
+function exactTargetTimeoutMs(args) {
+  const target = typeof args.existingTab === "object" ? args.existingTab.target : void 0;
+  if (target === void 0 || !isDeterministicMetadataTarget(target)) return void 0;
+  if (typeof args.timeoutMs === "number" && Number.isFinite(args.timeoutMs)) {
+    return Math.max(1, Math.floor(args.timeoutMs));
+  }
+  return EXACT_TARGET_TIMEOUT_MS;
+}
+function isDeterministicMetadataTarget(target) {
+  return target.type === "tabId" || target.type === "conversationId" || target.type === "conversation_id" || target.type === "url";
+}
+async function exactTargetOperation(timeoutMs, operation, run) {
+  let timeout;
+  try {
+    return await Promise.race([
+      run(),
+      new Promise((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new ExactTargetTimeoutError(operation)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeout !== void 0) clearTimeout(timeout);
+  }
+}
+function exactStatePage(page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let stopped = false;
+  const wrap = (value) => new Proxy(value, {
+    get(target, property, receiver) {
+      if (property === "title") return void 0;
+      const member = Reflect.get(target, property, receiver);
+      if (property === "playwright" && member !== null && typeof member === "object") return wrap(member);
+      if (typeof member !== "function") return member;
+      return async (...args) => {
+        const remaining = deadline - Date.now();
+        if (stopped || remaining <= 0) {
+          stopped = true;
+          throw new ExactTargetTimeoutError("reading the requested ChatGPT tab");
+        }
+        try {
+          const operationTimeout = property === "evaluate" || property === "content" ? Math.min(remaining, 900) : remaining;
+          return await exactTargetOperation(
+            operationTimeout,
+            "reading the requested ChatGPT tab",
+            () => Promise.resolve(member.apply(target, args))
+          );
+        } catch (error) {
+          if (error instanceof ExactTargetTimeoutError) stopped = true;
+          throw error;
+        }
+      };
+    }
+  });
+  return { page: wrap(page), stopped: () => stopped };
+}
+function existingTabUnresponsiveError(operation) {
+  return new ExistingTabSelectionError(
+    `The browser stopped responding while ${operation}. Preserve the review archive and resume after the browser host is responsive.`,
+    "existing_tab_unresponsive",
+    [],
+    void 0,
+    true
+  );
+}
+function stableUserTabId(tab) {
+  return tab.providerTabId ?? tab.id;
+}
+function controlledTabInfo(tab) {
+  const value = tab;
+  const legacyId = typeof value.tabId === "string" ? value.tabId : typeof value.id === "string" ? value.id : "unknown";
+  const providerTabId = typeof value.providerTabId === "string" ? value.providerTabId : void 0;
+  const info = { id: providerTabId ?? legacyId };
+  if (providerTabId !== void 0) info.providerTabId = providerTabId;
+  if (typeof value.url === "string") info.url = value.url;
+  if (typeof value.title === "string") info.title = value.title;
+  return info;
+}
+function metadataMatchesTarget(tab, policy) {
+  const target = policy.target;
+  if (target === void 0 || !isDeterministicMetadataTarget(target)) return false;
+  const info = controlledTabInfo(tab);
+  if (target.type === "tabId") {
+    if (stableUserTabId(info) !== target.tabId) return false;
+    return !(policy.requireChatGPT ?? true) || info.url === void 0 || isChatGPTUrl(info.url);
+  }
+  if (info.url === void 0) return false;
+  return userTabMatchesTarget(info, policy);
+}
+function isControllablePage(value) {
+  if (value === void 0 || value === null || typeof value !== "object") return false;
+  const page = value;
+  return page.playwright !== void 0 || page.page !== void 0 || typeof page.url === "function" || typeof page.goto === "function" || typeof page.evaluate === "function" || typeof page.content === "function" || typeof page.locator === "function";
+}
+function pageWithStableTabId(page, stableId) {
+  return new Proxy(page, {
+    get(target, property, receiver) {
+      if (property === "providerTabId" || property === "tabId") return stableId;
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+}
+async function handoffControlledTabs(tabs, controlled, match, timeoutMs) {
+  if (typeof tabs.finalize !== "function") {
+    throw new ExistingTabSelectionError(
+      "The requested ChatGPT tab is still owned by this browser session. Resume after the current browser-host invocation exits; no duplicate tab was opened.",
+      "existing_tab_temporarily_claimed",
+      [controlledTabInfo(match)],
+      void 0,
+      true
+    );
+  }
+  try {
+    await exactTargetOperation(timeoutMs, "handing off controlled browser tabs", () => Promise.resolve(tabs.finalize({
+      keep: controlled.map((tab) => ({ tab, status: "handoff" }))
+    })));
+  } catch (error) {
+    if (error instanceof ExactTargetTimeoutError) throw existingTabUnresponsiveError(error.operation);
+    throw new ExistingTabSelectionError(
+      "The browser could not release the requested ChatGPT tab. Resume after the current browser-host invocation exits; no duplicate tab was opened.",
+      "existing_tab_temporarily_claimed",
+      [controlledTabInfo(match)],
+      void 0,
+      true
+    );
+  }
+}
+async function selectExistingTab(browser, policy, exactTimeoutMs) {
+  const target = policy.target ?? { type: "selected", host: "chatgpt" };
+  const tabs = browser.tabs;
+  if (target.type === "selected" && typeof tabs?.selected === "function") {
+    const selected = await Promise.resolve(tabs.selected.call(tabs)).catch(() => void 0);
+    if (selected !== void 0 && isControllablePage(selected)) {
       const normalized = normalizePage(selected);
-      if (await pageMatchesExistingTarget(normalized, policy)) {
-        return { page: normalized };
+      if (await pageMatchesExistingTarget(normalized, policy, exactTimeoutMs)) return { page: normalized };
+    }
+  }
+  let controlledListed = false;
+  if (typeof tabs?.list === "function") {
+    let controlled;
+    try {
+      controlled = exactTimeoutMs === void 0 ? await Promise.resolve(tabs.list.call(tabs)) : await exactTargetOperation(exactTimeoutMs, "listing controlled browser tabs", () => Promise.resolve(tabs.list.call(tabs)));
+      controlledListed = true;
+    } catch (error) {
+      if (error instanceof ExactTargetTimeoutError) throw existingTabUnresponsiveError(error.operation);
+    }
+    if (controlled !== void 0) {
+      const matches = [];
+      for (const candidate of controlled) {
+        if (target.type === "tabId" && stableUserTabId(controlledTabInfo(candidate)) !== target.tabId) continue;
+        if (isControllablePage(candidate)) {
+          const page = normalizePage(candidate);
+          if (await pageMatchesExistingTarget(page, policy, exactTimeoutMs)) matches.push({ tab: candidate, page });
+        } else if (isDeterministicMetadataTarget(target) && metadataMatchesTarget(candidate, policy)) {
+          matches.push({ tab: candidate });
+        }
+      }
+      if (matches.length > 1 && (policy.ifMultiple ?? "block") !== "first") {
+        throw new ExistingTabSelectionError(
+          "Multiple already-controlled ChatGPT tabs matched the requested existing-tab target.",
+          "existing_tab_ambiguous",
+          matches.map((match) => controlledTabInfo(match.tab))
+        );
+      }
+      if (matches.length > 0) {
+        const match = matches[0];
+        if (match.page !== void 0) return { page: match.page };
+        await handoffControlledTabs(tabs, controlled, match.tab, exactTimeoutMs ?? EXACT_TARGET_TIMEOUT_MS);
+        throw new ExistingTabSelectionError(
+          "The matching ChatGPT tab was released from stale browser-session control and kept open. Resume the same operation to claim it without opening a duplicate.",
+          "existing_tab_handoff_completed",
+          [controlledTabInfo(match.tab)],
+          void 0,
+          true
+        );
       }
     }
   }
-  if (policy.target?.type === "tabId" && typeof browser.tabs?.get === "function") {
-    const tab = await Promise.resolve(browser.tabs.get.call(browser.tabs, policy.target.tabId)).catch(() => void 0);
-    if (tab !== void 0) {
-      const normalized = normalizePage(tab);
-      if (await pageMatchesExistingTarget(normalized, policy)) {
-        return { page: normalized };
-      }
-    }
-  }
-  if (typeof browser.tabs?.list === "function") {
-    const controlled = await Promise.resolve(browser.tabs.list.call(browser.tabs)).catch(() => []);
-    const matches = [];
-    for (const candidate of controlled) {
-      const page = await hydrateTab(browser, candidate);
-      if (await pageMatchesExistingTarget(page, policy)) matches.push(page);
-    }
-    if (matches.length === 1 || matches.length > 1 && (policy.ifMultiple ?? "block") === "first") {
-      return { page: matches[0] };
-    }
-    if (matches.length > 1) {
-      throw new ExistingTabSelectionError(
-        "Multiple already-controlled ChatGPT tabs matched the requested existing-tab target.",
-        "existing_tab_ambiguous"
+  if (target.type === "tabId" && !controlledListed && typeof tabs?.get === "function") {
+    try {
+      const tab = await exactTargetOperation(
+        exactTimeoutMs ?? EXACT_TARGET_TIMEOUT_MS,
+        "getting the requested controlled browser tab",
+        () => Promise.resolve(tabs.get.call(tabs, target.tabId))
       );
+      if (isControllablePage(tab)) {
+        const page = normalizePage(tab);
+        if (await pageMatchesExistingTarget(page, policy, exactTimeoutMs)) return { page };
+      }
+    } catch (error) {
+      if (error instanceof ExactTargetTimeoutError) throw existingTabUnresponsiveError(error.operation);
     }
   }
-  const userMatch = await selectExistingUserTab(browser, policy, shouldCollectExistingTabDiagnostics(policy));
+  const userMatch = await selectExistingUserTab(
+    browser,
+    policy,
+    shouldCollectExistingTabDiagnostics(policy),
+    exactTimeoutMs
+  );
   if (userMatch.page !== void 0) {
     return userMatch;
   }
   return userMatch.diagnostics === void 0 ? { diagnostics: diagnosticsForUnavailableUserTabs(policy) } : userMatch;
 }
-async function selectExistingUserTab(browser, policy, collectDiagnostics) {
+async function selectExistingUserTab(browser, policy, collectDiagnostics, exactTimeoutMs) {
   const openTabs = browser.user?.openTabs;
   const claimTab = browser.user?.claimTab;
   if (typeof openTabs !== "function" || typeof claimTab !== "function") {
     return {};
   }
-  const tabs = await Promise.resolve(openTabs.call(browser.user)).catch(() => void 0);
+  let tabs;
+  try {
+    tabs = exactTimeoutMs === void 0 ? await Promise.resolve(openTabs.call(browser.user)) : await exactTargetOperation(exactTimeoutMs, "listing open browser tabs", () => Promise.resolve(openTabs.call(browser.user)));
+  } catch (error) {
+    if (error instanceof ExactTargetTimeoutError) throw existingTabUnresponsiveError(error.operation);
+  }
   if (tabs === void 0) {
     return collectDiagnostics ? { diagnostics: diagnosticsForUnavailableUserTabs(policy, "user_open_tabs_unavailable") } : {};
   }
@@ -4756,8 +4946,10 @@ async function selectExistingUserTab(browser, policy, collectDiagnostics) {
   const selected = matches[0];
   let page;
   try {
-    page = normalizePage(await claimTab.call(browser.user, selected));
+    const claimed = exactTimeoutMs === void 0 ? await Promise.resolve(claimTab.call(browser.user, selected)) : await exactTargetOperation(exactTimeoutMs, "claiming the requested browser tab", () => Promise.resolve(claimTab.call(browser.user, selected)));
+    page = normalizePage(claimed);
   } catch (error) {
+    if (error instanceof ExactTargetTimeoutError) throw existingTabUnresponsiveError(error.operation);
     if (isExistingTabClaimConflict(error)) {
       throw new ExistingTabSelectionError(
         "A matching ChatGPT tab is still claimed by another browser-host invocation. Resume after that invocation exits; no duplicate tab was opened.",
@@ -4769,11 +4961,13 @@ async function selectExistingUserTab(browser, policy, collectDiagnostics) {
     }
     throw error;
   }
+  const stableId = stableUserTabId(selected);
+  if (stableId !== void 0) page = pageWithStableTabId(page, stableId);
   return diagnostics === void 0 ? { page } : { page, diagnostics };
 }
 function isExistingTabClaimConflict(error) {
   const message = error instanceof Error ? error.message : String(error);
-  return /\balready\b.{0,80}\b(?:browser session|claimed|controlled)\b|\bclaimed\b.{0,80}\b(?:browser session|another session)\b/i.test(message);
+  return /\balready\b.{0,80}\b(?:browser session|browser use session|claimed|controlled)\b|\bclaimed\b.{0,80}\b(?:browser session|browser use session|another session)\b/i.test(message);
 }
 function userTabMatchesTarget(tab, policy) {
   const target = policy.target ?? { type: "selected", host: "chatgpt" };
@@ -4785,7 +4979,7 @@ function userTabMatchesTarget(tab, policy) {
     case "selected":
       return target.host === void 0 || target.host === "chatgpt" ? isChatGPTUrl(tab.url) : true;
     case "tabId":
-      return tab.id === target.tabId;
+      return stableUserTabId(tab) === target.tabId;
     case "conversationId":
     case "conversation_id":
       return parseConversationId(tab.url ?? "") === target.conversationId;
@@ -4845,7 +5039,9 @@ function diagnosticTarget(target) {
   }
 }
 function diagnosticCandidate(tab) {
-  const candidate = { id: tab.id };
+  const candidate = {
+    id: truncateDiagnosticField(stableUserTabId(tab))
+  };
   if (tab.url !== void 0) {
     candidate.url = truncateDiagnosticField(tab.url);
     const conversationId = parseConversationId(tab.url);
@@ -4867,7 +5063,7 @@ function mismatchReasonForNoMatches(policy, tabs, chatgptTabs) {
   }
   switch (target.type) {
     case "tabId":
-      return tabs.some((tab) => tab.id === target.tabId) ? "non_chatgpt_tab" : "explicit_tab_id_not_open";
+      return tabs.some((tab) => stableUserTabId(tab) === target.tabId) ? "non_chatgpt_tab" : "explicit_tab_id_not_open";
     case "conversationId":
     case "conversation_id":
       return "conversation_id_mismatch";
@@ -4879,12 +5075,19 @@ function mismatchReasonForNoMatches(policy, tabs, chatgptTabs) {
       return "selected_tab_unavailable";
   }
 }
-async function pageMatchesExistingTarget(page, policy) {
-  const url = await Promise.resolve(page.url?.()).catch(() => void 0);
-  const title = await Promise.resolve(page.title?.()).catch(() => void 0);
+async function pageMatchesExistingTarget(page, policy, exactTimeoutMs) {
+  let url;
+  try {
+    url = exactTimeoutMs === void 0 ? await Promise.resolve(page.url?.()).catch(() => void 0) : await exactTargetOperation(exactTimeoutMs, "reading the requested browser tab URL", () => Promise.resolve(page.url?.()));
+  } catch (error) {
+    if (error instanceof ExactTargetTimeoutError) throw existingTabUnresponsiveError(error.operation);
+  }
   const tab = { id: tabIdFromPage(page) ?? "" };
   if (url !== void 0) tab.url = url;
-  if (title !== void 0) tab.title = title;
+  if (policy.target?.type === "title") {
+    const title = await Promise.resolve(page.title?.()).catch(() => void 0);
+    if (title !== void 0) tab.title = title;
+  }
   return userTabMatchesTarget(tab, policy);
 }
 async function findExistingChatGPTTab(browser) {
@@ -4907,8 +5110,9 @@ async function findExistingChatGPTTab(browser) {
   const list = browser.tabs?.list;
   if (typeof list === "function") {
     const tabs = await list.call(browser.tabs);
-    const normalized = await Promise.all(tabs.map((tab) => hydrateTab(browser, tab)));
-    for (const tab of normalized) {
+    for (const candidate of tabs) {
+      if (!isControllablePage(candidate)) continue;
+      const tab = normalizePage(candidate);
       try {
         if (isChatGPTUrl(await tab.url?.())) {
           return tab;
@@ -4943,7 +5147,7 @@ var ExistingTabSelectionError = class extends ChatGPTControlError {
       remediation: [
         {
           label: "Choose an exact tab",
-          instruction: "Use the selected tab, a ChatGPT conversation URL, conversation ID, or a tab id returned by openTabs().",
+          instruction: "Use the selected tab, a ChatGPT conversation URL, conversation ID, or the stable tab ID shown in diagnostics or the current context.",
           userActionRequired: false
         },
         {
@@ -5029,7 +5233,7 @@ function urlFromExistingTarget(target) {
   }
 }
 function userTabCandidateLabel(tab) {
-  return `tab ${tab.id} - ${tab.title ?? "Untitled"} - ${tab.url ?? "unknown URL"}`;
+  return `tab ${stableUserTabId(tab)} - ${tab.title ?? "Untitled"} - ${tab.url ?? "unknown URL"}`;
 }
 async function createTab(browser, url) {
   if (typeof browser.tabs?.create === "function") {
@@ -5115,7 +5319,7 @@ function normalizePage(pageOrTab) {
 }
 function tabIdFromPage(page) {
   const maybe = page;
-  const id2 = maybe.id ?? maybe.tabId;
+  const id2 = maybe.providerTabId ?? maybe.tabId ?? maybe.id;
   return typeof id2 === "string" ? id2 : void 0;
 }
 
@@ -5128,15 +5332,22 @@ async function bootstrap(env, args = {}) {
     if (attached.tabId !== void 0) {
       env.expectedTabId = attached.tabId;
     }
-    const state = await readPageState(attached.page);
+    const state = attached.state;
     const data = {
       browserName: attached.browserName,
       tabId: attached.tabId ?? "unknown",
       url: state.url,
       loggedIn: state.signedIn
     };
-    const context = attached.tabId === void 0 ? { browserName: attached.browserName } : { browserName: attached.browserName, tabId: attached.tabId };
-    return resultOk(data, await contextFromPage(attached.page, context));
+    const context = {
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      browserName: attached.browserName,
+      url: state.url,
+      ...state.conversationId === void 0 ? {} : { conversationId: state.conversationId },
+      ...state.title === void 0 ? {} : { title: state.title },
+      ...attached.tabId === void 0 ? {} : { tabId: attached.tabId }
+    };
+    return resultOk(data, context);
   } catch (error) {
     return resultError(error instanceof Error ? error : new Error(String(error)));
   }
@@ -15490,6 +15701,7 @@ async function waitForLeaseTurnover(leasePath, timeoutMs = 3e3) {
 // src/reviews/code-review.ts
 var MAX_RECOVERY_CANDIDATES = 6;
 var RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS = 6e3;
+var EXACT_PROMPT_PROOF_TIMEOUT_MS = 12e3;
 var ReviewWorkflowError = class extends Error {
   constructor(result, state) {
     super(result.blocker?.message ?? result.error?.message ?? `Review workflow failed during ${state}.`);
@@ -15504,6 +15716,12 @@ var ReviewInProgress = class extends Error {
   constructor() {
     super("The submitted review is still generating.");
     this.name = "ReviewInProgress";
+  }
+};
+var ReviewBrowserUnresponsiveError = class extends Error {
+  constructor(operation) {
+    super(`The browser stopped responding while ${operation}. Preserve the review archive and resume after the browser host is responsive.`);
+    this.name = "ReviewBrowserUnresponsiveError";
   }
 };
 var ArchivedTerminalOutcomeError = class extends Error {
@@ -15542,6 +15760,9 @@ async function runCodeReviewWithPort(args, port) {
   let recoveryQuery;
   let releaseLease;
   let archivedSubmission;
+  let preSubmitResume = false;
+  let preSubmitCheckpointActive = false;
+  let requestedThreadTarget = args.thread;
   let resumedMessageStatus;
   let terminalOutcomeAlreadyFinal = false;
   const affinity = { canonicalId: void 0, routeId: void 0, invocationTabId: void 0 };
@@ -15619,98 +15840,134 @@ async function runCodeReviewWithPort(args, port) {
           await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, void 0);
           throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
         }
+        const preSubmitCheckpoint = await readArchivedPreSubmitCheckpoint(args.resume.archiveDirectory, prepared);
+        if (preSubmitCheckpoint !== void 0) {
+          validatePreSubmitResumeCrossCheck(args, preSubmitCheckpoint);
+          preSubmitResume = true;
+          preSubmitCheckpointActive = true;
+          requestedThreadTarget = preSubmitCheckpoint.target.mode === "existing" ? {
+            ...preSubmitCheckpoint.target.url === void 0 ? {} : { url: preSubmitCheckpoint.target.url },
+            ...preSubmitCheckpoint.target.id === void 0 ? {} : { id: preSubmitCheckpoint.target.id }
+          } : void 0;
+          threadUrl = requestedThreadTarget?.url;
+          threadId = requestedThreadTarget?.id ?? conversationIdFromUrl(requestedThreadTarget?.url);
+          if (threadId !== void 0) {
+            affinity.canonicalId = threadId;
+            affinity.routeId = threadId;
+          }
+        }
       }
-      try {
-        configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
-      } catch (error) {
-        throw new ReviewPreparationError(
-          `The original configuration snapshot is missing or invalid; automatic restoration cannot be proven. ${error instanceof Error ? error.message : String(error)}`,
-          "resume_configuration_snapshot_invalid"
-        );
-      }
-      try {
-        archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
-      } catch (error) {
-        const missingSubmission = error instanceof ReviewPreparationError && error.code === "resume_submission_unverified";
-        if (!missingSubmission || submissionRecordExists) throw error;
+      if (!preSubmitResume) {
+        try {
+          configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
+        } catch (error) {
+          throw new ReviewPreparationError(
+            `The original configuration snapshot is missing or invalid; automatic restoration cannot be proven. ${error instanceof Error ? error.message : String(error)}`,
+            "resume_configuration_snapshot_invalid"
+          );
+        }
+        try {
+          archivedSubmission = await readArchivedSubmission(args.resume.archiveDirectory, prepared);
+        } catch (error) {
+          const missingSubmission = error instanceof ReviewPreparationError && error.code === "resume_submission_unverified";
+          if (!missingSubmission || submissionRecordExists) throw error;
+          if (terminalMarkerError !== void 0) throw terminalMarkerError;
+          if (archivedFinalOutcome !== void 0 && archivedFinalOutcome.submitted === false && missingSubmission) {
+            await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, void 0);
+            throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
+          }
+          throw error;
+        }
         if (terminalMarkerError !== void 0) throw terminalMarkerError;
-        if (archivedFinalOutcome !== void 0 && archivedFinalOutcome.submitted === false && missingSubmission) {
-          await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, void 0);
+        submitted = archivedSubmission.submitted;
+        if (archivedFinalOutcome !== void 0) {
+          await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, archivedSubmission);
           throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
         }
-        throw error;
+        const checkpoint = await readOptionalThreadCheckpoint(args.resume.archiveDirectory);
+        validateThreadCheckpoint(checkpoint, archivedSubmission, prepared);
+        const receiptThreadId = archivedSubmission.thread.id ?? conversationIdFromUrl(archivedSubmission.thread.url);
+        const receiptIsProvisional = isProvisionalConversationId(receiptThreadId);
+        const checkpointUrlId = conversationIdFromUrl(checkpoint?.current.url);
+        const checkpointId = checkpoint?.current.id ?? checkpointUrlId;
+        const suppliedUrlId = conversationIdFromUrl(threadUrl);
+        if (threadId !== void 0 && suppliedUrlId !== void 0 && threadId !== suppliedUrlId) {
+          throw new ReviewPreparationError("resume.conversationId and resume.threadUrl refer to different Chat conversations.", "resume_thread_mismatch");
+        }
+        const suppliedThreadId = threadId ?? suppliedUrlId;
+        if (!receiptIsProvisional && suppliedThreadId !== void 0 && receiptThreadId !== void 0 && suppliedThreadId !== receiptThreadId) {
+          throw new ReviewPreparationError("The caller-supplied resume thread does not match the immutable archived submission receipt.", "resume_thread_mismatch");
+        }
+        if (receiptIsProvisional) {
+          const candidateId = suppliedThreadId !== void 0 && !isProvisionalConversationId(suppliedThreadId) ? suppliedThreadId : checkpointId !== void 0 && !isProvisionalConversationId(checkpointId) ? checkpointId : void 0;
+          const recoveryTabId = checkpoint?.current.tabId ?? archivedSubmission.thread.tabId;
+          recoveryHint = {
+            ...candidateId === void 0 ? {} : { conversationId: candidateId },
+            ...candidateId !== void 0 && suppliedUrlId === candidateId && threadUrl !== void 0 ? { url: threadUrl } : candidateId !== void 0 && checkpointUrlId === candidateId && checkpoint?.current.url !== void 0 ? { url: checkpoint.current.url } : {},
+            ...recoveryTabId === void 0 ? {} : { tabId: recoveryTabId }
+          };
+          threadId = receiptThreadId;
+          threadUrl = archivedSubmission.thread.url;
+          affinity.routeId = receiptThreadId;
+        } else {
+          const checkpointMatchesReceipt = checkpointUrlId !== void 0 && checkpointUrlId === receiptThreadId;
+          threadId = receiptThreadId ?? suppliedThreadId;
+          threadUrl = checkpointMatchesReceipt && checkpoint?.current.url !== void 0 ? checkpoint.current.url : archivedSubmission.thread.url ?? threadUrl;
+          affinity.canonicalId = receiptThreadId;
+          affinity.routeId = receiptThreadId;
+          const recoveryTabId = checkpoint?.current.tabId ?? archivedSubmission.thread.tabId;
+          recoveryHint = recoveryTabId === void 0 ? void 0 : { tabId: recoveryTabId };
+        }
+        if (args.resume.artifactBaseline !== void 0 && sha256Text2(JSON.stringify(args.resume.artifactBaseline)) !== sha256Text2(JSON.stringify(archivedSubmission.artifactBaseline))) {
+          throw new ReviewPreparationError("resume.artifactBaseline does not match the immutable archived submission baseline.", "resume_artifact_baseline_mismatch");
+        }
+        artifactBaseline = archivedSubmission.artifactBaseline;
+        recoveryQuery = checkpoint?.recoveryQuery ?? recoveryQueryFromPrepared(prepared);
       }
-      if (terminalMarkerError !== void 0) throw terminalMarkerError;
-      submitted = archivedSubmission.submitted;
-      if (archivedFinalOutcome !== void 0) {
-        await validateArchivedTerminalBinding(args.resume.archiveDirectory, archivedFinalOutcome, archivedSubmission);
-        throw new ArchivedTerminalOutcomeError(archivedFinalOutcome);
-      }
-      const checkpoint = await readOptionalThreadCheckpoint(args.resume.archiveDirectory);
-      validateThreadCheckpoint(checkpoint, archivedSubmission, prepared);
-      const receiptThreadId = archivedSubmission.thread.id ?? conversationIdFromUrl(archivedSubmission.thread.url);
-      const receiptIsProvisional = isProvisionalConversationId(receiptThreadId);
-      const suppliedUrlId = conversationIdFromUrl(threadUrl);
-      if (threadId !== void 0 && suppliedUrlId !== void 0 && threadId !== suppliedUrlId) {
-        throw new ReviewPreparationError("resume.conversationId and resume.threadUrl refer to different Chat conversations.", "resume_thread_mismatch");
-      }
-      const suppliedThreadId = threadId ?? suppliedUrlId;
-      if (!receiptIsProvisional && suppliedThreadId !== void 0 && receiptThreadId !== void 0 && suppliedThreadId !== receiptThreadId) {
-        throw new ReviewPreparationError("The caller-supplied resume thread does not match the immutable archived submission receipt.", "resume_thread_mismatch");
-      }
-      if (receiptIsProvisional) {
-        const checkpointId = checkpoint?.current.id ?? conversationIdFromUrl(checkpoint?.current.url);
-        const candidateId = suppliedThreadId !== void 0 && !isProvisionalConversationId(suppliedThreadId) ? suppliedThreadId : checkpointId !== void 0 && !isProvisionalConversationId(checkpointId) ? checkpointId : void 0;
-        const recoveryTabId = checkpoint?.current.tabId ?? archivedSubmission.thread.tabId;
-        recoveryHint = {
-          ...candidateId === void 0 ? {} : { conversationId: candidateId },
-          ...candidateId !== void 0 && suppliedUrlId === candidateId && threadUrl !== void 0 ? { url: threadUrl } : candidateId !== void 0 && checkpointId === candidateId && checkpoint?.current.url !== void 0 ? { url: checkpoint.current.url } : {},
-          ...recoveryTabId === void 0 ? {} : { tabId: recoveryTabId }
-        };
-        threadId = receiptThreadId;
-        threadUrl = archivedSubmission.thread.url;
-        affinity.routeId = receiptThreadId;
-      } else {
-        threadId = receiptThreadId ?? suppliedThreadId;
-        threadUrl = archivedSubmission.thread.url ?? threadUrl;
-        affinity.canonicalId = receiptThreadId;
-        affinity.routeId = receiptThreadId;
-        recoveryHint = archivedSubmission.thread.tabId === void 0 ? void 0 : { tabId: archivedSubmission.thread.tabId };
-      }
-      if (args.resume.artifactBaseline !== void 0 && sha256Text2(JSON.stringify(args.resume.artifactBaseline)) !== sha256Text2(JSON.stringify(archivedSubmission.artifactBaseline))) {
-        throw new ReviewPreparationError("resume.artifactBaseline does not match the immutable archived submission baseline.", "resume_artifact_baseline_mismatch");
-      }
-      artifactBaseline = archivedSubmission.artifactBaseline;
-      recoveryQuery = checkpoint?.recoveryQuery ?? recoveryQueryFromPrepared(prepared);
     }
+    const isPreSubmitAttempt = args.resume === void 0 || preSubmitResume;
     const needsProvisionalRecovery = args.resume !== void 0 && (isProvisionalConversationId(threadId) || archivedSubmission !== void 0 && archivedSubmission.state !== "confirmed" && affinity.canonicalId === void 0);
     const archivedTabTarget = args.resume === void 0 ? void 0 : recoveryHint?.tabId;
-    const ordinaryBootstrapTarget = needsProvisionalRecovery ? void 0 : args.resume === void 0 && args.thread === void 0 ? void 0 : {
+    const ordinaryBootstrapTarget = needsProvisionalRecovery ? void 0 : isPreSubmitAttempt ? requestedThreadTarget === void 0 ? void 0 : {
+      ...requestedThreadTarget.url === void 0 ? {} : { url: requestedThreadTarget.url },
+      ...requestedThreadTarget.id === void 0 ? {} : { conversationId: requestedThreadTarget.id }
+    } : {
       ...threadUrl === void 0 ? {} : { url: threadUrl },
       ...threadId === void 0 ? {} : { conversationId: threadId }
     };
     const boot = requireOk(await runStep("PREFLIGHT_BROWSER", async () => {
+      if (isPreSubmitAttempt && requestedThreadTarget !== void 0 && archiveDirectory !== void 0 && !preSubmitCheckpointActive) {
+        await writeImmutableJson(
+          join7(archiveDirectory, "pre-submit-checkpoint.json"),
+          await createPreSubmitCheckpoint(prepared, requestedThreadTarget, port.now())
+        );
+        preSubmitCheckpointActive = true;
+      }
       const useRecoveryBootstrap = args.resume !== void 0 && (needsProvisionalRecovery || archivedTabTarget !== void 0) && port.bootstrapRecovery !== void 0;
       const first = makeExistingTabRetryResumable(
         await (useRecoveryBootstrap ? port.bootstrapRecovery(archivedTabTarget === void 0 ? void 0 : { tabId: archivedTabTarget }) : port.bootstrap(ordinaryBootstrapTarget)),
         args.resume !== void 0
       );
       if (first.ok && archivedTabTarget !== void 0 && !needsProvisionalRecovery && affinity.canonicalId !== void 0) {
-        const claimed = await port.pageState().catch(() => void 0);
-        const claimedId = claimed?.conversationId ?? conversationIdFromUrl(claimed?.url);
+        const claimedId = first.context.conversationId ?? conversationIdFromUrl(first.context.url);
         if (claimedId !== affinity.canonicalId) {
           return makeExistingTabRetryResumable(await port.bootstrap(ordinaryBootstrapTarget), true);
         }
       }
       if (first.ok || archivedTabTarget === void 0 || first.blocker?.code !== "existing_tab_not_found") return first;
-      return makeExistingTabRetryResumable(await port.bootstrap(ordinaryBootstrapTarget), true);
+      const retry = needsProvisionalRecovery && port.bootstrapRecovery !== void 0 ? await port.bootstrapRecovery() : await port.bootstrap(ordinaryBootstrapTarget);
+      return makeExistingTabRetryResumable(retry, true);
     }), "PREFLIGHT_BROWSER");
+    if (archiveDirectory !== void 0 && (args.resume === void 0 || preSubmitResume)) {
+      await rm2(join7(archiveDirectory, "pre-submit-checkpoint.json"), { force: true });
+      preSubmitCheckpointActive = false;
+    }
     affinity.invocationTabId = boot.context.tabId;
     requireOk(await runStep("OPEN_CHAT", () => port.openChat()), "OPEN_CHAT");
-    if (args.resume === void 0) {
-      const opened = requireData(await runStep("OPEN_CHAT", () => args.thread === void 0 ? port.newThread() : port.openThread({
-        ...threadUrl === void 0 ? {} : { url: threadUrl },
-        ...threadId === void 0 ? {} : { conversationId: threadId }
+    if (isPreSubmitAttempt) {
+      const opened = requireData(await runStep("OPEN_CHAT", () => requestedThreadTarget === void 0 ? port.newThread() : port.openThread({
+        ...requestedThreadTarget.url === void 0 ? {} : { url: requestedThreadTarget.url },
+        ...requestedThreadTarget.id === void 0 ? {} : { conversationId: requestedThreadTarget.id }
       })), "OPEN_CHAT");
       threadUrl = opened.data.url || opened.context.url;
       threadId = opened.data.conversationId ?? opened.context.conversationId;
@@ -15723,7 +15980,12 @@ async function runCodeReviewWithPort(args, port) {
       threadId = affinity.canonicalId ?? affinity.routeId ?? threadId;
     } else {
       const needsThreadRecovery = needsProvisionalRecovery;
-      const openResult = needsThreadRecovery ? await runStep("RECOVER_THREAD", () => port.recoverThread(recoveryQuery, prepared.prompt, recoveryHint)) : await runStep("OPEN_CHAT", () => port.openThread({
+      const openResult = needsThreadRecovery ? await runStep("RECOVER_THREAD", async () => await recoverCurrentVisibleThread(
+        port,
+        prepared.prompt,
+        affinity.invocationTabId,
+        boot.context
+      ) ?? port.recoverThread(recoveryQuery, prepared.prompt, recoveryHint)) : await runStep("OPEN_CHAT", () => port.openThread({
         ...threadId === void 0 ? {} : { conversationId: threadId },
         ...threadUrl === void 0 ? {} : { url: threadUrl }
       }));
@@ -15748,16 +16010,17 @@ async function runCodeReviewWithPort(args, port) {
         affinity.routeId = openedThreadId;
         threadUrl = openedThreadUrl;
         threadId = openedThreadId;
-        await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
+        assertCommandContextAffinity(opened.context, affinity, "RECOVER_THREAD", true);
       } else {
         threadUrl = openedThreadUrl;
         threadId = openedThreadId;
         await assertConversationAffinity(port, affinity, "OPEN_CHAT", true);
       }
-      const latestUser = requireData(await port.readLatestUser(), "POLL_METADATA");
-      assertCommandContextAffinity(latestUser.context, affinity, "RECOVER_THREAD", true);
-      const observedUserSha256 = sha256Text2(normalizeVisiblePrompt(latestUser.data.text));
-      const visiblePromptProven = archivedSubmission?.userTurnSha256 !== void 0 ? observedUserSha256 === archivedSubmission.userTurnSha256 || visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared.prompt) : visibleUserTurnContainsExactPrompt(latestUser.data.text, prepared.prompt);
+      const latestUser = needsThreadRecovery && port.readExactLatestUserText !== void 0 ? void 0 : requireData(await port.readLatestUser(), "POLL_METADATA");
+      if (latestUser !== void 0) assertCommandContextAffinity(latestUser.context, affinity, "RECOVER_THREAD", true);
+      const latestUserText = latestUser?.data.text ?? await port.readExactLatestUserText();
+      const observedUserSha256 = sha256Text2(normalizeVisiblePrompt(latestUserText ?? ""));
+      const visiblePromptProven = archivedSubmission?.userTurnSha256 !== void 0 ? observedUserSha256 === archivedSubmission.userTurnSha256 || visibleUserTurnContainsExactPrompt(latestUserText ?? "", prepared.prompt) : visibleUserTurnContainsExactPrompt(latestUserText ?? "", prepared.prompt);
       if (!visiblePromptProven) {
         const message = "The latest visible user turn is not the archived submitted review prompt. Resume refused to capture a later or ambiguous response.";
         if (isProvisionalConversationId(expectedThreadId)) {
@@ -15776,12 +16039,12 @@ async function runCodeReviewWithPort(args, port) {
         }
         throw new ReviewPreparationError(message, "resume_user_turn_mismatch");
       }
-      await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
+      if (!needsThreadRecovery) await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
       const recoveryStatus = requireData(await port.messageStatus(), "POLL_METADATA");
       assertCommandContextAffinity(recoveryStatus.context, affinity, "POLL_METADATA", true);
       resumedMessageStatus = recoveryStatus.data;
       assertSubmittedTurnOwnership(archivedSubmission, resumedMessageStatus, threadUrl);
-      await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
+      if (!needsThreadRecovery) await assertConversationAffinity(port, affinity, "RECOVER_THREAD", true);
       await persistThreadCheckpoint(archiveDirectory, prepared, threadUrl, threadId, affinity.invocationTabId, port.now());
       const receiptNeedsConfirmation = archivedSubmission !== void 0 && (archivedSubmission.state !== "confirmed" || isProvisionalConversationId(expectedThreadId));
       if (archivedSubmission !== void 0 && receiptNeedsConfirmation && archiveDirectory !== void 0) {
@@ -15813,8 +16076,10 @@ async function runCodeReviewWithPort(args, port) {
         };
       }
     }
-    await assertConversationAffinity(port, affinity, "PREFLIGHT_BROWSER", args.resume !== void 0);
-    if (args.resume !== void 0 && archiveDirectory !== void 0 && configurationBefore === void 0) {
+    if (!needsProvisionalRecovery) {
+      await assertConversationAffinity(port, affinity, "PREFLIGHT_BROWSER", !isPreSubmitAttempt);
+    }
+    if (args.resume !== void 0 && !preSubmitResume && archiveDirectory !== void 0 && configurationBefore === void 0) {
       try {
         configurationBefore = await readArchivedConfigurationSnapshot(archiveDirectory);
       } catch (error) {
@@ -15836,7 +16101,7 @@ async function runCodeReviewWithPort(args, port) {
         data: { capturedAt: configurationBefore.capturedAt, selection: configurationBefore.selection }
       });
     }
-    if (archiveDirectory !== void 0 && args.resume === void 0) {
+    if (archiveDirectory !== void 0 && isPreSubmitAttempt) {
       await writeImmutableJson(join7(archiveDirectory, "configuration.before.json"), configurationBefore);
     }
     let appliedData;
@@ -15857,11 +16122,11 @@ async function runCodeReviewWithPort(args, port) {
     verifiedBeforeSubmit = appliedData.verified && configurationMatchesSelection(appliedData.after, { intelligence: "Pro" });
     if (!verifiedBeforeSubmit) throw workflowBlocker("model_fallback", "pro_precondition_unverified", "The visible Chat setting did not strictly verify Pro before submission.", "VERIFY_PRO_BEFORE_SUBMIT");
     await runStep("VERIFY_PRO_BEFORE_SUBMIT", async () => {
-      await assertConversationAffinity(port, affinity, "VERIFY_PRO_BEFORE_SUBMIT", args.resume !== void 0);
+      await assertConversationAffinity(port, affinity, "VERIFY_PRO_BEFORE_SUBMIT", !isPreSubmitAttempt);
       return { verified: true, active: appliedData.after.active };
     });
     if (artifactBaseline === void 0) {
-      if (args.resume !== void 0 && archiveDirectory !== void 0) {
+      if (!isPreSubmitAttempt && archiveDirectory !== void 0) {
         artifactBaseline = await readArchivedArtifactBaseline(archiveDirectory).catch(() => void 0);
       }
     }
@@ -15869,7 +16134,7 @@ async function runCodeReviewWithPort(args, port) {
       artifactBaseline = requireData(await runStep("BASELINE_ARTIFACTS", () => port.artifactBaseline()), "BASELINE_ARTIFACTS").data;
     }
     let baselineAssistantCount = 0;
-    if (args.resume === void 0) {
+    if (isPreSubmitAttempt) {
       if (prepared.mode === "review-packets") {
         const attachments = [prepared.uploadManifestPath, ...prepared.packetPaths];
         await assertConversationAffinity(port, affinity, "ATTACH_PACKETS", false);
@@ -16163,15 +16428,24 @@ async function runCodeReviewWithPort(args, port) {
         resumable: isCorrectableResumePreparationError(error.code)
       };
     } else if (error instanceof ReviewWorkflowError) {
-      terminalStatus = error.result.status === "blocked" || error.result.status === "needs_confirmation" ? "blocked" : "failed";
       blocker = error.result.blocker;
+      const completedBrowserHandoff = blocker?.code === "existing_tab_handoff_completed";
+      terminalStatus = completedBrowserHandoff ? "in_progress" : error.result.status === "blocked" || error.result.status === "needs_confirmation" ? "blocked" : "failed";
       if (error.result.error !== void 0) warnings.push(error.result.error.message);
+    } else if (error instanceof ReviewBrowserUnresponsiveError) {
+      terminalStatus = "blocked";
+      blocker = {
+        kind: "selector_drift",
+        code: "existing_tab_unresponsive",
+        message: error.message,
+        resumable: true
+      };
     } else {
       terminalStatus = "failed";
       warnings.push(error instanceof Error ? error.message : String(error));
     }
   } finally {
-    if (!terminalOutcomeAlreadyFinal && terminalStatus !== "in_progress" && configurationBefore !== void 0 && args.safeguards?.restorePreviousConfiguration === true) {
+    if (!terminalOutcomeAlreadyFinal && terminalStatus !== "in_progress" && blocker?.code !== "existing_tab_unresponsive" && blocker?.code !== "existing_tab_temporarily_claimed" && configurationBefore !== void 0 && args.safeguards?.restorePreviousConfiguration === true) {
       try {
         const restore = await runStep("RESTORE_PREVIOUS_CONFIGURATION", () => port.restoreConfiguration(configurationBefore));
         restored = restore.data?.restored === true;
@@ -16196,6 +16470,10 @@ async function runCodeReviewWithPort(args, port) {
         if (terminalStatus === "completed") terminalStatus = "completed_with_warnings";
       }
     }
+  }
+  if (preSubmitCheckpointActive && archiveDirectory !== void 0 && blocker?.code !== "existing_tab_handoff_completed") {
+    await rm2(join7(archiveDirectory, "pre-submit-checkpoint.json"), { force: true }).catch(() => void 0);
+    preSubmitCheckpointActive = false;
   }
   const contextMode = prepared?.mode ?? (args.context?.mode === "none" || args.repositoryRoot === void 0 && args.baseRef === void 0 ? "none" : "review-packets");
   const provenance = { contextMode };
@@ -16336,7 +16614,15 @@ function defaultReviewWorkflowPort(env) {
         requireChatGPT: true
       }
     }),
-    bootstrapRecovery: (target) => bootstrap(env, target?.tabId === void 0 ? { preferExistingTab: false } : {
+    bootstrapRecovery: (target) => bootstrap(env, target?.tabId === void 0 ? {
+      existingTab: {
+        target: { type: "selected", host: "chatgpt" },
+        ifMissing: "block",
+        ifMultiple: "first",
+        requireChatGPT: true
+      },
+      preferExistingTab: false
+    } : {
       existingTab: {
         target: { type: "tabId", tabId: target.tabId },
         ifMissing: "block",
@@ -16374,6 +16660,7 @@ function defaultReviewWorkflowPort(env) {
     }),
     readFullMarkdown: () => readLatest(env, { role: "assistant", format: "markdown" }),
     readLatestUser: () => readLatest(env, { role: "user", format: "text" }),
+    readExactLatestUserText: () => readExactLatestUserText(env),
     downloadFile: (destDir, filename, assistantIndex, occurrenceIndex) => downloadLatestFile(env, {
       destDir,
       filenamePattern: `^${escapeRegExp4(filename)}$`,
@@ -16596,6 +16883,67 @@ async function readArchivedArtifactBaseline(archiveDirectory) {
   if (submission.artifactBaseline === void 0 || !Array.isArray(submission.artifactBaseline.items)) throw new Error("Archived artifact baseline is invalid.");
   return submission.artifactBaseline;
 }
+async function createPreSubmitCheckpoint(prepared, target, now) {
+  return {
+    schemaVersion: 1,
+    phase: "preflight_browser_handoff",
+    createdAt: now.toISOString(),
+    promptSha256: sha256Text2(normalizePrompt(prepared.prompt)),
+    manifestSha256: await sha256File2(prepared.manifestPath),
+    uploadManifestSha256: await sha256File2(prepared.uploadManifestPath),
+    target: target === void 0 ? { mode: "new" } : {
+      mode: "existing",
+      ...target.url === void 0 ? {} : { url: target.url },
+      ...target.id === void 0 ? {} : { id: target.id }
+    }
+  };
+}
+async function readArchivedPreSubmitCheckpoint(archiveDirectory, prepared) {
+  let value;
+  try {
+    value = await readOptionalJson(join7(archiveDirectory, "pre-submit-checkpoint.json"));
+  } catch (error) {
+    throw new ReviewPreparationError(
+      `The pre-submit handoff checkpoint is unreadable or invalid JSON. ${error instanceof Error ? error.message : String(error)}`,
+      "resume_pre_submit_checkpoint_invalid"
+    );
+  }
+  if (value === void 0) return void 0;
+  const target = value.target;
+  if (value.schemaVersion !== 1 || value.phase !== "preflight_browser_handoff" || typeof value.createdAt !== "string" || typeof value.promptSha256 !== "string" || typeof value.manifestSha256 !== "string" || typeof value.uploadManifestSha256 !== "string" || !isRecord7(target) || target.mode !== "new" && target.mode !== "existing" || target.mode === "new" && (target.url !== void 0 || target.id !== void 0) || target.url !== void 0 && typeof target.url !== "string" || target.id !== void 0 && typeof target.id !== "string" || target.mode === "existing" && target.url === void 0 && target.id === void 0) {
+    throw new ReviewPreparationError("The pre-submit handoff checkpoint is invalid.", "resume_pre_submit_checkpoint_invalid");
+  }
+  const checkpoint = value;
+  if (checkpoint.promptSha256 !== sha256Text2(normalizePrompt(prepared.prompt)) || checkpoint.manifestSha256 !== await sha256File2(prepared.manifestPath) || checkpoint.uploadManifestSha256 !== await sha256File2(prepared.uploadManifestPath)) {
+    throw new ReviewPreparationError(
+      "The pre-submit handoff checkpoint no longer matches the archived prompt or prepared context.",
+      "resume_pre_submit_checkpoint_mismatch"
+    );
+  }
+  if (checkpoint.target.mode === "existing") {
+    if (checkpoint.target.url !== void 0 && !isChatGPTUrl(checkpoint.target.url)) {
+      throw new ReviewPreparationError("The pre-submit handoff checkpoint has an invalid existing-thread target.", "resume_pre_submit_checkpoint_invalid");
+    }
+    const urlId = conversationIdFromUrl(checkpoint.target.url);
+    if (checkpoint.target.id !== void 0 && urlId !== void 0 && checkpoint.target.id !== urlId || (checkpoint.target.id ?? urlId) === void 0 || isProvisionalConversationId(checkpoint.target.id ?? urlId)) {
+      throw new ReviewPreparationError("The pre-submit handoff checkpoint has an invalid existing-thread target.", "resume_pre_submit_checkpoint_invalid");
+    }
+  }
+  return checkpoint;
+}
+function validatePreSubmitResumeCrossCheck(args, checkpoint) {
+  if (args.resume === void 0) return;
+  const suppliedUrlId = conversationIdFromUrl(args.resume.threadUrl);
+  if (args.resume.conversationId !== void 0 && suppliedUrlId !== void 0 && args.resume.conversationId !== suppliedUrlId) {
+    throw new ReviewPreparationError("resume.conversationId and resume.threadUrl refer to different Chat conversations.", "resume_thread_mismatch");
+  }
+  const suppliedId = args.resume.conversationId ?? suppliedUrlId;
+  if (suppliedId === void 0) return;
+  const checkpointId = checkpoint.target.mode === "existing" ? checkpoint.target.id ?? conversationIdFromUrl(checkpoint.target.url) : void 0;
+  if (checkpointId === void 0 || suppliedId !== checkpointId) {
+    throw new ReviewPreparationError("The caller-supplied resume thread does not match the pre-submit handoff checkpoint.", "resume_thread_mismatch");
+  }
+}
 async function readArchivedSubmission(archiveDirectory, prepared) {
   const confirmation = await readOptionalJson(join7(archiveDirectory, "submission-confirmation.json"));
   const submittedRecord = confirmation ?? await readOptionalJson(join7(archiveDirectory, "submission.json"));
@@ -16605,7 +16953,7 @@ async function readArchivedSubmission(archiveDirectory, prepared) {
     throw new ReviewPreparationError("The archive has no durable submission intent or confirmation record.", "resume_submission_unverified");
   }
   const state = intentOnly ? "intent" : value.state ?? "confirmed";
-  if (value.resubmitAllowed !== false || (state === "confirmed" || state === "ambiguous") && value.submitted !== true || (state === "intent" || state === "failed") && value.submitted === true || state !== "confirmed" && state !== "intent" && state !== "ambiguous" && state !== "failed" || !isRecord7(value.thread) || value.thread.url !== void 0 && typeof value.thread.url !== "string" || value.thread.id !== void 0 && typeof value.thread.id !== "string" || value.thread.tabId !== void 0 && typeof value.thread.tabId !== "string") {
+  if (value.resubmitAllowed !== false || (state === "confirmed" || state === "ambiguous") && value.submitted !== true || (state === "intent" || state === "failed") && value.submitted === true || state !== "confirmed" && state !== "intent" && state !== "ambiguous" && state !== "failed" || !isRecord7(value.thread) || value.thread.url !== void 0 && (typeof value.thread.url !== "string" || !isChatGPTUrl(value.thread.url)) || value.thread.id !== void 0 && typeof value.thread.id !== "string" || value.thread.tabId !== void 0 && typeof value.thread.tabId !== "string") {
     throw new ReviewPreparationError("The archived submission receipt does not prove a submit-once, non-resubmittable review.", "resume_submission_unverified");
   }
   const expectedPromptSha256 = sha256Text2(normalizePrompt(prepared.prompt));
@@ -16754,6 +17102,50 @@ function conversationIdFromUrl(url) {
 function isProvisionalConversationId(value) {
   return value?.startsWith("WEB:") === true;
 }
+async function readExactLatestUserText(env) {
+  if (env.page === void 0) return void 0;
+  if (typeof env.page.evaluate !== "function") {
+    const result = await readLatest(env, { role: "user", format: "text" });
+    return result.ok ? result.data?.text : void 0;
+  }
+  let timeout;
+  try {
+    return await Promise.race([
+      readLatestMessageText(env.page, "user"),
+      new Promise((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new ReviewBrowserUnresponsiveError("verifying the exact archived user prompt")),
+          EXACT_PROMPT_PROOF_TIMEOUT_MS
+        );
+      })
+    ]);
+  } finally {
+    if (timeout !== void 0) clearTimeout(timeout);
+  }
+}
+async function recoverCurrentVisibleThread(port, expectedPrompt, requiredTabId, claimedContext) {
+  if (requiredTabId === void 0) return void 0;
+  const conversationId = claimedContext.conversationId ?? conversationIdFromUrl(claimedContext.url);
+  if (claimedContext.tabId !== requiredTabId || conversationId === void 0 || isProvisionalConversationId(conversationId)) return void 0;
+  const recoveredUrl = claimedContext.url || new URL(`/c/${conversationId}`, "https://chatgpt.com/").toString();
+  const latestUserText = port.readExactLatestUserText === void 0 ? (await port.readLatestUser().catch(() => void 0))?.data?.text : await port.readExactLatestUserText();
+  if (!visibleUserTurnContainsExactPrompt(latestUserText ?? "", expectedPrompt)) return void 0;
+  return {
+    ok: true,
+    status: "ok",
+    data: {
+      url: recoveredUrl,
+      conversationId
+    },
+    warnings: ["Recovered the archived review from the already-visible prompt-identical Chat conversation."],
+    context: {
+      timestamp: port.now().toISOString(),
+      url: recoveredUrl,
+      conversationId,
+      tabId: claimedContext.tabId
+    }
+  };
+}
 function selectUniqueRecoveryCandidate(candidates, preferredTabId) {
   const exact = /* @__PURE__ */ new Map();
   for (const candidate of candidates) {
@@ -16797,7 +17189,7 @@ async function persistThreadCheckpoint(archiveDirectory, prepared, url, id2, tab
 }
 async function readArchivedThreadCheckpoint(archiveDirectory) {
   const value = JSON.parse(await readFile6(join7(archiveDirectory, "thread-checkpoint.json"), "utf8"));
-  if (value.schemaVersion !== 1 || !isRecord7(value.current) || value.current.url !== void 0 && typeof value.current.url !== "string" || value.current.id !== void 0 && typeof value.current.id !== "string" || value.current.tabId !== void 0 && typeof value.current.tabId !== "string" || typeof value.recoveryQuery !== "string" || typeof value.promptSha256 !== "string") {
+  if (value.schemaVersion !== 1 || !isRecord7(value.current) || value.current.url !== void 0 && (typeof value.current.url !== "string" || value.current.url.trim().length === 0 || !isChatGPTUrl(value.current.url)) || value.current.id !== void 0 && (typeof value.current.id !== "string" || value.current.id.trim().length === 0) || value.current.tabId !== void 0 && (typeof value.current.tabId !== "string" || value.current.tabId.trim().length === 0) || typeof value.recoveryQuery !== "string" || typeof value.promptSha256 !== "string") {
     throw new Error("Archived thread checkpoint is invalid.");
   }
   return value;
@@ -16819,7 +17211,11 @@ function validateThreadCheckpoint(checkpoint, submission, prepared) {
     throw new ReviewPreparationError("The mutable thread checkpoint prompt hash does not match the immutable archived prompt.", "resume_checkpoint_prompt_mismatch");
   }
   const submittedId = submission.thread.id ?? conversationIdFromUrl(submission.thread.url);
-  const checkpointId = checkpoint.current.id ?? conversationIdFromUrl(checkpoint.current.url);
+  const checkpointUrlId = conversationIdFromUrl(checkpoint.current.url);
+  const checkpointId = checkpoint.current.id ?? checkpointUrlId;
+  if (checkpoint.current.id !== void 0 && checkpointUrlId !== void 0 && checkpoint.current.id !== checkpointUrlId) {
+    throw new ReviewPreparationError("The mutable thread checkpoint URL and declared conversation ID disagree.", "resume_checkpoint_thread_mismatch");
+  }
   if (submittedId !== void 0 && checkpointId !== void 0 && !isProvisionalConversationId(submittedId) && !isProvisionalConversationId(checkpointId) && submittedId !== checkpointId) {
     throw new ReviewPreparationError("The mutable thread checkpoint points at a different conversation than the immutable submission receipt.", "resume_checkpoint_thread_mismatch");
   }
@@ -16862,11 +17258,12 @@ async function recoverReviewThread(env, query, expectedPrompt, preferred) {
   for (const candidate of candidates.values()) {
     const opened = await exactClaimOrOpenRecoveryCandidate(env, candidate, probe, preferred?.tabId);
     if (!opened.ok) {
+      if (mustStopBrowserRecovery(opened)) return opened;
       const restored2 = await restoreRecoveryProbe(env, probe);
       return restored2 ?? opened;
     }
-    const user = await readLatest(env, { role: "user", format: "text" });
-    if (user.ok && visibleUserTurnContainsExactPrompt(user.data?.text ?? "", expectedPrompt)) {
+    const userText = await readExactLatestUserText(env);
+    if (visibleUserTurnContainsExactPrompt(userText ?? "", expectedPrompt)) {
       exactMatches.push({ candidate, ...opened.context.tabId === void 0 ? {} : { tabId: opened.context.tabId } });
     }
     const restored = await restoreRecoveryProbe(env, probe);
@@ -16908,8 +17305,8 @@ async function recoverReviewThread(env, query, expectedPrompt, preferred) {
   }
   const finalOpened = await exactClaimOrOpenRecoveryCandidate(env, selected.candidate, probe, selected.tabId ?? preferred?.tabId);
   if (!finalOpened.ok) return finalOpened;
-  const finalUser = await readLatest(env, { role: "user", format: "text" });
-  if (!finalUser.ok || !visibleUserTurnContainsExactPrompt(finalUser.data?.text ?? "", expectedPrompt)) {
+  const finalUserText = await readExactLatestUserText(env);
+  if (!visibleUserTurnContainsExactPrompt(finalUserText ?? "", expectedPrompt)) {
     return {
       ok: false,
       status: "blocked",
@@ -16944,10 +17341,9 @@ async function exactClaimOrOpenRecoveryCandidate(env, candidate, probe, preferre
       preferExistingTab: false
     });
     if (preferredClaim.ok) {
-      const preferredState = env.page === void 0 ? void 0 : await readPageState(env.page).catch(() => void 0);
-      const preferredObservedId = preferredState?.conversationId ?? conversationIdFromUrl(preferredState?.url);
+      const preferredObservedId = preferredClaim.context.conversationId ?? conversationIdFromUrl(preferredClaim.context.url);
       if (preferredObservedId === candidate.conversationId) {
-        return recoveryCandidateSuccess(candidate, preferredClaim, preferredState);
+        return recoveryCandidateSuccess(candidate, preferredClaim, void 0);
       }
       const restored2 = await restoreRecoveryProbe(env, probe);
       if (restored2 !== void 0) return restored2;
@@ -16965,13 +17361,12 @@ async function exactClaimOrOpenRecoveryCandidate(env, candidate, probe, preferre
     preferExistingTab: false
   });
   if (claim.ok) {
-    const state2 = env.page === void 0 ? void 0 : await readPageState(env.page).catch(() => void 0);
-    const observedId2 = state2?.conversationId ?? conversationIdFromUrl(state2?.url) ?? claim.context.conversationId ?? conversationIdFromUrl(claim.context.url);
+    const observedId2 = claim.context.conversationId ?? conversationIdFromUrl(claim.context.url);
     if (observedId2 !== candidate.conversationId) {
       const restored2 = await restoreRecoveryProbe(env, probe);
       return restored2 ?? recoveryCandidateDrift(candidate, observedId2, claim.context);
     }
-    return recoveryCandidateSuccess(candidate, claim, state2);
+    return recoveryCandidateSuccess(candidate, claim, void 0);
   }
   if (claim.blocker?.code !== "existing_tab_not_found") {
     return commandFailureAsOpenThread(makeExistingTabRetryResumable(claim, true));
@@ -16981,6 +17376,7 @@ async function exactClaimOrOpenRecoveryCandidate(env, candidate, probe, preferre
   const opened = await openThread(env, { url: candidate.url, timeoutMs: RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS });
   if (opened.context.tabId === void 0 && probe.tabId !== void 0) opened.context.tabId = probe.tabId;
   if (!opened.ok) {
+    if (mustStopBrowserRecovery(opened)) return opened;
     const repaired = await restoreRecoveryProbe(env, probe);
     return repaired ?? opened;
   }
@@ -17027,18 +17423,19 @@ async function restoreRecoveryProbe(env, probe) {
 }
 function recoveryCandidateSuccess(candidate, claim, state) {
   const title = state?.title ?? candidate.title;
+  const url = (state?.url ?? claim.context.url) || candidate.url;
   return {
     ok: true,
     status: "ok",
     data: {
-      url: state?.url ?? candidate.url,
+      url,
       conversationId: candidate.conversationId,
       ...title === void 0 ? {} : { title }
     },
     warnings: claim.warnings,
     context: {
       ...claim.context,
-      url: state?.url ?? candidate.url,
+      url,
       conversationId: candidate.conversationId
     }
   };
@@ -17086,8 +17483,11 @@ function commandFailureAsOpenThread(result) {
     context: result.context
   };
 }
+function mustStopBrowserRecovery(result) {
+  return result.blocker?.code === "existing_tab_unresponsive" || result.blocker?.code === "existing_tab_handoff_completed" || result.blocker?.code === "existing_tab_temporarily_claimed";
+}
 function makeExistingTabRetryResumable(result, onResume) {
-  if (!onResume || result.ok || result.blocker?.code !== "existing_tab_ambiguous" && result.blocker?.code !== "existing_tab_temporarily_claimed") return result;
+  if (!onResume || result.ok || result.blocker?.code !== "existing_tab_not_found" && result.blocker?.code !== "existing_tab_ambiguous" && result.blocker?.code !== "existing_tab_temporarily_claimed" && result.blocker?.code !== "existing_tab_unresponsive" && result.blocker?.code !== "existing_tab_handoff_completed") return result;
   return {
     ...result,
     blocker: { ...result.blocker, resumable: true }
@@ -17194,7 +17594,13 @@ function validateRequestedThread(args) {
   if (args.resume !== void 0 && args.thread !== void 0) {
     throw new ReviewPreparationError("thread and resume cannot be used together.", "thread_resume_conflict");
   }
+  if (args.resume?.threadUrl !== void 0 && !isChatGPTUrl(args.resume.threadUrl)) {
+    throw new ReviewPreparationError("resume.threadUrl must point to ChatGPT.", "resume_thread_mismatch");
+  }
   if (args.thread === void 0) return;
+  if (args.thread.url !== void 0 && !isChatGPTUrl(args.thread.url)) {
+    throw new ReviewPreparationError("thread.url must point to ChatGPT.", "thread_target_invalid");
+  }
   const urlId = conversationIdFromUrl(args.thread.url);
   if (args.thread.url === void 0 && args.thread.id === void 0) {
     throw new ReviewPreparationError("thread requires a canonical Chat conversation URL or id.", "thread_target_missing");
