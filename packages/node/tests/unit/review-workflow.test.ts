@@ -145,7 +145,7 @@ describe("Pro review state machine", () => {
     expect(operations.filter(operation => operation.endsWith("after-handoff"))).toEqual([]);
   });
 
-  it("recovers through the first duplicate tab for one canonical conversation without opening another", async () => {
+  it("recovers through one alternate duplicate tab for a canonical conversation without opening another", async () => {
     const claimed: string[] = [];
     const created: string[] = [];
     const navigated: string[] = [];
@@ -165,6 +165,7 @@ describe("Pro review state machine", () => {
         claimTab: async tab => {
           const id = typeof tab === "string" ? tab : tab.id;
           claimed.push(id);
+          if (id === "one") throw new Error("Tab is already part of browser session stale-owner");
           return pages.get(id)!;
         }
       },
@@ -178,8 +179,8 @@ describe("Pro review state machine", () => {
     const env: RuntimeEnv = { browser, page: probe, expectedTabId: "probe" };
     const result = await defaultReviewWorkflowPort(env).recoverThread("Candidate", "Exact candidate prompt");
 
-    expect(result).toMatchObject({ ok: true, data: { conversationId: "candidate" }, context: { tabId: "one" } });
-    expect(claimed).toEqual(["one", "probe", "one"]);
+    expect(result).toMatchObject({ ok: true, data: { conversationId: "candidate" }, context: { tabId: "two" } });
+    expect(claimed).toEqual(["one", "two", "probe", "two"]);
     expect(created).toEqual([]);
     expect(navigated).toEqual([]);
   });

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.17
+
+- Exact canonical recovery may try one already-matching alternate tab after the
+  first returns the recognized ownership conflict; it never relists, navigates,
+  creates, or resubmits, and every other error remains terminal.
+
 ## 0.7.16
 
 - Internal recovery may select among duplicate tabs for the same canonical

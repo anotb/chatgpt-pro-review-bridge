@@ -4154,27 +4154,32 @@ async function selectExistingUserTab(browser, policy, collectDiagnostics, exactT
       diagnostics
     );
   }
-  const selected = matches[0];
-  let page;
-  try {
-    const claimed = exactTimeoutMs === void 0 ? await Promise.resolve(claimTab.call(browser.user, selected)) : await exactTargetOperation(exactTimeoutMs, "claiming the requested browser tab", () => Promise.resolve(claimTab.call(browser.user, selected)));
-    page = normalizePage(claimed);
-  } catch (error) {
-    if (error instanceof ExactTargetTimeoutError) throw existingTabUnresponsiveError(error.operation);
-    if (isExistingTabClaimConflict(error)) {
-      throw new ExistingTabSelectionError(
-        "A matching ChatGPT tab is still claimed by another browser-host invocation. Resume after that invocation exits; no duplicate tab was opened.",
-        "existing_tab_temporarily_claimed",
-        [selected],
-        diagnostics,
-        true
-      );
+  const target = policy.target;
+  const claimCandidates = target?.type === "conversationId" && policy.ifMissing === "block" && policy.ifMultiple === "first" && policy.requireChatGPT === true ? matches.slice(0, 2) : [matches[0]];
+  for (const [index, selected] of claimCandidates.entries()) {
+    let page;
+    try {
+      const claimed = exactTimeoutMs === void 0 ? await Promise.resolve(claimTab.call(browser.user, selected)) : await exactTargetOperation(exactTimeoutMs, "claiming the requested browser tab", () => Promise.resolve(claimTab.call(browser.user, selected)));
+      page = normalizePage(claimed);
+    } catch (error) {
+      if (error instanceof ExactTargetTimeoutError) throw existingTabUnresponsiveError(error.operation);
+      if (isExistingTabClaimConflict(error)) {
+        if (index + 1 < claimCandidates.length) continue;
+        throw new ExistingTabSelectionError(
+          "A matching ChatGPT tab is still claimed by another browser-host invocation. Resume after that invocation exits; no duplicate tab was opened.",
+          "existing_tab_temporarily_claimed",
+          [selected],
+          diagnostics,
+          true
+        );
+      }
+      throw error;
     }
-    throw error;
+    const stableId = stableUserTabId(selected);
+    if (stableId !== void 0) page = pageWithStableTabId(page, stableId);
+    return diagnostics === void 0 ? { page } : { page, diagnostics };
   }
-  const stableId = stableUserTabId(selected);
-  if (stableId !== void 0) page = pageWithStableTabId(page, stableId);
-  return diagnostics === void 0 ? { page } : { page, diagnostics };
+  throw new Error("Existing-tab claim candidates were unexpectedly exhausted.");
 }
 function matchingUserTabs(tabs, policy) {
   const target = policy.target ?? { type: "selected", host: "chatgpt" };

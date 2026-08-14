@@ -172,6 +172,97 @@ describe("existing Chrome tab bootstrap", () => {
     expect(created).toEqual([]);
   });
 
+  it("tries one alternate duplicate conversation tab after a recognized claim conflict", async () => {
+    const claimed: unknown[] = [];
+    const one = { id: "one", providerTabId: "provider-one", url: "https://chatgpt.com/c/abc-123", title: "Review" };
+    const two = { id: "two", providerTabId: "provider-two", url: "https://chatgpt.com/c/abc-123", title: "Review" };
+    const three = { id: "three", providerTabId: "provider-three", url: "https://chatgpt.com/c/abc-123", title: "Review" };
+    const browser: BrowserLike = {
+      name: "chrome",
+      user: {
+        openTabs: async () => [one, two, three],
+        claimTab: async tab => {
+          claimed.push(tab);
+          if (tab === one) throw new Error("Tab is already part of browser session stale-owner");
+          return fakeChatGPTPage("two", two.url, two.title);
+        }
+      },
+      tabs: {
+        list: async () => { throw new Error("The alternate fresh user tab must be claimed before controlled-tab listing."); },
+        create: async () => { throw new Error("Duplicate recovery must not create a tab."); }
+      }
+    };
+
+    const result = await bootstrap({ browser }, {
+      existingTab: {
+        target: { type: "conversationId", conversationId: "abc-123" },
+        ifMissing: "block",
+        ifMultiple: "first",
+        requireChatGPT: true
+      }
+    });
+
+    expect(result).toMatchObject({ ok: true, context: { tabId: "provider-two", conversationId: "abc-123" } });
+    expect(claimed).toEqual([one, two]);
+  });
+
+  it("keeps the temporary-claim blocker when both duplicate conversation tabs conflict", async () => {
+    const claimed: unknown[] = [];
+    const one = { id: "one", url: "https://chatgpt.com/c/abc-123" };
+    const two = { id: "two", url: "https://chatgpt.com/c/abc-123" };
+    const result = await bootstrap({
+      browser: {
+        name: "chrome",
+        user: {
+          openTabs: async () => [one, two],
+          claimTab: async tab => {
+            claimed.push(tab);
+            throw new Error("Tab is already part of browser session stale-owner");
+          }
+        }
+      }
+    }, {
+      existingTab: {
+        target: { type: "conversationId", conversationId: "abc-123" },
+        ifMissing: "block",
+        ifMultiple: "first",
+        requireChatGPT: true
+      }
+    });
+
+    expect(result).toMatchObject({ ok: false, blocker: { code: "existing_tab_temporarily_claimed", resumable: true } });
+    expect(claimed).toEqual([one, two]);
+  });
+
+  it("does not try an alternate duplicate after an unrecognized claim error", async () => {
+    const claimed: unknown[] = [];
+    const one = { id: "one", url: "https://chatgpt.com/c/abc-123" };
+    const two = { id: "two", url: "https://chatgpt.com/c/abc-123" };
+    const result = await bootstrap({
+      browser: {
+        name: "chrome",
+        user: {
+          openTabs: async () => [one, two],
+          claimTab: async tab => {
+            claimed.push(tab);
+            if (tab === one) throw new Error("adapter claim failed");
+            return fakeChatGPTPage("two", two.url, "Review");
+          }
+        }
+      }
+    }, {
+      existingTab: {
+        target: { type: "conversationId", conversationId: "abc-123" },
+        ifMissing: "block",
+        ifMultiple: "first",
+        requireChatGPT: true
+      }
+    });
+
+    expect(result).toMatchObject({ ok: false, status: "error" });
+    expect(claimed).toEqual([one]);
+  });
+
   it("claims an exact open user ChatGPT tab by conversation id without navigating", async () => {
     const claimed: unknown[] = [];
     const browser: BrowserLike = {
