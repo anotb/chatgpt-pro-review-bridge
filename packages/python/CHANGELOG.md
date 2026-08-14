@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.19
+
+- Aligns the parity package with the fresh-tab AskPro workflow that was
+  live-qualified through verified Pro submission and same-archive completion.
+
 ## 0.7.18
 
 - After claiming an existing background tab, exact canonical recovery now waits

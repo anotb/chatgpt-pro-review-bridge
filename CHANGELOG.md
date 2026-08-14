@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.19 - 2026-08-14
+
+- Fresh AskPro workflows now open a dedicated ChatGPT tab instead of reusing
+  arbitrary existing tab state; the path is live-qualified through a verified
+  Pro submission and duplicate-safe same-archive completion.
+
 ## 0.7.18 - 2026-08-14
 
 - After claiming an existing background tab, exact canonical recovery now waits

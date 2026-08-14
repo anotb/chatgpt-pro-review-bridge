@@ -44,6 +44,43 @@ const snapshot: ConfigurationSnapshotData = {
 const baseline: ArtifactInventoryData = { capturedAt: "before", items: [] };
 
 describe("Pro review state machine", () => {
+  it("opens a fresh tab for a new question instead of reusing an arbitrary ChatGPT tab", async () => {
+    const operations: string[] = [];
+    const existing = mutableChatPage("existing", "https://chatgpt.com/", {});
+    const fresh = mutableChatPage("fresh", "https://chatgpt.com/", {});
+    const browser: BrowserLike = {
+      tabs: {
+        selected: async () => {
+          operations.push("selected");
+          return existing;
+        },
+        list: async () => {
+          operations.push("list");
+          return [existing];
+        },
+        create: async () => {
+          operations.push("create");
+          return fresh;
+        }
+      },
+      user: {
+        openTabs: async () => {
+          operations.push("openTabs");
+          return [];
+        },
+        claimTab: async () => {
+          operations.push("claimTab");
+          return existing;
+        }
+      }
+    };
+
+    const result = await defaultReviewWorkflowPort({ browser }).bootstrap();
+
+    expect(result).toMatchObject({ ok: true, context: { tabId: "fresh" } });
+    expect(operations).toEqual(["create"]);
+  });
+
   it("exact-claims the archived tab among duplicate conversation tabs without navigating", async () => {
     const claimed: string[] = [];
     const navigated: string[] = [];

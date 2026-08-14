@@ -1134,7 +1134,7 @@ export function defaultReviewWorkflowPort(env: RuntimeEnv): ReviewWorkflowPort {
   return {
     now: () => env.now?.() ?? new Date(),
     bootstrap: target => bootstrap(env, target === undefined
-        ? { preferExistingTab: true }
+        ? { preferExistingTab: false }
         : {
           existingTab: {
             target: target.conversationId === undefined

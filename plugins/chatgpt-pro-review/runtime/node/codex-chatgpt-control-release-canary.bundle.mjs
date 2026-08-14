@@ -17204,7 +17204,7 @@ async function runCodeReviewWithPort(args, port) {
 function defaultReviewWorkflowPort(env) {
   return {
     now: () => env.now?.() ?? /* @__PURE__ */ new Date(),
-    bootstrap: (target) => bootstrap(env, target === void 0 ? { preferExistingTab: true } : {
+    bootstrap: (target) => bootstrap(env, target === void 0 ? { preferExistingTab: false } : {
       existingTab: {
         target: target.conversationId === void 0 ? { type: "url", url: target.url } : { type: "conversationId", conversationId: target.conversationId },
         ifMissing: "open",
