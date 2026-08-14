@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.13
+
+- A fresh host claims an exact provider-matched open tab before repeating stale
+  controlled-metadata handoff, preventing a handoff loop without opening or
+  submitting duplicates.
+
 ## 0.7.12
 
 - Aligns the bundled Node runtime with exact-tab handoff and the distinction

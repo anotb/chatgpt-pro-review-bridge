@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.13
+
+- A fresh host claims an exact provider-matched open tab before repeating stale
+  controlled-metadata handoff, preventing a handoff loop without opening or
+  submitting duplicates.
+
 ## 0.7.12
 
 - Hands a stale controlled tab back to Chrome so a later same-archive,

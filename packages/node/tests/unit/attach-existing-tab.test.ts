@@ -475,6 +475,140 @@ describe("existing Chrome tab bootstrap", () => {
     expect(operations).toEqual(["list", "finalize"]);
   });
 
+  it("reclaims a released provider tab on the next fresh host without handing it off again", async () => {
+    const operations: string[] = [];
+    const stableId = "target-provider";
+    const url = "https://chatgpt.com/c/abc-123";
+    const controlled = { id: stableId, url, title: "Review" };
+    const released = {
+      id: "fresh-opaque-handle",
+      providerTabId: stableId,
+      url,
+      title: "Review"
+    };
+    const args = {
+      existingTab: { target: { type: "tabId" as const, tabId: stableId }, ifMissing: "block" as const },
+      timeoutMs: 100
+    };
+
+    const first = await bootstrap({
+      browser: {
+        name: "chrome",
+        user: {
+          openTabs: async () => {
+            operations.push("first:openTabs");
+            return [released];
+          },
+          claimTab: async () => {
+            operations.push("first:claimTab");
+            throw new Error("Tab is already part of browser session stale-host");
+          }
+        },
+        tabs: {
+          list: async () => {
+            operations.push("first:list");
+            return [controlled];
+          },
+          finalize: async () => {
+            operations.push("first:finalize");
+          }
+        }
+      } as unknown as BrowserLike
+    }, args);
+
+    expect(first.blocker).toMatchObject({ code: "existing_tab_handoff_completed", resumable: true });
+
+    const claimed: unknown[] = [];
+    const second = await bootstrap({
+      browser: {
+        name: "chrome",
+        user: {
+          openTabs: async () => {
+            operations.push("second:openTabs");
+            return [released];
+          },
+          claimTab: async (tab: unknown) => {
+            operations.push("second:claimTab");
+            claimed.push(tab);
+            return fakeChatGPTPage("fresh-control-handle", url, "Review");
+          }
+        },
+        tabs: {
+          list: async () => {
+            throw new Error("A successful fresh user-tab claim must precede controlled-tab listing.");
+          },
+          finalize: async () => {
+            throw new Error("The released tab must not be handed off a second time.");
+          },
+          create: async () => {
+            operations.push("second:create");
+            return fakeChatGPTPage("duplicate", "https://chatgpt.com/", "ChatGPT");
+          }
+        }
+      } as unknown as BrowserLike
+    }, args);
+
+    expect(second.ok).toBe(true);
+    expect(second.context.tabId).toBe(stableId);
+    expect(claimed).toEqual([released]);
+    expect(operations).toEqual([
+      "first:openTabs",
+      "first:claimTab",
+      "first:list",
+      "first:finalize",
+      "second:openTabs",
+      "second:claimTab"
+    ]);
+  });
+
+  it("stops exact preclaim when open-tab enumeration fails", async () => {
+    const operations: string[] = [];
+    const browser: BrowserLike = {
+      name: "chrome",
+      user: {
+        openTabs: async () => {
+          operations.push("openTabs");
+          throw new Error("open tabs unavailable");
+        },
+        claimTab: async () => {
+          operations.push("claimTab");
+          return fakeChatGPTPage("unused", "https://chatgpt.com/", "ChatGPT");
+        }
+      },
+      tabs: {
+        list: async () => {
+          operations.push("list");
+          return [];
+        },
+        finalize: async () => {
+          operations.push("finalize");
+        },
+        create: async () => {
+          operations.push("create");
+          return fakeChatGPTPage("duplicate", "https://chatgpt.com/", "ChatGPT");
+        }
+      }
+    };
+
+    const result = await bootstrap({ browser }, {
+      existingTab: { target: { type: "tabId", tabId: "target-provider" }, ifMissing: "open" },
+      timeoutMs: 100
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: "blocked",
+      blocker: {
+        code: "existing_tab_unresponsive",
+        resumable: true,
+        diagnostics: {
+          existingTab: { mismatchReason: "user_open_tabs_unavailable" }
+        }
+      }
+    });
+    expect(operations).toEqual(["openTabs"]);
+  });
+
   it.each([
     { type: "conversationId" as const, conversationId: "abc-123" },
     { type: "url" as const, url: "https://chatgpt.com/c/abc-123" }
@@ -672,7 +806,7 @@ describe("existing Chrome tab bootstrap", () => {
     });
 
     expect(result.blocker).toMatchObject({ code: "existing_tab_unresponsive", resumable: true });
-    expect(operations).toEqual([]);
+    expect(operations).toEqual(["openTabs"]);
   });
 });
 

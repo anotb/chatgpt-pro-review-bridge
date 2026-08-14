@@ -3811,11 +3811,30 @@ async function handoffControlledTabs(tabs, controlled, match, timeoutMs) {
 async function selectExistingTab(browser, policy, exactTimeoutMs) {
   const target = policy.target ?? { type: "selected", host: "chatgpt" };
   const tabs = browser.tabs;
+  let exactUserMatch;
+  let exactUserClaimConflict;
   if (target.type === "selected" && typeof tabs?.selected === "function") {
     const selected = await Promise.resolve(tabs.selected.call(tabs)).catch(() => void 0);
     if (selected !== void 0 && isControllablePage(selected)) {
       const normalized = normalizePage(selected);
       if (await pageMatchesExistingTarget(normalized, policy, exactTimeoutMs)) return { page: normalized };
+    }
+  }
+  if (isDeterministicMetadataTarget(target)) {
+    try {
+      exactUserMatch = await selectExistingUserTab(
+        browser,
+        policy,
+        shouldCollectExistingTabDiagnostics(policy),
+        exactTimeoutMs,
+        true
+      );
+      if (exactUserMatch.page !== void 0) return exactUserMatch;
+    } catch (error) {
+      if (!(error instanceof ExistingTabSelectionError) || error.blockerDetails.code !== "existing_tab_temporarily_claimed") {
+        throw error;
+      }
+      exactUserClaimConflict = error;
     }
   }
   let controlledListed = false;
@@ -3874,7 +3893,8 @@ async function selectExistingTab(browser, policy, exactTimeoutMs) {
       if (error instanceof ExactTargetTimeoutError) throw existingTabUnresponsiveError(error.operation);
     }
   }
-  const userMatch = await selectExistingUserTab(
+  if (exactUserClaimConflict !== void 0) throw exactUserClaimConflict;
+  const userMatch = exactUserMatch ?? await selectExistingUserTab(
     browser,
     policy,
     shouldCollectExistingTabDiagnostics(policy),
@@ -3885,7 +3905,7 @@ async function selectExistingTab(browser, policy, exactTimeoutMs) {
   }
   return userMatch.diagnostics === void 0 ? { diagnostics: diagnosticsForUnavailableUserTabs(policy) } : userMatch;
 }
-async function selectExistingUserTab(browser, policy, collectDiagnostics, exactTimeoutMs) {
+async function selectExistingUserTab(browser, policy, collectDiagnostics, exactTimeoutMs, strictOpenTabsErrors = false) {
   const openTabs = browser.user?.openTabs;
   const claimTab = browser.user?.claimTab;
   if (typeof openTabs !== "function" || typeof claimTab !== "function") {
@@ -3896,6 +3916,15 @@ async function selectExistingUserTab(browser, policy, collectDiagnostics, exactT
     tabs = exactTimeoutMs === void 0 ? await Promise.resolve(openTabs.call(browser.user)) : await exactTargetOperation(exactTimeoutMs, "listing open browser tabs", () => Promise.resolve(openTabs.call(browser.user)));
   } catch (error) {
     if (error instanceof ExactTargetTimeoutError) throw existingTabUnresponsiveError(error.operation);
+    if (strictOpenTabsErrors) {
+      throw new ExistingTabSelectionError(
+        "The browser could not enumerate open tabs for the requested exact target.",
+        "existing_tab_unresponsive",
+        [],
+        diagnosticsForUnavailableUserTabs(policy, "user_open_tabs_unavailable"),
+        true
+      );
+    }
   }
   if (tabs === void 0) {
     return collectDiagnostics ? { diagnostics: diagnosticsForUnavailableUserTabs(policy, "user_open_tabs_unavailable") } : {};

@@ -435,12 +435,36 @@ async function selectExistingTab(
 ): Promise<ExistingTabSelectionOutcome> {
   const target = policy.target ?? { type: "selected", host: "chatgpt" };
   const tabs = browser.tabs as BridgeTabs | undefined;
+  let exactUserMatch: ExistingTabSelectionOutcome | undefined;
+  let exactUserClaimConflict: ExistingTabSelectionError | undefined;
 
   if (target.type === "selected" && typeof tabs?.selected === "function") {
     const selected = await Promise.resolve(tabs.selected.call(tabs)).catch(() => undefined);
     if (selected !== undefined && isControllablePage(selected)) {
       const normalized = normalizePage(selected);
       if (await pageMatchesExistingTarget(normalized, policy, exactTimeoutMs)) return { page: normalized };
+    }
+  }
+
+  // A fresh host may expose a handed-off tab through both APIs. Prefer the
+  // stable user-tab identity so stale controlled metadata cannot hand it off
+  // repeatedly or block the claim by stalling.
+  if (isDeterministicMetadataTarget(target)) {
+    try {
+      exactUserMatch = await selectExistingUserTab(
+        browser,
+        policy,
+        shouldCollectExistingTabDiagnostics(policy),
+        exactTimeoutMs,
+        true
+      );
+      if (exactUserMatch.page !== undefined) return exactUserMatch;
+    } catch (error) {
+      if (!(error instanceof ExistingTabSelectionError)
+        || error.blockerDetails.code !== "existing_tab_temporarily_claimed") {
+        throw error;
+      }
+      exactUserClaimConflict = error;
     }
   }
 
@@ -510,7 +534,9 @@ async function selectExistingTab(
     }
   }
 
-  const userMatch = await selectExistingUserTab(
+  if (exactUserClaimConflict !== undefined) throw exactUserClaimConflict;
+
+  const userMatch = exactUserMatch ?? await selectExistingUserTab(
     browser,
     policy,
     shouldCollectExistingTabDiagnostics(policy),
@@ -529,7 +555,8 @@ async function selectExistingUserTab(
   browser: BrowserLike,
   policy: ExistingTabPolicy,
   collectDiagnostics: boolean,
-  exactTimeoutMs?: number
+  exactTimeoutMs?: number,
+  strictOpenTabsErrors = false
 ): Promise<ExistingTabSelectionOutcome> {
   const openTabs = browser.user?.openTabs;
   const claimTab = browser.user?.claimTab;
@@ -544,6 +571,15 @@ async function selectExistingUserTab(
       : await exactTargetOperation(exactTimeoutMs, "listing open browser tabs", () => Promise.resolve(openTabs.call(browser.user)));
   } catch (error) {
     if (error instanceof ExactTargetTimeoutError) throw existingTabUnresponsiveError(error.operation);
+    if (strictOpenTabsErrors) {
+      throw new ExistingTabSelectionError(
+        "The browser could not enumerate open tabs for the requested exact target.",
+        "existing_tab_unresponsive",
+        [],
+        diagnosticsForUnavailableUserTabs(policy, "user_open_tabs_unavailable"),
+        true
+      );
+    }
   }
   if (tabs === undefined) {
     return collectDiagnostics
