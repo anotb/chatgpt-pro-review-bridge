@@ -15,13 +15,13 @@ The first-class `reviews.askPro(...)` packet preparation and visible-session orc
 ## Install
 
 ```bash
-python -m pip install https://github.com/anotb/chatgpt-pro-review-bridge/releases/download/v0.7.19/chatgpt_pro_review_bridge-0.7.19-py3-none-any.whl
+python -m pip install https://github.com/anotb/chatgpt-pro-review-bridge/releases/download/v0.7.20/chatgpt_pro_review_bridge-0.7.20-py3-none-any.whl
 ```
 
 The Python package needs a Node backend command for browser-control workflows. Install or build the Node package too:
 
 ```bash
-npm install chatgpt-pro-review-bridge@0.7.19
+npm install chatgpt-pro-review-bridge@0.7.20
 ```
 
 ## Development Install

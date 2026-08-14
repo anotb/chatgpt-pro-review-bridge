@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.20
+
+- Fresh AskPro briefly waits for a provisional WEB route to become canonical
+  before strict existing-conversation proof, avoiding a first-call resume;
+  final full capture drops superseded metadata-only poll warnings.
+
 ## 0.7.19
 
 - Aligns the parity package with the fresh-tab AskPro workflow that was

@@ -81,6 +81,61 @@ describe("Pro review state machine", () => {
     expect(operations).toEqual(["create"]);
   });
 
+  it("waits for a freshly submitted chat to acquire its canonical route", async () => {
+    const prompt = "Reply with exactly 391.";
+    let submitted = false;
+    let canonicalRouteReady = false;
+    const waits: number[] = [];
+    const send = {
+      evaluate: async <T>() => ({ disabled: false, busy: false, label: "Send prompt" } as T),
+      click: async () => {
+        submitted = true;
+      }
+    };
+    const page: PageLike = {
+      id: "fresh",
+      tabId: "fresh",
+      url: () => canonicalRouteReady
+        ? "https://chatgpt.com/c/canonical-submit"
+        : "https://chatgpt.com/c/WEB:provisional-submit",
+      title: async () => "ChatGPT",
+      evaluate: async <T, A = unknown>(fn: (arg: A) => T | Promise<T>, arg?: A): Promise<T> => {
+        const source = String(fn);
+        if (source.includes("document.querySelectorAll(selector).length")) return (submitted ? 1 : 0) as T;
+        if (source.includes("roleNodes")) {
+          return {
+            turnCount: submitted ? 1 : 0,
+            ...(submitted ? { latestText: prompt } : {})
+          } as T;
+        }
+        if (source.includes("node?.innerText")) return (submitted ? prompt : undefined) as T;
+        throw new Error(`Unexpected evaluate call: ${source}`);
+      },
+      getByRole: (role, options) => {
+        const name = String(options?.name ?? "");
+        if (role === "button" && /Send prompt/.test(name)) return send;
+        return { count: async () => 0, isVisible: async () => false };
+      },
+      waitForTimeout: async timeoutMs => {
+        waits.push(timeoutMs);
+        canonicalRouteReady = true;
+      },
+      waitForEvent: async () => ({})
+    };
+
+    const result = await defaultReviewWorkflowPort({ page }).submit(prompt, 0);
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: { submitted: true, userTurnText: prompt },
+      context: {
+        url: "https://chatgpt.com/c/canonical-submit",
+        conversationId: "canonical-submit"
+      }
+    });
+    expect(waits).toEqual([250]);
+  });
+
   it("exact-claims the archived tab among duplicate conversation tabs without navigating", async () => {
     const claimed: string[] = [];
     const navigated: string[] = [];
@@ -1025,6 +1080,24 @@ describe("Pro review state machine", () => {
     expect(JSON.parse(await readFile(join(result.archiveDirectory!, "receipt.json"), "utf8"))).toMatchObject({
       warnings: expect.arrayContaining([fidelityWarning])
     });
+  });
+
+  it("drops metadata-only polling warnings after the full response is captured", async () => {
+    const repo = await fixtureRepository();
+    const metadataWarning = "Assistant response text was omitted because responseContent is metadata; call readLatest to capture the completed answer.";
+    const result = await runCodeReviewWithPort({ repositoryRoot: repo, baseRef: "HEAD" }, makePort([], {
+      waitMetadata: async () => ({
+        ...success({ complete: true, assistantTurnCount: 1, elapsedMs: 10, responseChars: 42, responseSha256: "abc", responseContent: "metadata" as const }),
+        warnings: [metadataWarning]
+      })
+    }));
+
+    expect(result.status).toBe("completed");
+    expect(result.warnings).not.toContain(metadataWarning);
+    expect(result.rawSteps).toContainEqual(expect.objectContaining({
+      state: "POLL_METADATA",
+      warnings: [metadataWarning]
+    }));
   });
 
   it("checkpoints each artifact and resumes partial or completed downloads without duplicates", async () => {

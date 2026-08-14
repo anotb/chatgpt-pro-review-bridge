@@ -93,6 +93,11 @@ type ConversationAffinity = {
 const MAX_RECOVERY_CANDIDATES = 6;
 const RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS = 6_000;
 const EXACT_PROMPT_PROOF_TIMEOUT_MS = 12_000;
+const POST_SUBMIT_CANONICAL_ROUTE_TIMEOUT_MS = 6_000;
+const METADATA_RESPONSE_OMISSION_WARNINGS = new Set([
+  "Assistant response text was omitted because responseContent is metadata; call readLatest to capture the completed answer.",
+  "Partial assistant text was omitted because responseContent is metadata; call wait again on the same thread or readLatest after completion."
+]);
 
 class ReviewWorkflowError extends Error {
   constructor(readonly result: CommandResult<unknown>, readonly state: ReviewState) {
@@ -809,6 +814,7 @@ export async function runCodeReviewWithPort(args: ProCodeReviewArgs, port: Revie
       }
       if (archiveDirectory !== undefined) await writeImmutableFile(join(archiveDirectory, "response.md"), responseMarkdown);
     }
+    removeSupersededMetadataWarnings(warnings);
 
     await assertConversationAffinity(port, affinity, "VERIFY_PRO_AFTER_COMPLETION", true);
     const after = requireData(await runStep("VERIFY_PRO_AFTER_COMPLETION", () => port.inspectConfiguration()), "VERIFY_PRO_AFTER_COMPLETION");
@@ -1183,7 +1189,7 @@ export function defaultReviewWorkflowPort(env: RuntimeEnv): ReviewWorkflowPort {
     attach: paths => attachFiles(env, { paths, includeHashes: true }),
     messageStatus: () => messageStatus(env, { maxPreviewChars: 0 }),
     compose: text => composeMessage(env, { text, mode: "replace" }),
-    submit: (text, previousTurnCount) => submitMessage(env, { text, ...(previousTurnCount === undefined ? {} : { previousTurnCount }) }),
+    submit: (text, previousTurnCount) => submitReviewPrompt(env, text, previousTurnCount),
     waitMetadata: (afterAssistantTurnCount, timeoutMs, stableMs, pollMs) => waitForMessage(env, {
       afterAssistantTurnCount,
       timeoutMs,
@@ -1206,6 +1212,59 @@ export function defaultReviewWorkflowPort(env: RuntimeEnv): ReviewWorkflowPort {
       which: { index, ...(turnId === undefined ? {} : { turnId }) }
     })
   };
+}
+
+async function submitReviewPrompt(
+  env: RuntimeEnv,
+  text: string,
+  previousTurnCount: number | undefined
+): Promise<CommandResult<SubmitData>> {
+  const result = await submitMessage(env, { text, ...(previousTurnCount === undefined ? {} : { previousTurnCount }) });
+  const submittedConversationId = result.context.conversationId ?? conversationIdFromUrl(result.context.url);
+  if (result.ok !== true
+    || result.data?.submitted !== true
+    || (submittedConversationId !== undefined && !isProvisionalConversationId(submittedConversationId))) {
+    return result;
+  }
+
+  const canonicalUrl = await waitForCanonicalConversationRoute(env, POST_SUBMIT_CANONICAL_ROUTE_TIMEOUT_MS);
+  const canonicalId = conversationIdFromUrl(canonicalUrl);
+  return canonicalUrl === undefined || canonicalId === undefined
+    ? result
+    : {
+        ...result,
+        context: {
+          ...result.context,
+          url: canonicalUrl,
+          conversationId: canonicalId
+        }
+      };
+}
+
+async function waitForCanonicalConversationRoute(env: RuntimeEnv, timeoutMs: number): Promise<string | undefined> {
+  const page = env.page;
+  if (page === undefined || typeof page.url !== "function") return undefined;
+  const startedAt = Date.now();
+  do {
+    const currentUrl = await Promise.resolve(page.url()).catch(() => "");
+    const currentId = typeof currentUrl === "string" ? conversationIdFromUrl(currentUrl) : undefined;
+    if (currentId !== undefined && !isProvisionalConversationId(currentId)) return currentUrl;
+    const remainingMs = timeoutMs - (Date.now() - startedAt);
+    if (remainingMs <= 0) break;
+    const waitMs = Math.min(250, remainingMs);
+    if (typeof page.waitForTimeout === "function") {
+      await page.waitForTimeout(waitMs);
+    } else {
+      await new Promise(resolve => setTimeout(resolve, waitMs));
+    }
+  } while (Date.now() - startedAt < timeoutMs);
+  return undefined;
+}
+
+function removeSupersededMetadataWarnings(warnings: string[]): void {
+  for (let index = warnings.length - 1; index >= 0; index -= 1) {
+    if (METADATA_RESPONSE_OMISSION_WARNINGS.has(warnings[index]!)) warnings.splice(index, 1);
+  }
 }
 
 async function assertPageSafe(port: ReviewWorkflowPort, state: ReviewState): Promise<void> {

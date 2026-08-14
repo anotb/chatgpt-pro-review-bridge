@@ -15745,6 +15745,11 @@ async function waitForLeaseTurnover(leasePath, timeoutMs = 3e3) {
 var MAX_RECOVERY_CANDIDATES = 6;
 var RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS = 6e3;
 var EXACT_PROMPT_PROOF_TIMEOUT_MS = 12e3;
+var POST_SUBMIT_CANONICAL_ROUTE_TIMEOUT_MS = 6e3;
+var METADATA_RESPONSE_OMISSION_WARNINGS = /* @__PURE__ */ new Set([
+  "Assistant response text was omitted because responseContent is metadata; call readLatest to capture the completed answer.",
+  "Partial assistant text was omitted because responseContent is metadata; call wait again on the same thread or readLatest after completion."
+]);
 var ReviewWorkflowError = class extends Error {
   constructor(result, state) {
     super(result.blocker?.message ?? result.error?.message ?? `Review workflow failed during ${state}.`);
@@ -16359,6 +16364,7 @@ async function runCodeReviewWithPort(args, port) {
       }
       if (archiveDirectory !== void 0) await writeImmutableFile(join7(archiveDirectory, "response.md"), responseMarkdown);
     }
+    removeSupersededMetadataWarnings(warnings);
     await assertConversationAffinity(port, affinity, "VERIFY_PRO_AFTER_COMPLETION", true);
     const after = requireData(await runStep("VERIFY_PRO_AFTER_COMPLETION", () => port.inspectConfiguration()), "VERIFY_PRO_AFTER_COMPLETION");
     await assertConversationAffinity(port, affinity, "VERIFY_PRO_AFTER_COMPLETION", true);
@@ -16693,7 +16699,7 @@ function defaultReviewWorkflowPort(env) {
     attach: (paths) => attachFiles(env, { paths, includeHashes: true }),
     messageStatus: () => messageStatus(env, { maxPreviewChars: 0 }),
     compose: (text) => composeMessage(env, { text, mode: "replace" }),
-    submit: (text, previousTurnCount) => submitMessage(env, { text, ...previousTurnCount === void 0 ? {} : { previousTurnCount } }),
+    submit: (text, previousTurnCount) => submitReviewPrompt(env, text, previousTurnCount),
     waitMetadata: (afterAssistantTurnCount, timeoutMs, stableMs, pollMs) => waitForMessage(env, {
       afterAssistantTurnCount,
       timeoutMs,
@@ -16716,6 +16722,47 @@ function defaultReviewWorkflowPort(env) {
       which: { index, ...turnId === void 0 ? {} : { turnId } }
     })
   };
+}
+async function submitReviewPrompt(env, text, previousTurnCount) {
+  const result = await submitMessage(env, { text, ...previousTurnCount === void 0 ? {} : { previousTurnCount } });
+  const submittedConversationId = result.context.conversationId ?? conversationIdFromUrl(result.context.url);
+  if (result.ok !== true || result.data?.submitted !== true || submittedConversationId !== void 0 && !isProvisionalConversationId(submittedConversationId)) {
+    return result;
+  }
+  const canonicalUrl = await waitForCanonicalConversationRoute(env, POST_SUBMIT_CANONICAL_ROUTE_TIMEOUT_MS);
+  const canonicalId = conversationIdFromUrl(canonicalUrl);
+  return canonicalUrl === void 0 || canonicalId === void 0 ? result : {
+    ...result,
+    context: {
+      ...result.context,
+      url: canonicalUrl,
+      conversationId: canonicalId
+    }
+  };
+}
+async function waitForCanonicalConversationRoute(env, timeoutMs) {
+  const page = env.page;
+  if (page === void 0 || typeof page.url !== "function") return void 0;
+  const startedAt = Date.now();
+  do {
+    const currentUrl = await Promise.resolve(page.url()).catch(() => "");
+    const currentId = typeof currentUrl === "string" ? conversationIdFromUrl(currentUrl) : void 0;
+    if (currentId !== void 0 && !isProvisionalConversationId(currentId)) return currentUrl;
+    const remainingMs2 = timeoutMs - (Date.now() - startedAt);
+    if (remainingMs2 <= 0) break;
+    const waitMs = Math.min(250, remainingMs2);
+    if (typeof page.waitForTimeout === "function") {
+      await page.waitForTimeout(waitMs);
+    } else {
+      await new Promise((resolve7) => setTimeout(resolve7, waitMs));
+    }
+  } while (Date.now() - startedAt < timeoutMs);
+  return void 0;
+}
+function removeSupersededMetadataWarnings(warnings) {
+  for (let index = warnings.length - 1; index >= 0; index -= 1) {
+    if (METADATA_RESPONSE_OMISSION_WARNINGS.has(warnings[index])) warnings.splice(index, 1);
+  }
 }
 async function assertConversationAffinity(port, affinity, state, resumable) {
   const page = await port.pageState();
