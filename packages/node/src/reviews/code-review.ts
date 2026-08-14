@@ -8,6 +8,7 @@ import { parseConversationId, readPageState, type PageState } from "../browser/p
 import { captureArtifactBaseline, captureArtifactDelta } from "../commands/artifact-inventory.js";
 import { downloadLatestArtifact } from "../commands/artifacts.js";
 import { applyConfiguration, configurationMatchesSelection, inspectConfiguration, restoreConfiguration, snapshotConfiguration } from "../commands/configuration.js";
+import { waitForConversationHydrated } from "../commands/conversation.js";
 import { openExperience } from "../commands/experience.js";
 import { attachFiles, downloadLatestFile } from "../commands/files.js";
 import { composeMessage, messageStatus, readLatest, submitMessage, waitForMessage } from "../commands/messages.js";
@@ -2191,6 +2192,9 @@ async function exactClaimOrOpenRecoveryCandidate(
     if (preferredClaim.ok) {
       const preferredObservedId = preferredClaim.context.conversationId ?? conversationIdFromUrl(preferredClaim.context.url);
       if (preferredObservedId === candidate.conversationId) {
+        if (env.page !== undefined) {
+          await waitForConversationHydrated(env.page, RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS, candidate.conversationId);
+        }
         return recoveryCandidateSuccess(candidate, preferredClaim, undefined);
       }
       const restored = await restoreRecoveryProbe(env, probe);
@@ -2213,6 +2217,9 @@ async function exactClaimOrOpenRecoveryCandidate(
     if (observedId !== candidate.conversationId) {
       const restored = await restoreRecoveryProbe(env, probe);
       return restored ?? recoveryCandidateDrift(candidate, observedId, claim.context);
+    }
+    if (env.page !== undefined) {
+      await waitForConversationHydrated(env.page, RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS, candidate.conversationId);
     }
     return recoveryCandidateSuccess(candidate, claim, undefined);
   }

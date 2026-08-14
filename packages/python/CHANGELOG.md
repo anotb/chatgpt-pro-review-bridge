@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.18
+
+- After claiming an existing background tab, exact canonical recovery now waits
+  for its conversation DOM to hydrate before strict prompt proof; it does not
+  navigate, open a new tab, or resubmit.
+
 ## 0.7.17
 
 - Exact canonical recovery may try one already-matching alternate tab after the

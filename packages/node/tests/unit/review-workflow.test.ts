@@ -145,9 +145,10 @@ describe("Pro review state machine", () => {
     expect(operations.filter(operation => operation.endsWith("after-handoff"))).toEqual([]);
   });
 
-  it("recovers through one alternate duplicate tab for a canonical conversation without opening another", async () => {
+  it("waits for an alternate duplicate canonical tab to hydrate before exact prompt recovery", async () => {
     const claimed: string[] = [];
     const created: string[] = [];
+    const hydrationWaits: number[] = [];
     const navigated: string[] = [];
     const probe = mutableChatPage("probe", "https://chatgpt.com/", {
       home: '<a href="/c/candidate"><div>Candidate</div></a>'
@@ -155,9 +156,20 @@ describe("Pro review state machine", () => {
     const one = mutableChatPage("one", "https://chatgpt.com/c/candidate", {
       conversations: { candidate: "Exact candidate prompt" }
     }, navigated);
-    const two = mutableChatPage("two", "https://chatgpt.com/c/candidate", {
+    const hydratedTwo = mutableChatPage("two", "https://chatgpt.com/c/candidate", {
       conversations: { candidate: "Exact candidate prompt" }
     }, navigated);
+    let twoHydrated = false;
+    const two: PageLike = {
+      ...hydratedTwo,
+      content: async () => twoHydrated
+        ? hydratedTwo.content!()
+        : "<main>New chat Search chats Chat with ChatGPT</main>",
+      waitForTimeout: async timeoutMs => {
+        hydrationWaits.push(timeoutMs);
+        if (timeoutMs === 500) twoHydrated = true;
+      }
+    };
     const pages = new Map([["probe", probe], ["one", one], ["two", two]]);
     const browser: BrowserLike = {
       user: {
@@ -181,6 +193,7 @@ describe("Pro review state machine", () => {
 
     expect(result).toMatchObject({ ok: true, data: { conversationId: "candidate" }, context: { tabId: "two" } });
     expect(claimed).toEqual(["one", "two", "probe", "two"]);
+    expect(hydrationWaits).toEqual([500, 250, 250]);
     expect(created).toEqual([]);
     expect(navigated).toEqual([]);
   });

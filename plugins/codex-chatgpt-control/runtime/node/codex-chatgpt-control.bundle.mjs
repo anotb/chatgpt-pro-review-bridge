@@ -17660,6 +17660,9 @@ async function exactClaimOrOpenRecoveryCandidate(env, candidate, probe, preferre
     if (preferredClaim.ok) {
       const preferredObservedId = preferredClaim.context.conversationId ?? conversationIdFromUrl(preferredClaim.context.url);
       if (preferredObservedId === candidate.conversationId) {
+        if (env.page !== void 0) {
+          await waitForConversationHydrated(env.page, RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS, candidate.conversationId);
+        }
         return recoveryCandidateSuccess(candidate, preferredClaim, void 0);
       }
       const restored2 = await restoreRecoveryProbe(env, probe);
@@ -17682,6 +17685,9 @@ async function exactClaimOrOpenRecoveryCandidate(env, candidate, probe, preferre
     if (observedId2 !== candidate.conversationId) {
       const restored2 = await restoreRecoveryProbe(env, probe);
       return restored2 ?? recoveryCandidateDrift(candidate, observedId2, claim.context);
+    }
+    if (env.page !== void 0) {
+      await waitForConversationHydrated(env.page, RECOVERY_CANDIDATE_OPEN_TIMEOUT_MS, candidate.conversationId);
     }
     return recoveryCandidateSuccess(candidate, claim, void 0);
   }
