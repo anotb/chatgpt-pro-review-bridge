@@ -17601,7 +17601,7 @@ async function exactClaimOrOpenRecoveryCandidate(env, candidate, probe, preferre
     existingTab: {
       target: { type: "conversationId", conversationId: candidate.conversationId },
       ifMissing: "block",
-      ifMultiple: "block",
+      ifMultiple: "first",
       requireChatGPT: true
     },
     preferExistingTab: false

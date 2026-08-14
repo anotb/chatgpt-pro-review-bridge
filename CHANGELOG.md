@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.16 - 2026-08-13
+
+- Internal recovery may select among duplicate tabs for the same canonical
+  conversation, then re-verifies exact prompt and tab affinity; generic
+  ambiguity remains strict, with no duplicate open or resubmit.
+
 ## 0.7.15 - 2026-08-13
 
 - Claimed-tab page-state checks no longer reference an unavailable

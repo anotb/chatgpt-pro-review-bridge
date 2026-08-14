@@ -145,19 +145,27 @@ describe("Pro review state machine", () => {
     expect(operations.filter(operation => operation.endsWith("after-handoff"))).toEqual([]);
   });
 
-  it("blocks duplicate canonical recovery tabs resumably when no archived tab discriminates them", async () => {
+  it("recovers through the first duplicate tab for one canonical conversation without opening another", async () => {
+    const claimed: string[] = [];
     const created: string[] = [];
+    const navigated: string[] = [];
     const probe = mutableChatPage("probe", "https://chatgpt.com/", {
       home: '<a href="/c/candidate"><div>Candidate</div></a>'
-    });
+    }, navigated);
+    const one = mutableChatPage("one", "https://chatgpt.com/c/candidate", {
+      conversations: { candidate: "Exact candidate prompt" }
+    }, navigated);
+    const two = mutableChatPage("two", "https://chatgpt.com/c/candidate", {
+      conversations: { candidate: "Exact candidate prompt" }
+    }, navigated);
+    const pages = new Map([["probe", probe], ["one", one], ["two", two]]);
     const browser: BrowserLike = {
       user: {
-        openTabs: async () => [
-          { id: "one", url: "https://chatgpt.com/c/candidate", title: "Candidate" },
-          { id: "two", url: "https://chatgpt.com/c/candidate", title: "Candidate" }
-        ],
-        claimTab: async () => {
-          throw new Error("Ambiguous candidates must not be claimed.");
+        openTabs: async () => [...pages].map(([id, page]) => ({ id, url: page.url!() as string, title: id })),
+        claimTab: async tab => {
+          const id = typeof tab === "string" ? tab : tab.id;
+          claimed.push(id);
+          return pages.get(id)!;
         }
       },
       tabs: {
@@ -170,11 +178,10 @@ describe("Pro review state machine", () => {
     const env: RuntimeEnv = { browser, page: probe, expectedTabId: "probe" };
     const result = await defaultReviewWorkflowPort(env).recoverThread("Candidate", "Exact candidate prompt");
 
-    expect(result).toMatchObject({
-      ok: false,
-      blocker: { code: "existing_tab_ambiguous", resumable: true }
-    });
+    expect(result).toMatchObject({ ok: true, data: { conversationId: "candidate" }, context: { tabId: "one" } });
+    expect(claimed).toEqual(["one", "probe", "one"]);
     expect(created).toEqual([]);
+    expect(navigated).toEqual([]);
   });
 
   it("restores its probe after ambiguous recovery and remains ambiguous on retry", async () => {

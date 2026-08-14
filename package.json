@@ -1,6 +1,6 @@
 {
   "name": "codex-chatgpt-control-repo",
-  "version": "0.7.15",
+  "version": "0.7.16",
   "private": true,
   "description": "Portable ChatGPT Pro review bridge and visible ChatGPT Chat and Work control SDK.",
   "type": "module",
