@@ -3178,7 +3178,7 @@ async function readPageSnapshot(page) {
           const names = [
             element.getAttribute("aria-label"),
             element.getAttribute("value"),
-            element instanceof HTMLElement ? element.innerText : element.textContent
+            element.innerText ?? element.textContent
           ];
           return names.some((name) => typeof name === "string" && normalizedLoginLabels.has(name.replace(/\s+/g, " ").trim().toLocaleLowerCase()));
         });

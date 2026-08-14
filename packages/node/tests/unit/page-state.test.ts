@@ -63,6 +63,38 @@ describe("readPageState", () => {
     expect(state.blocker?.kind).toBe("login_required");
   });
 
+  it("evaluates login controls without a global HTMLElement constructor", async () => {
+    const loginControl = {
+      closest: () => null,
+      getAttribute: (name: string) => name === "aria-label" ? "Log in" : null,
+      getClientRects: () => [{}],
+      innerText: "Log in",
+      textContent: "Log in"
+    };
+    const state = await readPageState({
+      url: () => "https://chatgpt.com/",
+      title: () => Promise.resolve("ChatGPT"),
+      evaluate: async <T, A = unknown>(pageFunction: (arg: A) => T | Promise<T>, arg?: A) => {
+        const run = Function(
+          "document",
+          "window",
+          "HTMLElement",
+          "arg",
+          `"use strict"; return (${pageFunction.toString()})(arg);`
+        ) as (...args: unknown[]) => T | Promise<T>;
+        return await run({
+          body: { innerText: "Welcome back Log in" },
+          querySelectorAll: (selector: string) => selector.startsWith("button, a, ") ? [loginControl] : []
+        }, {
+          getComputedStyle: () => ({ display: "block", visibility: "visible" })
+        }, undefined, arg);
+      }
+    });
+
+    expect(state.signedIn).toBe(false);
+    expect(state.blocker?.kind).toBe("login_required");
+  });
+
   it("normalizes a missing additive login-control signal from older structured adapters", async () => {
     const state = await readPageState({
       url: () => "https://chatgpt.com/",

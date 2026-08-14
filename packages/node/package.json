@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-pro-review-bridge",
-  "version": "0.7.14",
+  "version": "0.7.15",
   "description": "Visible ChatGPT Pro questions and code reviews for Codex, with resumable answers and artifact capture.",
   "type": "module",
   "license": "MIT",

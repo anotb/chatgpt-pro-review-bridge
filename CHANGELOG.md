@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.15 - 2026-08-13
+
+- Claimed-tab page-state checks no longer reference an unavailable
+  `HTMLElement` runtime global, so authenticated recovery continues without
+  false unresponsive blockers.
+
 ## 0.7.14 - 2026-08-13
 
 - Older archives with a legacy claim-handle tab identity now reclaim
