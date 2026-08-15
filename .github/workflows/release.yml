@@ -87,7 +87,7 @@ jobs:
           if npm view "chatgpt-pro-review-bridge@$version" version >/dev/null 2>&1; then
             echo "chatgpt-pro-review-bridge@$version is already published"
           else
-            npm publish dist/*.tgz --provenance --access public --tag latest
+            npm publish ./dist/*.tgz --provenance --access public --tag latest
           fi
 
   release_gate:
