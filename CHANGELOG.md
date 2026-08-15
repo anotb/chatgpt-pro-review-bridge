@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.0 - 2026-08-14
+
+This is a breaking redesign of the bridge around one job: send a caller-chosen prompt and files to a visible ChatGPT mode, then bring the complete result back.
+
+- Replaced the separate Ask Pro and code-review workflows with one `$chatgpt-bridge` skill for Pro, Instant, other visible modes, tools, files, follow-ups, generated files, and images.
+- Added in-app Browser support as the first choice, with Chrome considered only before an operation starts when the first host is definitely unavailable.
+- Moved file upload into the background. Zero, one, or several ordered files use one handoff and never open the system file picker.
+- Added restart-safe, duplicate-safe operations for responses that can take more than an hour.
+- Added complete output capture and explicit download results for generated files and images.
+- Reduced the project to one TypeScript package, one runtime bundle, one plugin, and one skill. The Python package, backend process, Work/Responses layers, review-packet builder, locale packs, command framework, and compatibility APIs are removed.
+
+Existing integrations must migrate to `createChatGPTBridge`, `submit`, `collect`, `run`, and `inspectTargets`. Existing Codex tasks should invoke `$chatgpt-bridge`.
+
 ## 0.7.20 - 2026-08-14
 
 - Fresh AskPro briefly waits for a provisional WEB route to become canonical

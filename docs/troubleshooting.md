@@ -1,79 +1,37 @@
----
-title: Troubleshooting
-date: 2026-06-06
-type: reference
-status: draft
----
-
 # Troubleshooting
 
-<!-- surface-drift:blocker-kind-coverage:start -->
-## Blocker Kind Coverage
+## Browser or tab unavailable
 
-This section is checked by `npm run docs:drift`. Keep it aligned with `BlockerKind`, `explainCommandBlocker(...)`, command descriptors, and public troubleshooting coverage.
+Initialize a compatible browser host, or pass an exact page/browser. If several controlled ChatGPT tabs exist, pass the intended page; the bridge will not guess.
 
-- `browser_bridge_unavailable`: Browser bridge unavailable (category: `environment`, severity: `blocked`, user action: no)
-- `login_required`: Login required (category: `auth`, severity: `action_required`, user action: yes)
-- `captcha`: Captcha or human verification required (category: `auth`, severity: `action_required`, user action: yes)
-- `rate_limit`: Rate limited (category: `auth`, severity: `action_required`, user action: yes)
-- `model_unavailable`: Requested model unavailable (category: `model`, severity: `action_required`, user action: yes)
-- `model_fallback`: Model fallback detected (category: `model`, severity: `blocked`, user action: yes)
-- `configuration_restore_failed`: Configuration restoration failed (category: `configuration`, severity: `action_required`, user action: yes)
-- `modal`: Modal is blocking the page (category: `runtime`, severity: `action_required`, user action: yes)
-- `permission`: Permission required (category: `permission`, severity: `action_required`, user action: yes)
-- `confirmation`: Confirmation required (category: `user_confirmation`, severity: `action_required`, user action: yes)
-- `selector_drift`: Selector drift (category: `ui_drift`, severity: `blocked`, user action: no)
-- `artifact_unavailable`: Artifact unavailable (category: `artifact`, severity: `warning`, user action: no)
-- `artifact_selector_drift`: Artifact selector drift (category: `ui_drift`, severity: `blocked`, user action: no)
-- `artifact_download_unavailable`: Artifact download unavailable (category: `download`, severity: `warning`, user action: no)
-- `download_unavailable`: Download unavailable (category: `download`, severity: `warning`, user action: no)
-- `upload_failed`: Upload failed (category: `upload`, severity: `action_required`, user action: yes)
-- `not_found`: Target not found (category: `not_found`, severity: `warning`, user action: no)
-- `unknown`: Unknown blocker (category: `unknown`, severity: `blocked`, user action: no)
-<!-- surface-drift:blocker-kind-coverage:end -->
+## Login or challenge
 
-## `browser_bridge_unavailable`
+Sign in or complete the visible challenge manually, then retry the same pre-submit operation ID. Do not provide cookies or tokens to the bridge.
 
-Expected from ordinary shells. Use it as a diagnostic that the command failed safely before touching browser state.
+## Target unavailable
 
-For a real browser run, verify:
+Call `inspectTargets()` and use one exact returned `power` label. The adapter reads the English Power slider's current ARIA range instead of assuming labels or a position count. Use browser/computer interaction to inspect a changed UI rather than inventing a fuzzy label.
 
-- Chrome is open and signed in to ChatGPT.
-- The host runtime exposes `globalThis.agent`.
-- The browser bridge can claim or open a visible ChatGPT tab.
+## Tool unverified
 
-## Python Backend Bundle Missing
+Use the exact visible tool label. Selection succeeds only when that label appears exactly as an active composer button or inline tool pill.
 
-Run from `packages/node`:
+## File upload does not become ready
 
-```bash
-npm ci
-npm run bundle:backend
-```
+The selected host must expose the tab-scoped `cdp` capability and exactly one composer `#upload-files` input. The bridge reads every explicit file, transfers the complete ordered list in one background action, and never clicks an upload control or opens a native picker. Every path must be absolute, readable, and regular; multi-file support and every new ready basename are verified before Send.
 
-Then rerun the Python smoke from `packages/python`.
+`upload_path_unavailable` means the background path was unavailable before action. `file_handoff_uncertain` means the one background transfer lacked an exact postcondition. `upload_readiness_uncertain` means the visible attachment cards did not all become ready.
 
-## Selector Drift
+Deterministic local checks run before the write-ahead attempt. Once file handoff begins, reusing the operation ID returns that record and does not repeat an ambiguous transfer. Preparation blockers have `resumable: false`: inspect the exact tab and stop. Start a deliberate new operation only after exact diagnosis confirms that neither Send nor file landing occurred and the cause is fixed.
 
-Treat selector drift as a product-change blocker. Capture the smallest public-safe reproduction and update selectors/tests together.
+## `uncertain` after Send
 
-## Model unavailable, fallback, or restore failure
+Do not resend. The click may have acted even if the browser host reported an error. Inspect the exact tab and call `collect` with the returned handle. If a stable operation ID was used and the caller lost the result, call `submit` again with the identical request to recover the durable handle without another activation.
 
-Treat `model_unavailable` and `model_fallback` as strict target failures, not generic retry hints. Preserve compact visible evidence and do not accept a response as the requested model. If `configuration_restore_failed` is returned, leave the browser visible and require manual restoration before another delegated run.
+## Markdown falls back to DOM text
 
-## Doctor Preflight
+The owned Copy action or clipboard read was unavailable. `output.fidelity` reports `dom_text`; no output is silently labelled exact Markdown.
 
-Run `doctor({ check: ["bridge", "login", "upload"] })` before long workflows when browser state or permissions are uncertain. Use opt-in checks such as `existing_tab`, `artifacts`, `file_preflight`, `localization`, and `reports` before targeted workflows. The `localization` check verifies registry readiness, not full localized selector coverage. The `file_preflight` check validates supplied local file metadata without opening ChatGPT or attempting upload.
+## Artifact visible but not downloaded
 
-## Attachment Path Rejected
-
-If a Windows-looking path is rejected on macOS/Linux, do not retry with the same string. Convert it to the backend host's real path, for example `/home/you/file.pdf` for a Linux/WSL backend. The backend rejects ambiguous Windows forms such as `C:Users\you\file.pdf`, root-relative paths like `\tmp\file.pdf`, and empty or relative paths.
-
-## File Upload Blocked
-
-Check both permission gates:
-
-1. Chrome `chrome://extensions` > Codex/browser bridge extension > **Details** > **Allow access to file URLs**.
-2. Codex settings > **Computer Use > Google Chrome > Permissions > Uploads**.
-
-The SDK should report a structured permission blocker when either gate is missing. Do not retry uploads repeatedly without changing the permission state.
+Downloads require an exact assistant-owned control or structurally identified visible image source plus host download capability. Inspect each artifact's `transfer`: `downloaded`, `not_requested`, or `failed` with `artifact_preview_timeout`, `artifact_download_unavailable`, or `artifact_transfer_failed`. The bridge will not use a page-wide or “latest artifact” fallback.

@@ -1,0 +1,5 @@
+interface:
+  display_name: "ChatGPT Bridge"
+  short_description: "Send once to ChatGPT and return complete outputs"
+  brand_color: "#0B5FFF"
+  default_prompt: "Use $chatgpt-bridge to send this task to an exact ChatGPT setting and return the complete output and artifacts."

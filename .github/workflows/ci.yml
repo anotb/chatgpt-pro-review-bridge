@@ -1,0 +1,36 @@
+name: TypeScript CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: "20"
+          - os: ubuntu-latest
+            node: "24"
+          - os: windows-latest
+            node: "24"
+          - os: macos-latest
+            node: "24"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: packages/node/package-lock.json
+      - run: npm --prefix packages/node ci
+      - run: npm test
+      - run: npm run build
+      - run: npm run bundle
+      - run: npm run plugin:check
+      - run: npm run plugin:validate
+      - run: npm run pack:check

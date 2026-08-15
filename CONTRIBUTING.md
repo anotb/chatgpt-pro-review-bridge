@@ -1,12 +1,19 @@
 # Contributing
 
-Contributions should preserve the narrow scope: Codex agents controlling visible ChatGPT web sessions through explicit browser-bridge operations.
+Keep contributions inside the narrow product boundary: a user-directed TypeScript bridge operating visible ChatGPT Chat through a compatible browser host.
 
-Before opening a PR:
+Before a PR, run:
 
-1. Run the Node deterministic gates in `packages/node`.
-2. If Python contracts or models changed, run the Python parity gates in `packages/python`.
-3. Keep examples synthetic and public-safe.
-4. Do not commit live-smoke reports, browser state, credentials, or real ChatGPT thread URLs.
+```bash
+npm test
+npm run build
+npm run bundle
+npm run plugin:build
+npm run plugin:check
+npm run plugin:validate
+npm run pack:check
+```
 
-Design changes should update the relevant file under `docs/` or `packages/node/references/` so behavior does not live only in issue comments.
+Changes to Send, tab/thread ownership, target selection, file readiness, output capture, artifacts, or the journal need focused fault tests. UI changes also need an opt-in real visible-session check.
+
+Keep examples synthetic. Never commit `.codex/` state, prompts, responses, real thread URLs, filenames, account identifiers, credentials, cookies, tokens, or browser profiles.

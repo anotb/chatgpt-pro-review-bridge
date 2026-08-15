@@ -1,0 +1,34 @@
+{
+  "name": "chatgpt-bridge",
+  "version": "0.8.0+codex.20260814",
+  "description": "Submit caller-defined prompts and files to an exact visible ChatGPT setting and bring complete outputs back without duplicate sends.",
+  "author": {
+    "name": "anotb",
+    "url": "https://github.com/anotb"
+  },
+  "homepage": "https://github.com/anotb/chatgpt-bridge",
+  "repository": "https://github.com/anotb/chatgpt-bridge",
+  "license": "MIT",
+  "keywords": ["codex", "chatgpt", "visible-ui", "bridge", "pro"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "ChatGPT Bridge",
+    "shortDescription": "Send once to visible ChatGPT and bring outputs back",
+    "longDescription": "A lean bridge for caller-defined prompts and explicit files in visible ChatGPT Chat. Select any currently visible Power setting by exact label, activate Send at most once, poll without resubmitting, and return complete Markdown, DOM text, generated files, and generated images.",
+    "developerName": "anotb",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "websiteURL": "https://github.com/anotb/chatgpt-bridge",
+    "privacyPolicyURL": "https://github.com/anotb/chatgpt-bridge/blob/main/docs/plugin-privacy.md",
+    "termsOfServiceURL": "https://github.com/anotb/chatgpt-bridge/blob/main/docs/plugin-terms.md",
+    "defaultPrompt": [
+      "Use $chatgpt-bridge to send this task to visible ChatGPT Pro and return the complete output.",
+      "Use $chatgpt-bridge to inspect the visible ChatGPT settings, choose the best exact label, and submit these files once.",
+      "Use $chatgpt-bridge to continue this exact ChatGPT thread without resubmitting any prior operation."
+    ],
+    "brandColor": "#0B5FFF",
+    "composerIcon": "./assets/composer-icon.svg",
+    "logo": "./assets/app-icon.svg",
+    "screenshots": []
+  }
+}

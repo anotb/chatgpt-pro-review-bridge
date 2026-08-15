@@ -1,79 +1,36 @@
-# codex-chatgpt-control Agent Instructions
+# ChatGPT Bridge Agent Instructions
 
-## Public Repo Boundary
+## Public boundary
 
-- This is a public alpha SDK for user-directed workflows in visible ChatGPT web
-  sessions. Keep all guidance safe for public contributors.
-- Do not add private OpenAI account details, cookies, tokens, internal browser
-  bridge state, unpublished package credentials, or private run transcripts to
-  the repo.
-- This project is unofficial. Do not phrase docs, package metadata, or examples
-  as if the project is endorsed by OpenAI.
+- This is an unofficial public-alpha bridge for user-directed workflows in visible ChatGPT sessions.
+- Never add cookies, tokens, account details, private browser state, real thread transcripts, unpublished credentials, or local `.codex/` operation data.
+- Do not describe the project as affiliated with or endorsed by OpenAI.
 
 ## Architecture
 
-- The Node package is the runtime authority for browser control, backend
-  commands, live-smoke orchestration, safety redaction, and contract fixtures.
-- The Python package is a parity client over the same backend protocol. It
-  should not diverge into a separate browser automation implementation.
-- Shared behavior changes must update contracts, fixtures, docs, examples, and
-  both language surfaces when applicable.
+- `packages/node/src/bridge/` is the sole runtime authority.
+- `bridge.ts` owns the durable submit/collect policy; `browser-port.ts` owns visible UI mechanics; `journal.ts` owns the write-ahead attempt record.
+- The repository ships one TypeScript package, one bundle, one plugin, and one generic skill.
+- Do not reintroduce Python parity, a child backend, JSON wire contracts, Work, Responses adapters, command registries, review packet builders, locale packs, compatibility façades, or duplicate runtime bundles without a separately justified product requirement.
 
-## Safety Model
+## Safety and speed
 
-- Keep the visible-session boundary: this is not a scraping framework, private
-  ChatGPT API wrapper, background automation service, or bulk extraction tool.
-- Live browser tests can touch a real user session. Run them only when the user
-  asks for live validation or when the task clearly requires it.
-- Redact prompts, responses, filenames, account identifiers, and local paths in
-  reports unless the user explicitly wants a local private artifact.
+- Preserve exact ChatGPT origin/tab/conversation/turn affinity and at-most-one Send activation.
+- Reads may retry. Send, file handoff, and other ambiguous irreversible actions may not silently fall back to a second mechanism.
+- Poll metadata only and transfer the full answer once after completion.
+- Keep selectors structural and English-specific; let the calling agent or computer use handle unfamiliar UI rather than growing a speculative selector framework.
+- Run live browser tests only when the user asks or the change clearly requires them. Redact live content in public reports.
 
-## Local Commands
-
-From the repository root:
+## Local gates
 
 ```bash
-npm run node:test
-npm run node:build
-npm run node:bundle
-npm run node:contracts
-npm run python:test
-npm run python:compile
-npm run release:check-version
-npm run release:check-names
-npm run release:check-node-pack
-```
-
-For Node package work:
-
-```bash
-cd packages/node
 npm test
 npm run build
 npm run bundle
-npm run bundle:backend
-npm run contract:validate
-npm run docs:drift
-npm run parity:fixtures
-npm run parity:suite
-npm run test:backend-conformance
+npm run plugin:build
+npm run plugin:check
+npm run plugin:validate
+npm run pack:check
 ```
 
-For Python package work:
-
-```bash
-cd packages/python
-python -m pip install -e ".[dev]"
-python -m unittest discover -s tests
-python -m compileall -q src examples
-```
-
-## Definition Of Done
-
-- The narrow visible-session safety model is preserved.
-- Node/Python parity has been checked for API, protocol, fixture, and docs
-  changes.
-- The smallest meaningful tests pass, and broader contract/parity gates pass
-  for shared behavior changes.
-- Any live-smoke blocker is reported as a blocker path, not papered over with
-  cached or unrelated browser evidence.
+Do not commit, push, publish, or create a release unless the user explicitly asks after local review.

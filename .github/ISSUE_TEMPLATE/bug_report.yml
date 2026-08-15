@@ -20,7 +20,7 @@ body:
       label: Package
       options:
         - packages/node
-        - packages/python
+        - ChatGPT Bridge plugin
         - docs
         - unknown
     validations:
@@ -52,8 +52,8 @@ body:
     id: versions
     attributes:
       label: Versions
-      description: Node, npm, Python, package version, OS.
-      placeholder: "Node 24, Python 3.12, macOS ..."
+      description: Node, npm, package/plugin version, browser host, and OS.
+      placeholder: "Node 24, package 0.x, Codex browser host, macOS ..."
   - type: checkboxes
     id: safety
     attributes:

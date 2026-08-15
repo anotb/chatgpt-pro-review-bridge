@@ -11,6 +11,7 @@ __pycache__/
 .pyright/
 reports/
 .codex/pro-reviews/
+.codex/chatgpt-bridge/
 outputs/surface-profiles/
 *.log
 .DS_Store

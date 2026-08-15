@@ -1,4 +1,4 @@
-name: release
+name: Release
 
 on:
   push:
@@ -13,59 +13,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  preflight:
-    name: release preflight
+  package:
+    name: Verify and package
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install Node dependencies
-        run: npm --prefix packages/node ci
-      - name: Install Python release tools
-        run: python -m pip install --upgrade build twine
-      - run: npm run release:check-version
-      - run: npm run release:check-names
-      - run: npm run node:test
-      - run: npm run node:build
-      - run: npm run node:bundle
-      - run: npm run node:contracts
-      - run: npm run python:test
-      - run: npm run python:compile
-      - run: npm run python:pyright
-      - run: npm run python:ordinary-shell
-      - run: npm run plugin:validate
-      - run: npm run plugin:check
-      - run: npm run release:check-node-pack
-      - name: Build and check Python distributions
-        run: |
-          rm -rf packages/python/.venv dist/python
-          npm run release:build-python
-          npm run release:check-python
-      - name: Assemble GitHub release assets
-        run: |
-          mkdir -p dist/node
-          npm pack ./packages/node --pack-destination dist/node
-          cd dist
-          sha256sum node/*.tgz python/* > "SHA256SUMS-${GITHUB_REF_NAME#v}.txt"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-assets-${{ github.ref_name }}
-          path: |
-            dist/node/*.tgz
-            dist/python/*
-            dist/SHA256SUMS-*.txt
-          if-no-files-found: error
-
-  package-smoke-macos:
-    name: release package smoke (macos-latest)
-    needs: preflight
-    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -73,103 +23,112 @@ jobs:
           node-version: "24"
           cache: npm
           cache-dependency-path: packages/node/package-lock.json
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-      - uses: actions/download-artifact@v8
-        with:
-          name: release-assets-${{ github.ref_name }}
-          path: dist
-      - run: npm run release:smoke-artifacts
+      - run: npm --prefix packages/node ci
+      - name: Verify tag and package versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
 
-  publish-npm:
-    name: publish npm
-    if: github.repository == 'anotb/chatgpt-pro-review-bridge' && vars.PUBLISH_NPM == 'true'
-    needs: [preflight, package-smoke-macos]
+          const readJson = async path => JSON.parse(await readFile(path, "utf8"));
+          const expected = process.env.RELEASE_TAG?.replace(/^v/, "");
+          const versions = {
+            repository: (await readJson("package.json")).version,
+            package: (await readJson("packages/node/package.json")).version,
+            plugin: (await readJson("plugins/chatgpt-bridge/.codex-plugin/plugin.json")).version.split("+")[0]
+          };
+          for (const [name, version] of Object.entries(versions)) {
+            if (version !== expected) {
+              throw new Error(`${name} version ${version} does not match tag ${process.env.RELEASE_TAG}`);
+            }
+          }
+          NODE
+      - run: npm test
+      - run: npm run build
+      - run: npm run bundle
+      - run: npm run plugin:check
+      - run: npm run plugin:validate
+      - run: npm run pack:check
+      - name: Assemble release assets
+        run: |
+          mkdir -p dist
+          npm pack ./packages/node --pack-destination dist
+          sha256sum dist/*.tgz > dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chatgpt-bridge-${{ github.ref_name }}
+          path: |
+            dist/*.tgz
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  publish_npm:
+    name: Publish npm package
+    if: github.repository == 'anotb/chatgpt-bridge' && vars.PUBLISH_NPM == 'true'
+    needs: package
     runs-on: ubuntu-latest
     environment: release
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          name: release-assets-${{ github.ref_name }}
+          name: chatgpt-bridge-${{ github.ref_name }}
           path: dist
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
-          registry-url: "https://registry.npmjs.org"
-      - run: npm run release:check-version
-      - name: Publish Node package to npm
-        run: npm publish dist/node/*.tgz --provenance --access public --tag latest
-
-  verify-published:
-    name: verify published npm install
-    if: github.repository == 'anotb/chatgpt-pro-review-bridge' && vars.PUBLISH_NPM == 'true'
-    needs: publish-npm
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - uses: actions/download-artifact@v8
-        with:
-          name: release-assets-${{ github.ref_name }}
-          path: dist
-      - run: npm run release:verify-published -- --artifacts dist
-
-  release-gate:
-    name: verify complete release path
-    if: always() && github.repository == 'anotb/chatgpt-pro-review-bridge'
-    needs: [preflight, package-smoke-macos, publish-npm, verify-published]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require every enabled release stage
-        env:
-          PUBLISH_NPM: ${{ vars.PUBLISH_NPM }}
-          PREFLIGHT: ${{ needs.preflight.result }}
-          PACKAGE_SMOKE: ${{ needs.package-smoke-macos.result }}
-          PUBLISH_RESULT: ${{ needs.publish-npm.result }}
-          VERIFY_RESULT: ${{ needs.verify-published.result }}
+          registry-url: https://registry.npmjs.org
+      - name: Publish once
         run: |
-          test "$PREFLIGHT" = success
-          test "$PACKAGE_SMOKE" = success
-          if [ "$PUBLISH_NPM" = true ]; then
-            test "$PUBLISH_RESULT" = success
-            test "$VERIFY_RESULT" = success
+          version="${GITHUB_REF_NAME#v}"
+          if npm view "chatgpt-pro-review-bridge@$version" version >/dev/null 2>&1; then
+            echo "chatgpt-pro-review-bridge@$version is already published"
           else
-            test "$PUBLISH_RESULT" = skipped
-            test "$VERIFY_RESULT" = skipped
+            npm publish dist/*.tgz --provenance --access public --tag latest
           fi
 
-  github-release:
-    name: publish stable GitHub release
-    if: always() && github.repository == 'anotb/chatgpt-pro-review-bridge' && needs.release-gate.result == 'success'
-    needs: release-gate
+  release_gate:
+    name: Verify release path
+    if: always() && github.repository == 'anotb/chatgpt-bridge'
+    needs: [package, publish_npm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every enabled stage
+        env:
+          PUBLISH_NPM: ${{ vars.PUBLISH_NPM }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          PUBLISH_RESULT: ${{ needs.publish_npm.result }}
+        run: |
+          test "$PACKAGE_RESULT" = success
+          if [ "$PUBLISH_NPM" = true ]; then
+            test "$PUBLISH_RESULT" = success
+          else
+            test "$PUBLISH_RESULT" = skipped
+          fi
+
+  github_release:
+    name: Publish GitHub release
+    needs: release_gate
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          name: release-assets-${{ github.ref_name }}
+          name: chatgpt-bridge-${{ github.ref_name }}
           path: dist
-      - name: Publish the verified stable release
+      - name: Create verified release
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
           gh release create "${GITHUB_REF_NAME}"
           --repo "${GITHUB_REPOSITORY}"
           --verify-tag
-          --generate-notes
-          --title "ChatGPT Pro Review Bridge ${GITHUB_REF_NAME#v}"
-          dist/node/*.tgz
-          dist/python/*
-          dist/SHA256SUMS-*.txt
+          --notes-file "docs/releases/${GITHUB_REF_NAME#v}.md"
+          --title "ChatGPT Bridge ${GITHUB_REF_NAME#v}"
+          dist/*.tgz
+          dist/SHA256SUMS.txt

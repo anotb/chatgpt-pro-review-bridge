@@ -1,3 +1,0 @@
-{"type":"run_item_stream_event","name":"thread_opened","item":{"type":"thread.opened","thread":{"url":"https://chatgpt.com/c/example-stream","conversationId":"example-stream"}}}
-{"type":"run_item_stream_event","name":"message_completed","item":{"type":"message.completed","role":"assistant","output_text":"hi","format":"markdown"}}
-{"type":"completed","result":{"ok":true,"status":"ok","output_text":"hi","finalOutput":"hi","output":[],"newItems":[],"interruptions":[],"state":{"id":"state-stream-basic","resumable":false},"activeAgentName":"reviewer","lastAgentName":"reviewer","warnings":[],"context":{"timestamp":"2026-06-05T00:00:00.000Z"}}}

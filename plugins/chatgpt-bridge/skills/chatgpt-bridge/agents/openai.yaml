@@ -1,0 +1,4 @@
+interface:
+  display_name: "ChatGPT Bridge"
+  short_description: "Submit once and collect complete ChatGPT output"
+  default_prompt: "Use $chatgpt-bridge to send this task once to the selected visible ChatGPT mode and return its complete output and artifacts."

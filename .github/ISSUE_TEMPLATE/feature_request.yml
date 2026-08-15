@@ -22,9 +22,9 @@ body:
     attributes:
       label: Scope
       options:
-        - Codex -> browser -> chatgpt.com workflow
-        - Python protocol client
-        - Node backend/runtime
+        - Visible ChatGPT browser workflow
+        - TypeScript bridge API
+        - Plugin skill
         - Documentation
         - Other
     validations:

@@ -2,66 +2,34 @@
 import { execFileSync } from "node:child_process";
 import process from "node:process";
 
-import { npmInvocation } from "./lib/npm-command.mjs";
+import { npmInvocation } from "./npm.mjs";
 
-const REQUIRED_FILES = [
+const npm = npmInvocation(["pack", "--dry-run", "--json"]);
+const output = execFileSync(npm.program, npm.args, {
+  cwd: new URL("../packages/node", import.meta.url),
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "pipe"]
+});
+const pack = JSON.parse(output)[0];
+if (pack === undefined) throw new Error("npm pack returned no summary.");
+const files = pack.files.map(file => file.path).sort();
+const required = [
   "package.json",
   "README.md",
   "LICENSE",
   "CHANGELOG.md",
-  "dist/src/index.js",
-  "dist/src/index.d.ts",
-  "dist/codex-chatgpt-control.bundle.mjs",
-  "dist/codex-chatgpt-control-backend.mjs",
-  "contracts/v1/manifest.json"
+  "dist/index.js",
+  "dist/index.d.ts",
+  "dist/chatgpt-bridge.bundle.mjs"
 ];
-
-const FORBIDDEN_PATTERNS = [
-  /^node_modules\//,
-  /^reports\//,
-  /^tests\//,
-  /^src\/.*\.ts$/,
-  /\.map$/,
-  /\.env(?:\.|$)/,
-  /live-smoke\/.*\.json$/,
-  /__pycache__/
-];
-
-function main() {
-  const npm = npmInvocation(["pack", "--dry-run", "--json"]);
-  const output = execFileSync(npm.program, npm.args, {
-    cwd: new URL("../packages/node", import.meta.url),
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-
-  const packs = JSON.parse(output);
-  const pack = packs[0];
-  if (!pack) throw new Error("npm pack did not return a package summary");
-
-  const files = pack.files.map(file => file.path).sort();
-  const missing = REQUIRED_FILES.filter(file => !files.includes(file));
-  const forbidden = files.filter(file => FORBIDDEN_PATTERNS.some(pattern => pattern.test(file)));
-
-  const summary = {
-    name: pack.name,
-    version: pack.version,
-    filename: pack.filename,
-    files: files.length,
-    unpackedSize: pack.unpackedSize,
-    missing,
-    forbidden
-  };
-  console.log(JSON.stringify(summary, null, 2));
-
-  if (missing.length > 0 || forbidden.length > 0) {
-    process.exit(1);
-  }
-}
-
-try {
-  main();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-}
+const missing = required.filter(file => !files.includes(file));
+const forbidden = files.filter(file => /^(?:src|tests)\//.test(file) || /\.map$/.test(file));
+console.log(JSON.stringify({
+  name: pack.name,
+  version: pack.version,
+  files: files.length,
+  unpackedSize: pack.unpackedSize,
+  missing,
+  forbidden
+}, null, 2));
+if (missing.length > 0 || forbidden.length > 0) process.exitCode = 1;

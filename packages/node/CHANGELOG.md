@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0
+
+- Replaced the legacy public surface with `createChatGPTBridge`, `submit`, `collect`, `run`, and `inspectTargets`.
+- Removed the backend protocol, command registry, Work/Responses layers, locales, review workflows, Python parity, and compatibility exports.
+- Added a direct visible-browser port, durable caller operation IDs, one atomic whole-envelope Send activation, metadata-only polling, and exact assistant-owned output/artifacts.
+- Replaced chooser-driven upload with one exact background composer-input handoff and exact ordered multi-file readiness.
+- Added exact active tool-set verification, both turn baselines, stable final identities, lossless clipboard gating, artifact-only generated-image ownership, and explicit bounded artifact-transfer results.
+
 ## 0.7.20
 
 - Fresh AskPro briefly waits for a provisional WEB route to become canonical

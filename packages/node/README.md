@@ -1,187 +1,39 @@
 # chatgpt-pro-review-bridge
 
-TypeScript runtime for controlling visible ChatGPT Chat and Work through a compatible browser bridge.
-
-Unofficial project: not affiliated with, endorsed by, or sponsored by OpenAI. This is not an OpenAI API wrapper and does not call hidden or private ChatGPT endpoints. Browser-required calls need a visible session and should fail with a clear machine-readable reason when the bridge is unavailable.
-
-## Install
+TypeScript runtime for one visible ChatGPT Chat operation: bind an exact tab/thread, select an exact visible setting, attach explicit files, compose, record the attempt, activate Send once, and collect the owned output.
 
 ```bash
-npm install chatgpt-pro-review-bridge@0.7.20
-```
-
-## Usage
-
-```ts
-import { createChatGPT } from "chatgpt-pro-review-bridge";
-
-const chatgpt = createChatGPT({ agent: globalThis.agent });
-const reviewer = chatgpt.agent({
-  name: "reviewer",
-  instructions: "Review carefully and return Markdown."
-});
-
-const result = await chatgpt.runner.run(reviewer, {
-  input: "Review this design.",
-  thread: { type: "new" },
-  experience: "chat",
-  response: { format: "markdown" }
-});
-```
-
-Inspect the visible surface and apply verified configuration:
-
-```ts
-const surface = await chatgpt.experience.detect();
-const capabilities = await chatgpt.configuration.inspect();
-
-await chatgpt.configuration.apply({
-  experience: "work",
-  desired: {
-    model: "GPT-5.6 Sol",
-    effort: "High",
-    speed: "Standard"
-  },
-  strict: true
-});
-
-const snapshot = await chatgpt.configuration.snapshot({ experience: "chat" });
-if (snapshot.ok && snapshot.data) {
-  await chatgpt.configuration.restore({ snapshot: snapshot.data });
-}
-```
-
-Start a fresh Work task once, then poll or steer it:
-
-Artifact-aware workflows can snapshot visible generated images and file affordances before submission, then attribute only newly added artifacts afterward:
-
-```ts
-const before = await chatgpt.artifacts.captureBaseline();
-// Submit and wait without resubmitting the prompt.
-const delta = before.data
-  ? await chatgpt.artifacts.captureDelta({ baseline: before.data })
-  : undefined;
+npm install chatgpt-pro-review-bridge
 ```
 
 ```ts
-await chatgpt.work.start({
-  prompt: "Produce a decision-ready implementation brief.",
-  newTask: true,
-  wait: false,
-  read: false
-});
+import { createChatGPTBridge } from "chatgpt-pro-review-bridge";
 
-await chatgpt.work.status({ includeArtifacts: true });
-await chatgpt.work.steer({
-  prompt: "Add a prioritized migration sequence.",
-  wait: false,
-  read: false
+const selectedBrowser = globalThis.browser;
+if (selectedBrowser == null) throw new Error("Select a visible browser first.");
+const bridge = createChatGPTBridge({ browser: selectedBrowser });
+const submitted = await bridge.submit({
+  operationId: crypto.randomUUID(),
+  prompt: "Return a concise answer in Markdown.",
+  selection: { power: "Pro" },
+  wait: false
 });
+const result = await bridge.collect(submitted.handle, { wait: true });
 ```
 
-Legacy `mode` inputs and `modes.set/get` remain supported. New code should use
-`experience` and strict `configuration` because Chat and Work expose different
-nested axes.
+Public API:
 
-Reuse a user-open ChatGPT thread without replacing the tab:
+- `createChatGPTBridge(options)` — ordinary visible-browser factory.
+- `createBridge({ port, ... })` — injected host seam for tests or another compatible visible browser.
+- `inspectTargets()` — discover exact dynamic Power labels.
+- `submit(request)` — prepare and attempt one message.
+- `collect(handle, options)` — observe and capture; structurally cannot submit.
+- `run(request)` — convenience composition of `submit` and `collect`.
 
-```ts
-await chatgpt.askInThread({
-  thread: { type: "url", url: "https://chatgpt.com/c/<conversation-id>" },
-  existingTab: true,
-  prompt: "Continue from the latest answer.",
-  wait: true,
-  read: { format: "markdown" }
-});
-```
+`operationId` is required and makes caller retries idempotent. A reused ID with a different prompt, thread, selection, tool list, or file list is rejected before browser interaction.
 
-Attach local files with host-local absolute paths:
+Choose `selectedBrowser` before creating the bridge and keep it fixed for the operation. The in-app host supports the same background file handoff when it exposes the required tab-scoped CDP capability; no native chooser is used.
 
-```ts
-const preflight = await chatgpt.files.preflight({
-  paths: ["/absolute/host/path/to/report.pdf"]
-});
+The journal stores hashes, counts, exact UI selection, timestamps, and tab/thread affinity. It does not store prompt text, response text, filenames, file paths, account data, cookies, or tokens.
 
-await chatgpt.askWithFiles({
-  files: ["/absolute/host/path/to/report.pdf"],
-  prompt: "Summarize this report.",
-  wait: true,
-  read: { format: "markdown" }
-});
-
-await chatgpt.askWithFiles({
-  files: [String.raw`C:\Users\you\Documents\report.pdf`],
-  prompt: "Summarize this report.",
-  wait: true,
-  read: { format: "markdown" }
-});
-```
-
-Use the second example only when the backend process itself is running on Windows. If the backend runs in WSL/Linux, pass the WSL/Linux path, such as `/home/you/Documents/report.pdf`.
-
-Plan append-only ChatGPT Project Sources changes before mutating a project:
-
-```ts
-const plan = await chatgpt.projects.sources.planAdd({
-  projectUrl: "https://chatgpt.com/g/g-p-example/project",
-  files: ["/absolute/host/path/to/source.md"]
-});
-
-const added = await chatgpt.projects.sources.add({
-  projectUrl: "https://chatgpt.com/g/g-p-example/project",
-  files: ["/absolute/host/path/to/source.md"],
-  confirmMutation: true
-});
-```
-
-`planAdd` validates explicit local file metadata without reading file contents or opening ChatGPT. `add` is append-only and returns `needs_confirmation` unless `confirmMutation: true` is supplied.
-
-Explain structured blockers before deciding whether to retry:
-
-```ts
-const result = await chatgpt.session.bootstrap({ existingTab: true });
-if (!result.ok) {
-  const explanation = chatgpt.explainBlocker(result, { command: "session.bootstrap" });
-  console.log(explanation.markdown);
-}
-```
-
-`explainBlocker` preserves the original `result.blocker` fields and adds conservative retry/resume guidance. Existing-tab blockers include metadata such as requested target, candidate tab IDs, URLs, titles, conversation IDs, and mismatch reason; they do not include page text or chat content.
-
-Generic `preferExistingTab` discovery is best-effort: if an unrelated user tab
-is still claimed by another browser-host invocation, a new workflow may open a
-fresh ChatGPT home tab. Explicit `existingTab` targets remain strict and return
-a resumable claim conflict instead of opening a duplicate conversation.
-
-The first-class `reviews.askPro(...)` workflow also maintains invocation-level
-conversation and tab affinity before submission and throughout polling,
-response capture, verification, and artifact handling. A provisional `WEB:`
-receipt can move to a canonical conversation only after exact prompt ownership
-is proven. Recovery accepts one exact candidate (or one selected by the stable
-archived tab ID); otherwise it returns a resumable ambiguity blocker.
-
-For review packets, `includeChangedFiles: false` omits changed-file source
-snapshots only. The safety inventory and safe diff evidence remain, and the same
-hard-secret, generated, binary, oversized, symlink, and gitlink exclusions are
-still applied.
-
-Secret-path policy excludes repository-root `credentials/` and `secrets/`
-stores, provider/browser store ancestry, and hard secret filenames. Nested
-application source directories with credential- or secret-themed names remain
-reviewable; store ancestry and hard filename rules take precedence over a
-fixture-looking suffix such as `tests/fixtures/auth.json`.
-
-## Validation
-
-Run deterministic gates:
-
-```bash
-npm test
-npm run build
-npm run bundle
-npm run bundle:backend
-npm run contract:validate
-npm run docs:drift
-npm run parity:fixtures
-npm run parity:suite
-```
+Current scope is Chat, TypeScript, and English visible UI. No Python client, backend service, hidden API, Work mode, history search, locale registry, or legacy command layer is included.

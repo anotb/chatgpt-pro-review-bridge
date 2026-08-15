@@ -1,115 +1,46 @@
----
-title: Release Process
-date: 2026-08-13
-type: runbook
-status: stable
----
+# Release process
 
-# Release Process
-
-ChatGPT Pro Review Bridge ships as a tagged Codex marketplace plugin, an npm
-package, and a GitHub release containing the Python wheel and source archive.
-All distributions use one version.
+Releases are made from reviewed commits on `main`. Do not tag feature work before the local and visible-session checks are complete.
 
 ## Prepare
 
-1. Update the version in the root, Node, Python, and both plugin manifests.
-2. Rebuild the bundled plugin runtime:
-
-   ```bash
-   npm --prefix packages/node ci
-   npm run plugin:build
-   npm run plugin:check
-   npm run plugin:validate
-   ```
-
-3. Run the deterministic release gates:
-
-   ```bash
-   npm run release:check-version
-   npm run release:check-names
-   npm run node:test
-   npm run node:build
-   npm run node:bundle
-   npm run node:contracts
-   npm run python:test
-   npm run python:compile
-   npm run python:pyright
-   npm run python:ordinary-shell
-   npm run release:check-node-pack
-   npm run release:build-python
-   npm run release:check-python
-   npm run release:smoke-source
-   ```
-
-4. Confirm `.codex/`, live review archives, conversation URLs, and local reports
-   are not part of the release commit.
-
-## Live qualification
-
-Run the installed plugin from a fresh Codex task. Qualify a plain AskPro
-question, a repository-backed request, a bounded resume, and a same-thread
-follow-up. Pro requests can run for more than an hour; resume the same archive
-instead of resending the prompt.
-
-For the bounded resume, confirm the invocation remains on the archived
-canonical conversation and stable browser tab through polling and final
-capture, with no duplicate visible user turn. Include deterministic regressions
-for provisional `WEB:` to canonical recovery, multiple prompt-identical
-candidates, current authenticated/logged-out DOM fixtures, terminal provenance
-write failure, packet exclusions with source snapshots disabled, and delayed
-Python backend exit diagnostics.
-
-Use a fast Chat setting for repetitive artifact and interruption checks when
-the behavior does not depend on Pro. Record the exact installed plugin version
-and archive used by the live qualification.
-
-## Distribution
-
-The Node SDK is published as `chatgpt-pro-review-bridge` on npm. The Python
-wheel and source archive are attached to the GitHub release; the Python import
-remains `codex_chatgpt_control` for compatibility.
-
-npm publishing is enabled by setting the repository variable
-`PUBLISH_NPM=true` after its trusted publisher is configured for:
-
-- repository: `anotb/chatgpt-pro-review-bridge`
-- workflow: `.github/workflows/release.yml`
-- environment: `release`
-- package: `chatgpt-pro-review-bridge`
-
-The tag workflow builds and checks both SDKs, attaches the Python distributions
-and npm tarball to the GitHub release, publishes npm, and verifies the npm
-package together with the release-equivalent Python wheel.
-
-## Tag and verify
-
-Create a tag that exactly matches the package version:
+1. Choose the version intentionally. While this project remains a public `0.x` alpha, a breaking redesign increments the minor version.
+2. Update the repository package, Node package, and plugin base version together. Plugin build metadata may retain its Codex build date.
+3. Move the changelog entry from `Unreleased` to the chosen version and date, and add concise user-facing notes under `docs/releases/<version>.md`.
+4. Build the committed plugin runtime and run every local gate:
 
 ```bash
-VERSION="<version>"
-git tag "v${VERSION}"
-git push origin "v${VERSION}"
+npm test
+npm run build
+npm run bundle
+npm run plugin:build
+npm run plugin:check
+npm run plugin:validate
+npm run pack:check
 ```
 
-Replace `<version>` with the already-validated package version before running
-the commands; do not copy an older release number from this runbook.
+5. Verify one TypeScript package, one public bundle, one plugin, and one skill; no `.codex/` state, live content, local paths, credentials, or browser state may enter the commit or package.
+6. Qualify Pro, another visible Power label, same-thread follow-up, long polling, file upload, tool use, generated file, generated image, recovery, and duplicate-Send prevention in real visible sessions.
 
-The release workflow reruns the complete preflight and clean-package smoke on
-macOS, then creates the stable GitHub release. When npm publishing is enabled,
-verify the published package too:
+## Commit and tag
+
+Commit the complete reviewed release, push `main`, and wait for the `TypeScript CI` workflow to pass. Then create one annotated tag on that exact commit:
 
 ```bash
-npm view chatgpt-pro-review-bridge version dist-tags --json
-npm run release:verify-published
+git tag -a v0.8.0 -m "ChatGPT Bridge 0.8.0"
+git push origin v0.8.0
 ```
 
-Finally, install the tag as a user would:
+Do not move or reuse a release tag. A correction after tagging gets a new version.
 
-```bash
-VERSION="<version>"
-codex plugin marketplace add anotb/chatgpt-pro-review-bridge --ref "v${VERSION}"
-codex plugin add chatgpt-pro-review@chatgpt-pro-review-bridge
-```
+## Automation
 
-Start a new Codex task and confirm the installed skill is discoverable.
+Pushing the tag starts `.github/workflows/release.yml`. The workflow:
+
+1. verifies the tag against the repository, npm package, and plugin base versions;
+2. reruns the test, build, bundle, plugin, and package gates;
+3. builds the npm tarball and SHA-256 checksum;
+4. publishes the package with npm trusted publishing when `PUBLISH_NPM=true`;
+5. creates the GitHub release only after every enabled stage succeeds.
+
+The workflow never creates or pushes the tag. That remains the deliberate release action after `main` passes CI.

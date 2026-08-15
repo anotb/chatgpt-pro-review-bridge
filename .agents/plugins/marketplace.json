@@ -1,26 +1,14 @@
 {
-  "name": "chatgpt-pro-review-bridge",
+  "name": "chatgpt-bridge",
   "interface": {
-    "displayName": "ChatGPT Pro Review Bridge"
+    "displayName": "ChatGPT Bridge"
   },
   "plugins": [
     {
-      "name": "codex-chatgpt-control",
+      "name": "chatgpt-bridge",
       "source": {
         "source": "local",
-        "path": "./plugins/codex-chatgpt-control"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "Developer Tools"
-    },
-    {
-      "name": "chatgpt-pro-review",
-      "source": {
-        "source": "local",
-        "path": "./plugins/chatgpt-pro-review"
+        "path": "./plugins/chatgpt-bridge"
       },
       "policy": {
         "installation": "AVAILABLE",

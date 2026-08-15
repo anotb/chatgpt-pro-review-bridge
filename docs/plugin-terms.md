@@ -1,16 +1,7 @@
----
-title: Plugin Terms
-date: 2026-06-08
-type: reference
-status: draft
----
+# Plugin terms
 
-# Plugin Terms
+ChatGPT Bridge is unofficial open-source software and is not affiliated with, endorsed by, or sponsored by OpenAI.
 
-`codex-chatgpt-control` is an unofficial open-source plugin and SDK for user-directed visible ChatGPT web workflows from Codex.
-
-It is not affiliated with, endorsed by, or sponsored by OpenAI. Use of ChatGPT, Codex, Chrome, and related browser bridges remains subject to the applicable product terms and account permissions for those products.
-
-The plugin must not be used to bypass login, captcha, rate limits, account confirmations, product permissions, file permissions, or user consent. It must not be used to access hidden endpoints, scrape private data, extract credentials, or automate externally visible, paid, destructive, or account-level actions without explicit user confirmation.
+Use remains subject to the applicable terms and permissions for Codex, ChatGPT, the browser host, and the user’s account. Do not use the plugin to bypass login, challenges, rate limits, confirmations, file permissions, product controls, or user consent; access hidden endpoints or credentials; scrape private data; or perform paid, destructive, externally visible, or account-level actions without explicit authorization.
 
 The software is provided under the repository license.

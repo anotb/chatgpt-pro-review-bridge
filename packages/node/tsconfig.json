@@ -6,12 +6,11 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
-    "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
     "declaration": true,
     "outDir": "dist",
-    "rootDir": "."
+    "rootDir": "src"
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts"]
 }
