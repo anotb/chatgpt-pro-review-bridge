@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.2 - 2026-08-20
+
+- Fixed exact verification of long multiline prompts in ChatGPT's contenteditable composer.
+- Reads ordinary prompt text from the live paragraph structure so harmless detached-clone line-break changes do not block Send.
+- Keeps clone-based inline tool-pill removal and the existing exact attachment, tool, mode, turn, journal, and at-most-one Send checks.
+
 ## 0.8.1 - 2026-08-20
 
 - Fixed mode discovery for the current ChatGPT composer, where the attachment button and Power button are both visible menus.
