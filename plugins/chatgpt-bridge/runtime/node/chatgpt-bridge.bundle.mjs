@@ -2356,7 +2356,10 @@ function integerAttribute(value) {
 var COMPOSER_SELECTOR = "#prompt-textarea";
 var SEND_SELECTOR = "button[data-testid='send-button']";
 var POWER_CONTROL_SELECTOR2 = "[role='menuitem'][aria-label='Power']";
-var POWER_OPENER_SELECTOR = "form:has(#prompt-textarea) button[aria-haspopup='menu']";
+var POWER_OPENER_SELECTOR = [
+  "form:has(#prompt-textarea)",
+  "button[aria-haspopup='menu']:has([data-animated-slider-trigger='true'])"
+].join(" ");
 var NEW_PAGE_READY_TIMEOUT_MS = 1e4;
 var ChatGPTBrowserPort = class {
   #env;
@@ -2502,7 +2505,12 @@ var ChatGPTBrowserPort = class {
     try {
       await openPowerMenu(page);
       this.#powerTargets ??= new ChatGPTPowerTargetPort(page);
-      return await this.#powerTargets.inspectTargets();
+      const inspected = await this.#powerTargets.inspectTargets();
+      const openerLabel = await readComposerPowerLabel(page);
+      if (inspected.active.power !== openerLabel) {
+        throw new Error("Visible Power label does not match its active slider mode.");
+      }
+      return inspected;
     } finally {
       try {
         await closePowerMenu(page);
@@ -3218,7 +3226,7 @@ async function waitForHandleUserTurn(page, handle, timeoutMs, pollMs) {
 }
 async function openPowerMenu(page) {
   const opener = await uniqueVisible2(page, POWER_OPENER_SELECTOR, "ChatGPT Power opener");
-  if (await powerMenuExpanded(opener) && await visibleCount(page.locator?.(POWER_CONTROL_SELECTOR2)) === 1) return;
+  if ((await readPowerOpenerState(opener)).expanded && await visibleCount(page.locator?.(POWER_CONTROL_SELECTOR2)) === 1) return;
   let clickError;
   try {
     await activateExactPointerControl(page, opener, "ChatGPT Power opener");
@@ -3227,7 +3235,7 @@ async function openPowerMenu(page) {
   }
   const deadline = Date.now() + 1e4;
   while (Date.now() < deadline) {
-    if (await powerMenuExpanded(opener) && await visibleCount(page.locator?.(POWER_CONTROL_SELECTOR2)) === 1) return;
+    if ((await readPowerOpenerState(opener)).expanded && await visibleCount(page.locator?.(POWER_CONTROL_SELECTOR2)) === 1) return;
     await pause2(page, 50);
   }
   if (clickError !== void 0) throw clickError;
@@ -3235,7 +3243,7 @@ async function openPowerMenu(page) {
 }
 async function closePowerMenu(page) {
   const opener = await uniqueVisible2(page, POWER_OPENER_SELECTOR, "ChatGPT Power opener");
-  if (!await powerMenuExpanded(opener)) return;
+  if (!(await readPowerOpenerState(opener)).expanded) return;
   let closeError;
   try {
     await activateExactPointerControl(page, opener, "ChatGPT Power opener");
@@ -3244,7 +3252,7 @@ async function closePowerMenu(page) {
   }
   const deadline = Date.now() + 3e3;
   while (Date.now() < deadline) {
-    if (!await powerMenuExpanded(opener)) return;
+    if (!(await readPowerOpenerState(opener)).expanded) return;
     await pause2(page, 50);
   }
   if (closeError !== void 0) throw closeError;
@@ -3472,18 +3480,29 @@ async function bringPageToFront(cdp) {
   } catch {
   }
 }
-async function powerMenuExpanded(opener) {
+async function readPowerOpenerState(opener) {
   if (opener.evaluate === void 0) {
     throw new Error("ChatGPT Power opener state cannot be read.");
   }
-  return opener.evaluate((element) => element.getAttribute("aria-expanded") === "true");
+  const state = await opener.evaluate((element) => ({
+    tagName: element.tagName,
+    role: element.getAttribute("role"),
+    hasPopup: element.getAttribute("aria-haspopup"),
+    expanded: element.getAttribute("aria-expanded"),
+    hasSliderTrigger: element.querySelector("[data-animated-slider-trigger='true']") !== null,
+    label: (element.innerText ?? element.textContent ?? "").replace(/\s+/g, " ").trim()
+  }));
+  if (state.tagName !== "BUTTON" || state.role !== null && state.role !== "button" || state.hasPopup !== "menu" || state.expanded !== "true" && state.expanded !== "false" || !state.hasSliderTrigger || state.label.length === 0) {
+    throw new Error("ChatGPT Power opener does not expose an exact button state and mode label.");
+  }
+  return {
+    expanded: state.expanded === "true",
+    label: state.label
+  };
 }
 async function readComposerPowerLabel(page) {
   const opener = await uniqueVisible2(page, POWER_OPENER_SELECTOR, "ChatGPT Power opener");
-  if (opener.evaluate === void 0) throw new Error("Power selection cannot be read.");
-  return opener.evaluate(
-    (element) => (element.innerText ?? element.textContent ?? "").replace(/\s+/g, " ").trim()
-  );
+  return (await readPowerOpenerState(opener)).label;
 }
 async function uniqueVisible2(page, selector, label, timeoutMs = 1e4) {
   const found = page.locator?.(selector);

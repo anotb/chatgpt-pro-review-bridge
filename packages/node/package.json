@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-pro-review-bridge",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Lean TypeScript bridge for user-directed workflows in visible ChatGPT sessions.",
   "type": "module",
   "license": "MIT",

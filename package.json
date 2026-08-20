@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-bridge-repo",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "Lean visible ChatGPT bridge and Codex plugin.",
   "type": "module",

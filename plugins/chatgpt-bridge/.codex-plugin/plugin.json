@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-bridge",
-  "version": "0.8.0+codex.20260814",
+  "version": "0.8.1+codex.20260820",
   "description": "Submit caller-defined prompts and files to an exact visible ChatGPT setting and bring complete outputs back without duplicate sends.",
   "author": {
     "name": "anotb",

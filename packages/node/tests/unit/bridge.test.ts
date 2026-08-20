@@ -90,6 +90,26 @@ describe("lean ChatGPT bridge", () => {
     await expect(readdir(stateDir)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("does not journal, compose, or Send when visible Power is genuinely ambiguous", async () => {
+    const stateDir = await temporaryStateDir();
+    const port = fakePort();
+    port.onInspect = async () => {
+      throw Object.assign(new Error("Visible Power control is ambiguous."), {
+        code: "power_ambiguous"
+      });
+    };
+
+    await expect(createTestBridge(port, stateDir).submit({
+      operationId: "ambiguous-power",
+      prompt: "Do not send this.",
+      selection: { power: "Pro" }
+    })).rejects.toMatchObject({ code: "power_ambiguous" });
+
+    expect(port.events).toEqual(["bind:new", "targets:inspect"]);
+    expect(port.submitCalls).toBe(0);
+    await expect(readdir(stateDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("leaves an exact pre-handoff composer conflict outside the journal", async () => {
     const stateDir = await temporaryStateDir();
     const port = fakePort();
@@ -493,6 +513,7 @@ type FakePort = BridgePort & {
   onSubmit?: () => Promise<void>;
   onPreflight?: () => Promise<void>;
   onTool?: (label: string) => Promise<void>;
+  onInspect?: () => Promise<void>;
   onAttach?: () => Promise<void>;
   onPresentation?: () => Promise<void>;
   observations: BridgeObservation[];
@@ -530,7 +551,11 @@ function fakePort(): FakePort {
       return binding();
     },
     async bindHandle() { events.push("bind:handle"); return binding(); },
-    async inspectTargets() { events.push("targets:inspect"); return targets; },
+    async inspectTargets() {
+      events.push("targets:inspect");
+      await port.onInspect?.();
+      return targets;
+    },
     async selectTarget(axis, label) {
       events.push(`target:${axis}=${label}`);
       targets = {

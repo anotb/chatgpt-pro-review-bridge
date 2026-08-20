@@ -208,6 +208,44 @@ describe("ChatGPTBrowserPort", () => {
     expect(page.powerSliderPresses).toBe(0);
   });
 
+  it("targets Power when the attachment menu button is also visible", async () => {
+    const page = new FakePage("https://chatgpt.com/");
+    page.attachmentMenuVisible = true;
+    page.powerLabel = "Extra High";
+    const port = new ChatGPTBrowserPort({
+      browser: { tabs: { create: async () => page } }
+    });
+
+    await expect(port.inspectTargets()).resolves.toMatchObject({
+      active: { power: "Extra High" },
+      options: { power: [{ label: "Extra High", selected: true }] }
+    });
+
+    expect(page.powerMenuVisible).toBe(false);
+    expect(page.powerOpenerClicks).toBe(2);
+  });
+
+  it("fails before toggling when the semantic Power opener is genuinely ambiguous", async () => {
+    const page = new FakePage("https://chatgpt.com/");
+    page.attachmentMenuVisible = true;
+    page.powerOpenerCount = 2;
+    const port = new ChatGPTBrowserPort({
+      browser: { tabs: { create: async () => page } }
+    });
+    let now = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now += 11_000);
+
+    try {
+      await expect(port.inspectTargets()).rejects.toThrow(
+        "ChatGPT Power opener is not uniquely visible."
+      );
+    } finally {
+      clock.mockRestore();
+    }
+
+    expect(page.powerOpenerClicks).toBe(0);
+  });
+
   it("uses one scoped pointer activation per Power toggle when CDP is available", async () => {
     const page = new FakePage("https://chatgpt.com/");
     page.cdpSupported = true;
@@ -394,6 +432,35 @@ describe("ChatGPTBrowserPort", () => {
     expect(page.cdpCommands).toEqual([
       "Runtime.evaluate:"
     ]);
+  });
+
+  it("discovers Power beside attachments and still activates Send exactly once", async () => {
+    const prompt = "coexisting composer menus";
+    const page = new FakePage("https://chatgpt.com/");
+    page.attachmentMenuVisible = true;
+    page.cdpSupported = true;
+    page.renderedOnSend = prompt;
+    page.onSend = () => { page.currentUrl = "https://chatgpt.com/c/thread-menu-coexistence"; };
+    const port = new ChatGPTBrowserPort({
+      browser: { tabs: { create: async () => page } }
+    }, { acknowledgementTimeoutMs: 50, pollMs: 1 });
+
+    await expect(port.inspectTargets()).resolves.toMatchObject({ active: { power: "Instant" } });
+    await port.bindThread("new");
+    await port.selectTarget("power", "Instant");
+    await port.composePrompt(prompt);
+    await expect(port.submitPrompt({
+      prompt,
+      promptSha256: sha256(prompt),
+      userTurnBefore: 0,
+      assistantTurnBefore: 0
+    })).resolves.toMatchObject({
+      confirmed: true,
+      conversationId: "thread-menu-coexistence"
+    });
+
+    expect(page.sendClicks).toBe(1);
+    expect(page.powerMenuVisible).toBe(false);
   });
 
   it("reconciles an activation that acts and then throws without a second activation", async () => {
@@ -756,8 +823,10 @@ class FakePage implements BrowserPage {
   assistantTurnIds: Array<string | null> = [];
   composer = "";
   attachmentNames: string[] = [];
+  attachmentMenuVisible = false;
   activeToolLabels: string[] = [];
   powerLabel = "Instant";
+  powerOpenerCount = 1;
   renderedOnSend: string | undefined;
   responseActions = false;
   generating = false;
@@ -882,9 +951,20 @@ class FakePage implements BrowserPage {
         press: async () => { this.powerSliderPresses += 1; }
       };
     }
-    if (selector === "form:has(#prompt-textarea) button[aria-haspopup='menu']") {
+    if (selector === "form:has(#prompt-textarea) button[aria-haspopup='menu']"
+      && this.attachmentMenuVisible) {
       return {
-        count: async () => 1,
+        count: async () => 2,
+        isVisible: async () => true,
+        filter() { return this; }
+      };
+    }
+    if (selector === [
+      "form:has(#prompt-textarea)",
+      "button[aria-haspopup='menu']:has([data-animated-slider-trigger='true'])"
+    ].join(" ")) {
+      return {
+        count: async () => this.powerOpenerCount,
         isVisible: async () => true,
         filter() { return this; },
         click: async () => {
@@ -902,11 +982,18 @@ class FakePage implements BrowserPage {
           }
         },
         evaluate: async <T>(fn: (element: Element) => T) =>
-          String(fn).includes("aria-expanded")
-            ? (this.powerMenuVisible as T)
+          String(fn).includes("hasSliderTrigger")
+            ? ({
+                tagName: "BUTTON",
+                role: null,
+                hasPopup: "menu",
+                expanded: this.powerMenuVisible ? "true" : "false",
+                hasSliderTrigger: true,
+                label: this.powerLabel
+              } as T)
             : String(fn).includes("getBoundingClientRect")
               ? ({ x: 100, y: 100, width: 80, height: 36 } as T)
-              : ("Instant" as T)
+              : (this.powerLabel as T)
       };
     }
     if (selector === 'main [data-message-author-role="assistant"]') {
@@ -1014,7 +1101,7 @@ class FakePage implements BrowserPage {
           return { min: "0", max: "0", now: "0" } as T;
         }
         if (source.includes("aria-describedby")) {
-          return [{ text: "Instant, 1 of 1.", announcement: true }] as T;
+          return [{ text: `${this.powerLabel}, 1 of 1.`, announcement: true }] as T;
         }
         throw new Error("Unexpected Power evaluation");
       }
