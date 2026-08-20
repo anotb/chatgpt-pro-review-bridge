@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1
+
+- Fixed current ChatGPT Power discovery when the attachment and Power controls coexist as composer menus.
+- Verifies the unique Power trigger's visible label against the dynamically discovered active slider mode.
+- Preserves exact composer ownership, durable recovery, and at-most-one Send activation.
+
 ## 0.8.0
 
 - Replaced the legacy public surface with `createChatGPTBridge`, `submit`, `collect`, `run`, and `inspectTargets`.

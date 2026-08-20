@@ -27,8 +27,9 @@ npm run pack:check
 Commit the complete reviewed release, push `main`, and wait for the `TypeScript CI` workflow to pass. Then create one annotated tag on that exact commit:
 
 ```bash
-git tag -a v0.8.0 -m "ChatGPT Bridge 0.8.0"
-git push origin v0.8.0
+VERSION=x.y.z
+git tag -a "v${VERSION}" -m "ChatGPT Bridge ${VERSION}"
+git push origin "v${VERSION}"
 ```
 
 Do not move or reuse a release tag. A correction after tagging gets a new version.

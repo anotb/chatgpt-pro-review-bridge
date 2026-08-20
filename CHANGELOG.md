@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 - 2026-08-20
+
+- Fixed mode discovery for the current ChatGPT composer, where the attachment button and Power button are both visible menus.
+- Identifies Power by its slider trigger, then verifies its visible label against the modes discovered from the live Power control.
+- Keeps genuine ambiguity, operation recovery, and at-most-one Send behavior unchanged.
+
 ## 0.8.0 - 2026-08-14
 
 This is a breaking redesign of the bridge around one job: send a caller-chosen prompt and files to a visible ChatGPT mode, then bring the complete result back.
