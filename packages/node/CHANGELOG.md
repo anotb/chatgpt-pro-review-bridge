@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.2
+
+- Fixed exact multiline prompt verification against ChatGPT's contenteditable paragraph structure.
+- Reads zero-pill prompts from the live editor and retains clone-based inline tool-pill stripping.
+- Preserves exact envelope ownership and at-most-one Send activation.
+
 ## 0.8.1
 
 - Fixed current ChatGPT Power discovery when the attachment and Power controls coexist as composer menus.

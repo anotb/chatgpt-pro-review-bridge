@@ -5,6 +5,7 @@ import {
   ChatGPTBrowserPort,
   createBrowserBridgePort,
   promptPresentationSha256s,
+  readExactComposerPrompt,
   renderedPromptMatches
 } from "../../src/bridge/browser-port.js";
 import type { BrowserLocator, BrowserPage } from "../../src/bridge/browser-runtime.js";
@@ -99,6 +100,101 @@ describe("ChatGPTBrowserPort", () => {
     await expect(port.submissionPresentationSha256s("exact prepared prompt"))
       .resolves.toEqual([sha256("exact\0exact prepared prompt"), sha256("show-more\0exact prepared prompt")]);
     expect(page.sendClicks).toBe(0);
+  });
+
+  it("reads live multiline contenteditable text when no inline tool pill exists", () => {
+    let cloneCalls = 0;
+    const first = "a".repeat(2_600);
+    const second = "b".repeat(2_656);
+    const prompt = `${first}\n\n${second}`;
+    const paragraph = (text: string, empty = false) => ({
+      nodeType: 1,
+      tagName: "P",
+      classList: { contains: () => false },
+      getAttribute: (name: string) => name === "data-empty-paragraph" && empty
+        ? "true"
+        : null,
+      childNodes: empty
+        ? [{
+            nodeType: 1,
+            tagName: "BR",
+            classList: { contains: () => true },
+            childNodes: []
+          }]
+        : [{ nodeType: 3, textContent: text }]
+    });
+    const editor = {
+      tagName: "DIV",
+      children: [paragraph(first), paragraph("", true), paragraph(second)],
+      innerText: `${first}\n\n\n\n\n${second}`,
+      textContent: prompt.replaceAll("\n", ""),
+      querySelectorAll: () => [],
+      cloneNode: () => {
+        cloneCalls += 1;
+        throw new Error("plain prompts must not be cloned");
+      }
+    } as unknown as Element;
+
+    expect(prompt).toHaveLength(5_258);
+    expect(readExactComposerPrompt(editor)).toBe(prompt);
+    expect(cloneCalls).toBe(0);
+  });
+
+  it("keeps clone-based inline tool-pill stripping", () => {
+    const cursorTarget = { matches: () => true, remove: vi.fn() };
+    const nextText = { nodeType: 3, textContent: " exact tool prompt" };
+    const pill = {
+      nextSibling: nextText,
+      previousElementSibling: cursorTarget,
+      remove: vi.fn()
+    };
+    const remainingCursor = { remove: vi.fn() };
+    const clone = {
+      children: [],
+      innerText: "exact tool prompt",
+      textContent: "exact tool prompt",
+      querySelectorAll: (selector: string) => selector.includes("data-keyword")
+        ? [pill]
+        : [remainingCursor]
+    };
+    const editor = {
+      tagName: "DIV",
+      children: [],
+      innerText: "Web search exact tool prompt",
+      textContent: "Web search exact tool prompt",
+      querySelectorAll: () => [{}],
+      cloneNode: () => clone
+    } as unknown as Element;
+
+    expect(readExactComposerPrompt(editor)).toBe("exact tool prompt");
+    expect(nextText.textContent).toBe("exact tool prompt");
+    expect(cursorTarget.remove).toHaveBeenCalledOnce();
+    expect(pill.remove).toHaveBeenCalledOnce();
+    expect(remainingCursor.remove).toHaveBeenCalledOnce();
+  });
+
+  it("submits one 5,258-character multiline prompt without cloning the plain editor", async () => {
+    const page = new FakePage("https://chatgpt.com/");
+    page.cdpSupported = true;
+    page.requireLiveMultilinePromptRead = true;
+    const port = new ChatGPTBrowserPort({ page });
+    const prompt = `${"a".repeat(2_600)}\n\n${"b".repeat(2_656)}`;
+    page.renderedOnSend = prompt;
+    page.onSend = () => { page.currentUrl = "https://chatgpt.com/c/thread-long-multiline"; };
+    await port.bindThread("new");
+    await port.composePrompt(prompt);
+
+    await expect(port.submissionPresentationSha256s(prompt)).resolves.toHaveLength(3);
+    await expect(port.submitPrompt({
+      prompt,
+      promptSha256: sha256(prompt),
+      userTurnBefore: 0,
+      assistantTurnBefore: 0
+    })).resolves.toMatchObject({
+      confirmed: true,
+      conversationId: "thread-long-multiline"
+    });
+    expect(page.sendClicks).toBe(1);
   });
 
   it("refuses an unrequested staged attachment during prepared-envelope verification", async () => {
@@ -839,6 +935,7 @@ class FakePage implements BrowserPage {
   cdpSupported = false;
   cdpCommands: string[] = [];
   powerSliderPresses = 0;
+  requireLiveMultilinePromptRead = false;
   throwBeforePowerClose = false;
   throwBeforePowerOpen = false;
   throwAfterPowerClose = false;
@@ -891,8 +988,12 @@ class FakePage implements BrowserPage {
               lastUserTurnId?: string;
               lastAssistantTurnId?: string;
             };
+            const preservesPlainMultilineBlocks = !this.requireLiveMultilinePromptRead
+              || (expression.includes("inlineSelectionPills.length === 0")
+                && expression.includes("readContentEditableText(editor)"));
             const matches = expected.url === this.currentUrl
               && expected.prompt === this.composer
+              && preservesPlainMultilineBlocks
               && JSON.stringify(expected.attachmentNames) === JSON.stringify(this.attachmentNames)
               && JSON.stringify([...expected.toolLabels].sort()) === JSON.stringify([...this.activeToolLabels].sort())
               && (expected.power === undefined || expected.power === this.powerLabel)

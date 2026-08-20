@@ -29,10 +29,10 @@ The easiest option is to give this repository to Codex or another assistant that
 
 > Install the latest tagged release of https://github.com/anotb/chatgpt-bridge as a Codex plugin, then verify that the ChatGPT Bridge skill is available in a new task.
 
-For a manual install, pin the marketplace to `v0.8.1`, then install the plugin:
+For a manual install, pin the marketplace to `v0.8.2`, then install the plugin:
 
 ```text
-codex plugin marketplace add anotb/chatgpt-bridge --ref v0.8.1
+codex plugin marketplace add anotb/chatgpt-bridge --ref v0.8.2
 codex plugin add chatgpt-bridge@chatgpt-bridge
 ```
 

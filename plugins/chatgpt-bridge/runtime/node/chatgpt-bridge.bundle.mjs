@@ -3322,6 +3322,7 @@ async function evaluateComposerEnvelope(page, expected) {
 function composerEnvelopeExpression(expected) {
   return `(() => {
   const expected = ${JSON.stringify(expected)};
+  const readExactComposerPrompt = ${readExactComposerPrompt.toString()};
   if (location.origin !== ${JSON.stringify(CHATGPT_ORIGIN)} || location.href !== expected.url) {
     throw new Error("Controlled ChatGPT route changed before Send.");
   }
@@ -3358,24 +3359,7 @@ function composerEnvelopeExpression(expected) {
   const editors = Array.from(form.querySelectorAll(${JSON.stringify(COMPOSER_SELECTOR)})).filter(visible);
   if (editors.length !== 1) throw new Error("Chat prompt editor is not unique.");
   const editor = editors[0];
-  const tag = editor.tagName.toLowerCase();
-  const promptEditor = editor.cloneNode(true);
-  for (const pill of Array.from(promptEditor.querySelectorAll(
-    "[data-inline-selection-pill][data-keyword]"
-  ))) {
-    const next = pill.nextSibling;
-    if (next && next.nodeType === Node.TEXT_NODE && next.textContent?.startsWith(" ")) {
-      next.textContent = next.textContent.slice(1);
-    }
-    pill.previousElementSibling?.matches("[data-inline-selection-pill-cursor-target]")
-      && pill.previousElementSibling.remove();
-    pill.remove();
-  }
-  promptEditor.querySelectorAll("[data-inline-selection-pill-cursor-target]")
-    .forEach(cursor => cursor.remove());
-  const prompt = (tag === "textarea" || tag === "input") && typeof editor.value === "string"
-    ? editor.value
-    : promptEditor.innerText || promptEditor.textContent || "";
+  const prompt = readExactComposerPrompt(editor);
   if (prompt !== expected.prompt) throw new Error("Exact prompt changed before Send.");
 
   const attachmentCards = Array.from(form.querySelectorAll(${JSON.stringify(ATTACHMENT_NAME_SELECTOR)}));
@@ -3469,6 +3453,48 @@ function composerEnvelopeExpression(expected) {
   return true;
 })()`;
 }
+function readExactComposerPrompt(editor) {
+  const tag = editor.tagName.toLowerCase();
+  const readContentEditableText = (root) => {
+    const blocks = Array.from(root.children);
+    if (blocks.length === 0 || blocks.some((block) => block.tagName !== "P")) {
+      return root.innerText || root.textContent || "";
+    }
+    const readNode = (node) => {
+      if (node.nodeType === 3) return node.textContent || "";
+      if (node.nodeType !== 1) return "";
+      const element = node;
+      if (element.tagName === "BR") {
+        return element.classList.contains("ProseMirror-trailingBreak") ? "" : "\n";
+      }
+      return Array.from(element.childNodes).map(readNode).join("");
+    };
+    return blocks.map((block) => block.getAttribute("data-empty-paragraph") === "true" ? "" : readNode(block)).join("\n");
+  };
+  const inlineSelectionPills = Array.from(editor.querySelectorAll(
+    "[data-inline-selection-pill][data-keyword]"
+  ));
+  if (inlineSelectionPills.length === 0) {
+    const value = editor.value;
+    return (tag === "textarea" || tag === "input") && typeof value === "string" ? value : readContentEditableText(editor);
+  }
+  const promptEditor = editor.cloneNode(true);
+  for (const pill of Array.from(promptEditor.querySelectorAll(
+    "[data-inline-selection-pill][data-keyword]"
+  ))) {
+    const next = pill.nextSibling;
+    if (next?.nodeType === 3 && next.textContent?.startsWith(" ")) {
+      next.textContent = next.textContent.slice(1);
+    }
+    const cursorTarget = pill.previousElementSibling;
+    if (cursorTarget?.matches("[data-inline-selection-pill-cursor-target]")) {
+      cursorTarget.remove();
+    }
+    pill.remove();
+  }
+  promptEditor.querySelectorAll("[data-inline-selection-pill-cursor-target]").forEach((cursor) => cursor.remove());
+  return readContentEditableText(promptEditor);
+}
 function cdpBooleanResult(value) {
   if (typeof value !== "object" || value === null || !("result" in value)) return false;
   const result = value.result;
@@ -3517,14 +3543,7 @@ async function uniqueVisible2(page, selector, label, timeoutMs = 1e4) {
 }
 async function readEditableText(locator) {
   if (locator.evaluate === void 0) throw new Error("Editable control cannot be read.");
-  return locator.evaluate((element) => {
-    const editable = element;
-    const tag = element.tagName.toLowerCase();
-    if ((tag === "textarea" || tag === "input") && typeof editable.value === "string") {
-      return editable.value;
-    }
-    return editable.innerText ?? element.textContent ?? "";
-  });
+  return locator.evaluate(readExactComposerPrompt);
 }
 async function visibleCount(locator) {
   if (locator?.count === void 0) return 0;
